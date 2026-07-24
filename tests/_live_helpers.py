@@ -92,6 +92,7 @@ class FakeLLM(ModelGateway):
             "followup_queries": lambda p: {"queries": []},
             "extract_claims": self._extract,
             "compile_reality": self._reality,
+            "compile_roster": self._roster,
             "compile_uncertainty": self._frame,
             "compile_world": self._actors,
             "actor_decision": self._decision,
@@ -260,6 +261,16 @@ class FakeLLM(ModelGateway):
                     "evidence_claim_ids": ids[:1],
                 },
             ],
+        }
+
+    def _roster(self, prompt: str) -> dict:
+        ids = _ID_RE.findall(prompt)
+        return {
+            "members": [
+                _m("ada_lovelace", "Ada Lovelace", "Chair", "adopt", ids, chair=True),
+                _m("ben_carter", "Ben Carter", "Member", "adopt", ids),
+                _m("cara_diaz", "Cara Diaz", "Member", "defer", ids),
+            ]
         }
 
     def _frame(self, prompt: str) -> dict:
