@@ -2,27 +2,39 @@
 
     forecast(question, as_of, horizon, config) -> ForecastResult
 
-The full causal route is readable and direct:
+The full causal route is readable and direct, and there is exactly one of it:
 
-    research -> evidence -> contract -> integrity -> compile
-             -> initialize worlds -> event runtime -> terminal evaluator
-             -> trajectory aggregation -> report
+    question
+      -> live research            (cited evidence store built from the question alone)
+      -> verified evidence        (fetch + verify + lineage + cutoff)
+      -> candidate inventory      (what verified reality contains)
+      -> LLM-compiled WorldSpec   (entities, actions, process graph, terminal)
+      -> reality + coverage gates (assessed against the exact WorldSpec to be simulated)
+      -> targeted research repair (when coverage finds a material item missing)
+      -> persistent possible worlds
+      -> event-driven persistent actors
+      -> validated intentions
+      -> universal world effects
+      -> declarative terminal evaluation
+      -> weighted trajectory aggregation
 
-There is exactly one normal path. No phase adapters, no profiles, no fallbacks.
+No phase adapters, no profiles, no mechanism families, no fallbacks. The route does
+not branch on the kind of question.
 """
 
 from __future__ import annotations
 
 from datetime import datetime
 
-from .compiler import CompiledWorld, compile_world
+from .compiled import CompiledWorld
 from .config import ForecastConfig
+from .engine import RunResult, run
 from .errors import WorldIntegrityError
 from .models import ForecastResult, ResolutionContract
 from .outcomes import aggregate
 from .research import ResearchBundle
-from .runtime import RunResult, run
 from .tracing import TraceContext
+from .world_compiler import compile_world
 
 
 def _build_contract(
@@ -32,16 +44,13 @@ def _build_contract(
         question=question,
         as_of=as_of,
         horizon=horizon,
-        outcome_space=bundle.frame.options,
-        target_outcome=f"{bundle.terminal_spec.yes_condition}:{bundle.target_option}",
         subject_entity=bundle.subject_entity,
-        decision_body=bundle.decision_body,
         resolution_units=bundle.resolution_units,
-        terminal_predicate=bundle.terminal_spec,
-        decision_rule=bundle.decision_rule,
+        terminal=bundle.spec.terminal,
+        target_outcome=bundle.target_outcome or bundle.spec.terminal.description,
         authoritative_resolution_sources=bundle.authoritative_sources,
         required_reality_facts=bundle.required_reality_facts,
-        expected_voting_seats=bundle.expected_voting_seats,
+        expected_participants=bundle.expected_participants,
     )
 
 
@@ -71,10 +80,13 @@ def _compile_with_repair(
             compiled = compile_world(
                 contract,
                 evidence_view,
-                bundle,
-                config.gateway,
+                bundle.spec,
+                bundle.uncertainties,
+                bundle.world_facts,
+                gateway=config.gateway,
                 seed=config.seed,
                 max_branches=config.max_branches,
+                compile_responses=bundle.compile_responses,
             )
             return bundle, compiled
         except WorldIntegrityError as exc:
@@ -89,14 +101,13 @@ def _compile_with_repair(
     raise AssertionError("unreachable")  # pragma: no cover
 
 
-def _limitations(config: ForecastConfig, run_result: RunResult) -> tuple[str, ...]:
-    lims = [
+def _limitations(config: ForecastConfig) -> tuple[str, ...]:
+    return (
         f"actor behavior produced by gateway {config.gateway.model_id!r}; offline runs use a "
         "deterministic calibrated-behavior reasoner, not a frontier LLM.",
         "branch weights on uncertain future data are epistemic (symmetric-ignorance / "
         "explicit-model); the reported bounds expose that sensitivity.",
-    ]
-    return tuple(lims)
+    )
 
 
 def run_forecast(
@@ -107,7 +118,8 @@ def run_forecast(
     bundle = config.research_backend.research(question, as_of, horizon)
     bundle, compiled = _compile_with_repair(question, as_of, horizon, bundle, config)
     contract = _build_contract(question, as_of, horizon, bundle)
-    run_result = run(compiled, config.gateway, seed=config.seed)
+
+    run_result: RunResult = run(compiled, config.gateway, seed=config.seed)
 
     diagnostics: tuple[tuple[str, str], ...] = ()
     if config.include_reference_class_diagnostic and bundle.reference_class:
@@ -124,7 +136,7 @@ def run_forecast(
         trace_location=trace_location,
         model_call_count=config.gateway.call_count,
         token_usage=config.gateway.total_tokens,
-        limitations=_limitations(config, run_result),
+        limitations=_limitations(config),
         diagnostics=diagnostics,
     )
     ctx = TraceContext(

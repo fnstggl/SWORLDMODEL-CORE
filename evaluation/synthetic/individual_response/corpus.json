@@ -1,48 +1,229 @@
 {
-  "question_key": "synthetic_individual_response",
-  "reality": {
-    "as_of": "2027-05-01T00:00:00+00:00",
-    "horizon": "2027-05-31T23:59:59+00:00",
-    "decision_body": "Office of the Regional Director",
-    "subject_entity": "formal reply to the coalition's funding request",
-    "resolution_units": "a substantive reply action by the Director",
-    "institution_id": "regional_office",
-    "institution_name": "Office of the Regional Director",
-    "decision_rule": {"kind": "plurality", "total_seats": 1, "threshold": 1, "evidence_claim_ids": ["ir_role"]},
-    "expected_voting_seats": 1,
-    "target_option": "respond",
-    "terminal": {"mechanism": "actor_action", "yes_condition": "action_taken", "target_option": "respond", "target_actor": "director", "target_action": "respond", "evidence_claim_ids": ["ir_role"]},
-    "members": [
-      {"actor_id": "director", "name": "Regional Director", "role": "Director", "is_voting_seat": false, "vote_power": 1, "prior_action": "no_response", "authority": ["send_message", "make_commitment", "operational_action"], "evidence_claim_ids": ["ir_role"], "memory_seeds": [{"content": "I received the coalition's funding request but have not yet replied.", "kind": "episodic", "importance": 0.7, "valid_time": "2027-04-20T00:00:00+00:00", "evidence_claim_ids": ["ir_request"]}]}
+ "reality": {
+  "as_of": "2024-01-15T00:00:00+00:00",
+  "horizon": "2024-02-15T12:00:00+00:00",
+  "subject_entity": "the director",
+  "resolution_units": "a reply delivered before the deadline",
+  "target_outcome": "a reply is delivered",
+  "expected_participants": 1,
+  "authoritative_sources": [
+   "roster"
+  ]
+ },
+ "world_spec": {
+  "title": "reply decision",
+  "subject_entity": "the director",
+  "resolution_units": "a reply delivered before the deadline",
+  "entities": [
+   {
+    "entity_id": "director",
+    "name": "DIRECTOR",
+    "kind": "person",
+    "is_actor": true,
+    "role": "participant",
+    "authority": [
+     "reply"
+    ],
+    "evidence_claim_ids": [
+     "r_director"
     ]
-  },
-  "frame": {
-    "options": ["no_response", "respond"],
-    "signals": [{"name": "priority", "baseline": 0.0, "description": "how high the request rises on the Director's agenda", "evidence_claim_ids": ["ir_request"]}],
-    "reaction_rules": [{"trigger_signal": "priority", "direction": "above", "threshold": 0.5, "moves_to_option": "respond", "rationale": "a high-priority request prompts a substantive reply", "evidence_claim_ids": ["ir_request"]}],
-    "guidance_option": null,
-    "guidance_text": "The Director has not committed to replying.",
-    "guidance_evidence_ids": ["ir_request"],
-    "acceptance_tolerance": 0.5,
-    "uncertainty": [
-      {"signal": "priority", "why_unknown": "whether the request rises on the agenda before the deadline is unknown", "reversal_capable": true, "constraining_evidence_ids": ["ir_request"], "outcomes": [
-        {"value": "low", "weight": 0.45, "provenance": "explicit_model_distribution", "source_detail": "request stays low priority", "signal_effects": [["priority", 0.0]], "description": "no reply is prompted"},
-        {"value": "high", "weight": 0.55, "provenance": "explicit_model_distribution", "source_detail": "request becomes high priority", "signal_effects": [["priority", 0.6]], "description": "a reply is prompted"}
-      ]}
+   }
+  ],
+  "actors": [
+   {
+    "entity_id": "director",
+    "reasoning": "director triages by urgency",
+    "memory_seeds": [
+     {
+      "content": "I received a message needing a decision.",
+      "kind": "episodic",
+      "importance": 0.6,
+      "evidence_claim_ids": [
+       "r_director"
+      ]
+     }
+    ],
+    "policy": {
+     "default_action_id": "",
+     "rules": [
+      {
+       "when_field": "urgency",
+       "op": "above",
+       "value": 0.5,
+       "action_id": "send_reply",
+       "params": {}
+      }
+     ]
+    }
+   }
+  ],
+  "fields": [
+   {
+    "field_id": "urgency",
+    "value_type": "number",
+    "initial": 0.0
+   }
+  ],
+  "actions": [
+   {
+    "action_id": "send_reply",
+    "meaning": "reply to the incoming message",
+    "eligible_actors": [
+     "director"
+    ],
+    "required_authority": [
+     "reply"
+    ],
+    "stages": [
+     "decide"
+    ],
+    "visibility": "public",
+    "effects": [
+     {
+      "op": "append_record",
+      "collection": "replies",
+      "key": "$actor",
+      "value": "sent"
+     },
+     {
+      "op": "create_event",
+      "event_type": "reply_delivered",
+      "text": "director replied",
+      "visibility": "public"
+     }
+    ],
+    "evidence_claim_ids": [
+     "ctx"
     ]
+   }
+  ],
+  "process": {
+   "nodes": [
+    {
+     "node_id": "incoming",
+     "stage": "brief",
+     "effects": [
+      {
+       "op": "deliver_information",
+       "text": "A message arrived.",
+       "to": [
+        "director"
+       ]
+      }
+     ]
+    },
+    {
+     "node_id": "triage",
+     "stage": "decide",
+     "participants": [
+      "director"
+     ],
+     "action_ids": [
+      "send_reply"
+     ],
+     "rounds": 1
+    }
+   ]
   },
-  "world_facts": [
-    {"text": "The Director received the coalition's funding request.", "evidence_claim_ids": ["ir_request"], "available_at": "2027-04-20T00:00:00+00:00", "epistemic_type": "observation"}
-  ],
-  "required_reality_facts": [
-    {"key": "actor", "description": "the Director is the recipient who can reply", "evidence_claim_ids": ["ir_role"]},
-    {"key": "request", "description": "the request that a reply would answer", "evidence_claim_ids": ["ir_request"]}
-  ],
-  "sources": [
-    {"source_id": "office", "url": "https://example.org/office", "title": "Regional Office", "source_type": "official_institutional", "authority_level": 4, "published_at": "2027-04-01T00:00:00+00:00", "available_at": "2027-04-01T00:00:00+00:00", "lineage_event_id": "office_2027", "claims": [
-      {"id": "ir_role", "proposition": "role: the Regional Director handles funding requests", "normalized_value": "director", "entities": ["Regional Director"], "epistemic_type": "observation", "confidence": 0.95},
-      {"id": "ir_request", "proposition": "event: a coalition submitted a funding request to the Director", "normalized_value": "request_submitted", "entities": ["Regional Director"], "epistemic_type": "observation", "confidence": 0.9}
-    ]}
-  ],
-  "outcome": null
+  "terminal": {
+   "yes_when": {
+    "op": "greater_or_equal",
+    "args": [
+     {
+      "op": "event_count",
+      "args": [
+       "reply_delivered"
+      ]
+     },
+     1
+    ]
+   },
+   "description": "YES iff a reply was delivered before the horizon"
+  }
+ },
+ "uncertainties": [
+  {
+   "variable": "urgency",
+   "why_unknown": "whether the message reads as urgent is unknown",
+   "reversal_capable": true,
+   "constraining_evidence_ids": [
+    "ctx"
+   ],
+   "outcomes": [
+    {
+     "value": "low",
+     "weight": 0.4,
+     "provenance": "symmetric_ignorance_assumption",
+     "field_effects": [
+      [
+       "urgency",
+       0.0
+      ]
+     ],
+     "description": "reads as routine"
+    },
+    {
+     "value": "high",
+     "weight": 0.6,
+     "provenance": "explicit_model_distribution",
+     "field_effects": [
+      [
+       "urgency",
+       0.8
+      ]
+     ],
+     "description": "reads as urgent"
+    }
+   ]
+  }
+ ],
+ "world_facts": [
+  {
+   "text": "baseline conditions hold",
+   "evidence_claim_ids": [
+    "ctx"
+   ],
+   "available_at": "2024-01-01T00:00:00+00:00"
+  }
+ ],
+ "required_reality_facts": [
+  {
+   "key": "roster",
+   "description": "participant roster",
+   "evidence_claim_ids": [
+    "r_director"
+   ]
+  }
+ ],
+ "sources": [
+  {
+   "source_id": "roster",
+   "url": "https://example.org",
+   "title": "Roster",
+   "source_type": "official_institutional",
+   "authority_level": 4,
+   "published_at": "2024-01-01T00:00:00+00:00",
+   "available_at": "2024-01-01T00:00:00+00:00",
+   "lineage_event_id": "roster_event",
+   "claims": [
+    {
+     "id": "r_director",
+     "proposition": "role: director participates",
+     "normalized_value": "member",
+     "entities": [
+      "director"
+     ]
+    },
+    {
+     "id": "ctx",
+     "proposition": "context: baseline conditions",
+     "normalized_value": "calm",
+     "entities": [
+      "world"
+     ]
+    }
+   ]
+  }
+ ],
+ "outcome": null
 }

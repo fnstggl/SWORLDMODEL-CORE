@@ -25,13 +25,13 @@ from .gateway import ModelGateway
 from .http import HttpError, HttpTransport, UrllibTransport
 from .ids import content_id
 from .models import AuthorityLevel, EpistemicType, SourceType
-from .research import ResearchBundle
+from .research import ResearchBundle, assemble_bundle
 from .research_planner import ResearchPlan, followup_queries, plan_research
 from .rss import google_news_rss_url, parse_rss
 from .search import duckduckgo_search, site_query
 from .source_extract import extract_claims
 from .source_fetch import FetchedSource, fetch_source
-from .universal_compiler import build_live_bundle
+from .world_compiler import compile_world_spec_live
 
 _WORD = re.compile(r"[a-z0-9]{4,}")
 
@@ -63,7 +63,7 @@ class ResearchTrace:
 
     def to_dict(self, plan: ResearchPlan) -> dict[str, Any]:
         return {
-            "process_type": plan.process_type,
+            "process_summary": plan.process_summary,
             "resolution_event": plan.resolution_event,
             "required_facts": list(plan.required_facts),
             "queries": self.queries,
@@ -160,7 +160,26 @@ class LiveResearchBackend:
         if not trace.stop_reason:
             trace.stop_reason = "round/time/query budget reached"
 
-        bundle = build_live_bundle(self.gateway, question, as_of, horizon, store, plan)
+        compilation, resp = compile_world_spec_live(
+            self.gateway, question, as_of, horizon, store.view(as_of)
+        )
+        data = {
+            "world_spec": compilation["world_spec"],
+            "uncertainties": compilation.get("uncertainties", []),
+            "world_facts": compilation.get("world_facts", []),
+            "required_reality_facts": compilation.get("required_reality_facts", []),
+            "reality": {
+                "subject_entity": compilation.get("subject_entity"),
+                "resolution_units": compilation.get("resolution_units"),
+                "target_outcome": compilation.get("target_outcome"),
+                "expected_participants": compilation.get("expected_participants"),
+                "as_of": as_of.isoformat(),
+                "horizon": horizon.isoformat(),
+                "authoritative_sources": [],
+            },
+            "_compile_responses": [resp],
+        }
+        bundle = assemble_bundle(store, data)
         return replace(bundle, live_trace=trace.to_dict(plan))
 
     def augment_for_coverage(

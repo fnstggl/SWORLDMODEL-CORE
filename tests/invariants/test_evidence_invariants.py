@@ -12,7 +12,7 @@ from sworldmodel.research import build_bundle_from_dict
 
 def test_contradictory_decisive_claims_block_rollout() -> None:
     corpus = dup(base_corpus())
-    corpus["contradictions"] = [["guid_c", "ctx_c"]]
+    corpus["contradictions"] = [["r_a", "ctx"]]
     with pytest.raises(EvidenceError):
         compile_dict(corpus)
 
@@ -33,7 +33,7 @@ def test_token_limited_view_never_deletes_the_canonical_store() -> None:
 
 
 def test_post_cutoff_evidence_is_not_available_to_the_simulation() -> None:
-    _, ctx, _ = run_dict(base_corpus())
+    _, ctx = run_dict(base_corpus())
     # Add a post-cutoff claim to a copy and confirm it is excluded from the view.
     bundle = build_bundle_from_dict(banxico_corpus())
     view = bundle.evidence_store.view(bundle.as_of)  # type: ignore[arg-type]

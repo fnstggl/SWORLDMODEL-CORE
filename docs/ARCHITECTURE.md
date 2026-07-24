@@ -1,114 +1,144 @@
-# Architecture
+# Architecture — one universal world simulator
 
-One package, one canonical runtime path, an acyclic import graph. A developer can
-trace the whole causal route from `forecast()` to terminal aggregation without
-navigating phase adapters.
+SWORLDMODEL-CORE is **one universal world simulator**. For every arbitrary question the
+LLM compiles the *actual causal world* required to answer it — the entities and actors,
+their roles/authority/capabilities, the objects/documents/resources/channels, the real
+process that can produce the outcome, the scenario-specific actions each actor may take,
+the genuine uncertainties, and the exact declarative condition that makes the answer YES.
+One runtime then executes that compiled program and reads the outcome from world state.
 
-## The causal route
+It is **not** a committee simulator, a router between predefined scenario types, or a
+collection of hardcoded action families. A committee vote, an individual response, a
+negotiation, a population behavior, and a geopolitical process are all just different
+compiled `WorldSpec` programs executed by the same engine. Supporting a new kind of
+question adds compiled **data**, never a new runtime branch, terminal enum, protocol
+class, or action handler.
 
-```
-api.forecast / api.run_forecast
-  │
-  ├─ research.ResearchBackend.research  ──►  ResearchBundle
-  │     • complete EvidenceStore (never a truncated string)
-  │     • evidence-grounded ScenarioFrame (options, signals, reaction rules,
-  │       guidance, joint uncertainty with provenance)
-  │     • verified reality inputs (roster, roles, prior actions, rule, deadline)
-  │
-  ├─ evidence.EvidenceStore.view(as_of) ──►  EvidenceView   (cutoff-bounded)
-  │
-  ├─ models.ResolutionContract          ──►  immutable question definition
-  │
-  ├─ compiler.compile_world
-  │     • gateway "compile_world": conditional behavior per verified member
-  │     • deterministic validation into typed ActorDefinition / InstitutionSpec
-  │     • reality.verify_reality  ── RAISES WorldIntegrityError if unfaithful
-  │     • protocols.committee_protocol, uncertainty.enumerate_scenarios,
-  │       causal graph                     ──►  CompiledWorld
-  │
-  ├─ runtime.run  (per uncertain-future scenario)
-  │     world = base_world.clone(branch)
-  │     release scenario data (a simulated future, not post-cutoff evidence)
-  │     for each protocol step:
-  │        view   = world.view_for(actor, trigger)          # local view
-  │        intent = actor_runtime.step(actor_state, view)    # perceive→…→emit
-  │        valid  = environment.validate(intent, world)
-  │        events = environment.execute(valid, world)        # consequences here
-  │        world  = world.apply(events)
-  │     terminal = mechanisms.evaluate_terminal(votes, …)    # deterministic
-  │                                            ──►  BranchOutcome per branch
-  │
-  ├─ outcomes.aggregate  ──►  ForecastResult   (weighted YES frequency + bounds)
-  └─ tracing.TraceContext.write ──►  sealed, replayable artifacts + report
-```
+The governing rule:
 
-## Module map
+> **Hardcode only the universal laws by which a world changes. Never hardcode what
+> world, process, or actions a question must contain.**
 
-| module | responsibility |
-|---|---|
-| `models.py` | pure typed domain records (contract, evidence enums, world building-blocks, events, intents, forecast result, scenario frame) |
-| `errors.py` | explicit exceptions that stop a run instead of being repaired |
-| `ids.py` | deterministic ids, hashing, canonical JSON serialization |
-| `evidence.py` | canonical `EvidenceStore`, cutoff-bounded `EvidenceView`, lineage dedup |
-| `research.py` | `ResearchBackend` (corpus + mock), `ResearchBundle`, backward research plan |
-| `reality.py` | `verify_reality` — the reality-integrity gate |
-| `compiler.py` | constrained structured generation + deterministic validation → `CompiledWorld` |
-| `world.py` | the one authoritative `WorldState`; `view_for`; validated `apply`; branch clone |
-| `actors.py` | persistent `ActorState`, `LocalView`, `ActorRuntime` (the cognitive loop) |
-| `memory.py` | persistent `MemoryStream` (recency×importance×relevance retrieval) |
-| `protocols.py` | declarative `ProtocolGraph` of generic institutional primitives |
-| `intents.py` | `Environment` — intent validation + execution into events |
-| `mechanisms.py` | deterministic tally and terminal-predicate evaluation (no LLM) |
-| `uncertainty.py` | joint scenario enumeration, mass conservation, disclosed truncation |
-| `gateway.py` | `ModelGateway` boundary; `DeterministicGateway`, `ScriptedGateway` |
-| `prompts.py` | prompt rendering from the same context the model reasons over |
-| `runtime.py` | the branch rollout engine + protocol interpreter |
-| `outcomes.py` | trajectory-only aggregation and bounds |
-| `tracing.py` | replayable ledger, manifests, under-the-hood report |
-| `api.py` | the single `forecast()` entry point |
-| `cli.py` | the *evaluation harness* (Banxico/synthetic constants live here, not in core) |
-| `deepseek_gateway.py` | live DeepSeek `ModelGateway` (real HTTP, retries, real tokens) |
-| `http.py` | HTTP transport (real `UrllibTransport` + `FakeTransport` for tests) |
-| `search.py`, `rss.py` | discovery: DuckDuckGo real URLs; Google News RSS signal |
-| `source_fetch.py`, `source_extract.py` | fetch + verify pages; LLM claim extraction |
-| `research_planner.py` | LLM research plan (backward from the outcome) |
-| `live_research.py` | `LiveResearchBackend`: iterative research → `ResearchBundle` |
-| `universal_compiler.py` | LLM reality + uncertainty compilation from live evidence |
-
-The **live** path (`live_research` + `deepseek_gateway`) and the **corpus** path
-(`CorpusResearchBackend` + `DeterministicGateway`, tests only) are two front-ends that
-feed the *same* `compile_world` → `runtime.run` → `outcomes.aggregate`. The terminal is
-dispatched by mechanism (`committee_vote` incl. weighted strata, or `actor_action`), so
-one runtime handles committees, populations, and single-actor/negotiation questions.
-See `docs/LIVE_PRODUCT.md`.
-
-## Import direction (acyclic)
+## The one canonical path
 
 ```
-ids, errors                → leaves
-models                     → ids, errors
-evidence                   → models
-memory                     → models, ids
-gateway, prompts           → models, ids, errors
-actors                     → models, memory, gateway, prompts
-mechanisms                 → models
-world                      → models, evidence, actors, mechanisms
-reality                    → models, evidence, actors
-protocols, uncertainty     → models
-intents                    → world, models
-research                   → models, evidence, world
-compiler                   → world, reality, protocols, uncertainty, research, gateway
-runtime                    → compiler, intents, mechanisms, actors, world
-outcomes, tracing          → models (+ compiler/research/runtime for tracing)
-api                        → compiler, runtime, outcomes, tracing, research, config
+forecast(question, as_of, horizon, config)          # api.py — the single entry point
+  → live research       live_research.py  (rss/search/source_fetch/pdf_text/source_extract)
+                        → evidence.py (canonical store, lineage, cutoff)
+  → compile WorldSpec   world_compiler.py → worldspec.py (schema)          # LLM, from evidence
+                        (handed coverage.evidence_checklist so nothing verified is forgotten)
+  → contract            models.ResolutionContract (locks the declarative terminal)
+  → reality gate        reality.py                                          # refuse a false world
+  → coverage gate       coverage.py  vs world_compiler.world_spec_view      # nothing lost
+  → repair loop         api._compile_with_repair → backend.augment_for_coverage
+  → uncertainty         uncertainty.py                                      # genuine branches
+  → event runtime       engine.py                                           # one universal loop
+        per branch:  world.py (state) · actors.py (perceive→plan→intend)
+                     engine._drive_activations (event-driven invocation)
+                     executor.py (authority/feasibility/timing/target/resource)
+                     novel.py (novel-action route) · effects.py (universal ops)
+                     expressions.py (declarative terminal + preconditions)
+  → aggregate           outcomes.py                                         # weighted YES frequency
+  → report              tracing.py (ledger, coverage report, report.md)
 ```
 
-There are **no imports from any reference repository** and no compatibility shims.
+There is exactly one normal path and it does **not** branch on the kind of question.
+No profiles, no phase pipelines, no mechanism families, no fallbacks, no prior/simulation
+combiner, no hidden institution model.
 
-## Why one authoritative state
+## What is hardcoded (the universal laws) vs compiled (the world)
 
-Each branch owns exactly one `WorldState`. Everything an actor sees is a *projection*
-(`view_for`) of it. There is no separate "knowledge packet", "deliberation state", or
-"institution override" that owns competing facts. Actors never receive a `WorldState`
-reference — they receive a read-only `LocalView` — so they structurally cannot mutate
-reality or read another actor's private state.
+**Hardcoded — the execution language, fixed forever (`effects.py`):**
+`create_event`, `schedule_event`, `deliver_information`, `release_data`, `set_field`,
+`adjust_field`, `append_record`, `update_commitment`, `transfer_resource`,
+`consume_resource`, `create_or_update_document`, `advance_time`. Plus the universal
+operators in `expressions.py` (`equals`, `greater_than`, `count`, `sum`, `all`, `any`,
+`before`, `after`, `duration`, …). These are the language; they never grow when a new
+question appears.
+
+**Compiled per question — the program (`worldspec.py`, produced by `world_compiler.py`):**
+the entities/actors, `ActionDefinition` records (each mapping to the universal effects),
+the process graph, the genuine uncertainties, and the declarative `TerminalExpression`.
+Nothing here is assumed to be a vote, committee, negotiation, election, or population
+before compilation.
+
+An action's behavior **is** its compiled effects — renaming an action changes nothing.
+Every actor may also propose a **novel action** the compiler did not anticipate; it is
+routed through interpretation → authority → feasibility → resource/timing → safe-effect
+compilation → execute-or-reject, and never auto-succeeds or is silently coerced into a
+known action.
+
+## Responsibility table — one owner per function
+
+| Function                                   | Sole owner            |
+|--------------------------------------------|-----------------------|
+| Public `forecast()` entry + orchestration  | `api.py`              |
+| Live question-only research orchestration  | `live_research.py`    |
+| Source discovery / fetching / PDF text     | `rss.py`, `search.py`, `source_fetch.py`, `pdf_text.py` |
+| Claim extraction + excerpt verification    | `source_extract.py`   |
+| Shared research types + corpus/mock (tests)| `research.py`         |
+| Evidence store, cutoff, lineage            | `evidence.py`         |
+| Candidate inventory + coverage integrity + exclusion challenge | `coverage.py` |
+| Compiled world schema (WorldSpec, ActionDefinition, process graph, terminal) | `worldspec.py` |
+| Evidence-grounded world compilation        | `world_compiler.py`   |
+| Reality-integrity gate                     | `reality.py`          |
+| Authoritative WorldState + actor-local views | `world.py`          |
+| Persistent actors (memory/plan/reflect/intent) | `actors.py`       |
+| Persistent actor memory stream             | `memory.py`           |
+| The one universal event runtime (+ event-driven actor scheduling) | `engine.py` |
+| Action authority/feasibility/timing/target/resource validation + execution | `executor.py` |
+| Universal world-effect execution language  | `effects.py`          |
+| Novel-action interpretation + validation   | `novel.py`            |
+| Declarative terminal + condition evaluation| `expressions.py`      |
+| Uncertainty branching + mass accounting    | `uncertainty.py`      |
+| Trajectory aggregation (the forecast)      | `outcomes.py`         |
+| Provider-independent gateway + test gateways | `gateway.py`        |
+| Real production DeepSeek calls             | `deepseek_gateway.py` |
+| Compiled-world container                   | `compiled.py`         |
+| Tracing / under-the-hood report            | `tracing.py`          |
+
+## Production dependency graph from `forecast()`
+
+A runtime import audit (import `sworldmodel.api`, run a forecast, inspect
+`sys.modules`) confirms that execution beginning at `api.forecast()` loads only the
+modules above and **cannot reach any superseded module**. There is exactly one path to
+the simulated result.
+
+## Deletion list — superseded modules removed in the universal rebuild
+
+These older files implemented mechanism-family routing / committee assumptions and were
+deleted (their still-useful universal logic folded into the canonical modules above).
+No compatibility wrappers, re-export shims, or dormant runtimes remain.
+
+| Deleted file            | Replaced by                          | Why removed |
+|-------------------------|--------------------------------------|-------------|
+| `mechanisms.py`         | `expressions.py` + `engine.py`       | Two hardcoded terminal families (`committee_vote`, `actor_action`) → one declarative evaluator |
+| `protocols.py`          | `worldspec.ProcessGraph` + `engine.py` | Two fixed protocols (`committee_protocol`, `general_protocol`) → compiled process graphs |
+| `compiler.py`           | `world_compiler.py`                  | Committee-shaped compiler (always built an institution) → universal WorldSpec compiler |
+| `universal_compiler.py` | `world_compiler.py`                  | A "universal" wrapper that still emitted `terminal.mechanism="committee_vote"` |
+| `runtime.py`            | `engine.py`                          | Protocol-step interpreter with mechanism dispatch → one universal event loop |
+| `intents.py`            | `executor.py` + `effects.py`         | Fixed `IntentKind`→`EventKind` mapping → compiled actions over universal effects |
+
+Removed from `models.py`: `DecisionRule`, `InstitutionSpec`, `TerminalSpec` (mechanism),
+`ReactionRule`, `ConditionalBehavior`, committee `ActorDefinition`, `SignalDef`,
+`ScenarioFrame`, `Proposal`, `CausalGraph`, `IntentKind`, and the committee `EventKind`
+ontology. The research planner's fixed `process_type` enum (which included
+`committee_vote`) became a free-text `process_summary`.
+
+## Invariants (each has a test)
+
+- The forecast is `weighted_simulated_trajectories` — never a prior or a separate model.
+- A claimed participant count can never exceed the verified roster (a nine-participant
+  body can never become five modeled units); the reality gate refuses.
+- Actors emit *intentions*; the environment (executor) produces *consequences*.
+- A compiled action's behavior is its effects: renaming it changes nothing.
+- A novel action never auto-succeeds; if it can't be represented safely it is rejected,
+  never coerced into the nearest known action.
+- No fact available after `as_of` can affect a pastcast (mechanically enforced).
+- The production runtime contains no routing on a question family.
+- Deleting the actor calls changes/kills the forecast; the full run replays from the ledger.
+
+See `docs/REBUILT_UNIVERSAL_MERGE.md` for how the live-research and universal-simulator
+lines were fused, and `docs/` for the reality-integrity gate, evidence-to-world coverage
+integrity, the evidence/cutoff model, the actor runtime, forecast semantics, the live
+product, and the Banxico evaluation.

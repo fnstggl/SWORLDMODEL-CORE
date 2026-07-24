@@ -1,19 +1,21 @@
-"""Evidence-to-world coverage integrity: the ten acceptance cases.
+"""Evidence-to-world coverage integrity: the acceptance cases.
 
 These lock the universal rule: every materially relevant verified evidence candidate
-must be represented AND causally wired into the compiled world, or explicitly excluded
-with a recorded reason. Nothing material may silently disappear between research and
-simulation — for people, organizations, rules, events, documents, or relationships.
+must be represented AND causally wired into the compiled WorldSpec that is actually
+simulated, or explicitly excluded with a recorded reason. Nothing material may silently
+disappear between research and simulation — for people, organizations, rules, events,
+documents, or relationships — in any kind of world.
 """
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 import pytest
 
-from _helpers import AS_OF, HORIZON, ROSTER_PUB, base_corpus, compile_dict, synthetic_corpus
-from sworldmodel.api import _build_contract
+from _helpers import base_corpus, compile_dict, synthetic_corpus
+from _worlds import AS_OF, HORIZON, named_body_world
 from sworldmodel.coverage import (
     CandidateKind,
     Disposition,
@@ -28,165 +30,39 @@ from sworldmodel.coverage import (
 from sworldmodel.errors import WorldIntegrityError
 from sworldmodel.research import build_bundle_from_dict
 
-# --------------------------------------------------------------------------- #
-# Corpus builders
-# --------------------------------------------------------------------------- #
-
 WINDOW_DATE = "2024-02-01T00:00:00+00:00"  # strictly between AS_OF and HORIZON
+
+PEOPLE5 = ["Vera Nolan", "Jon Alder", "Gala Reyes", "Omar Castel", "Gabriel Cuadra"]
+PEOPLE3 = ["Ada North", "Ben East", "Cara West"]
 
 
 def _claim(cid: str, prop: str, value: str, entities: list[str], **kw: Any) -> dict[str, Any]:
-    return {
+    out = {
         "id": cid,
         "proposition": prop,
         "normalized_value": value,
         "entities": entities,
         "epistemic_type": kw.get("epistemic_type", "observation"),
         "confidence": kw.get("confidence", 0.95),
-        **{k: v for k, v in kw.items() if k in ("valid_from", "claim_key")},
     }
+    out.update({k: v for k, v in kw.items() if k in ("valid_from", "claim_key")})
+    return out
 
 
-def _source(
-    claims: list[dict[str, Any]], *, sid: str = "src", lineage: str = "ev"
-) -> dict[str, Any]:
-    return {
-        "source_id": sid,
-        "url": f"https://example.org/{sid}",
-        "title": sid,
-        "source_type": "official_institutional",
-        "authority_level": 4,
-        "published_at": ROSTER_PUB,
-        "available_at": ROSTER_PUB,
-        "lineage_event_id": lineage,
-        "claims": claims,
-    }
+def _dt(s: str) -> datetime:
+    return datetime.fromisoformat(s)
 
 
-def _member(name: str, cid: str, *, chair: bool = False, prior: str = "hold") -> dict[str, Any]:
-    slug = name.lower().replace(" ", "_")
-    return {
-        "actor_id": slug,
-        "name": name,
-        "role": "Chair" if chair else "Member",
-        "is_voting_seat": True,
-        "vote_power": 1,
-        "prior_action": prior,
-        "authority": ["vote", "introduce_proposal", "chair"] if chair else ["vote"],
-        "evidence_claim_ids": [cid],
-        "memory_seeds": [
-            {
-                "content": f"My prior position was {prior}.",
-                "kind": "episodic",
-                "importance": 0.7,
-                "valid_time": ROSTER_PUB,
-                "evidence_claim_ids": [cid],
-            }
-        ],
-    }
+def _inventory(corpus: dict[str, Any]) -> tuple[EvidenceCandidate, ...]:
+    from sworldmodel.api import _build_contract
 
-
-def _minimal_frame() -> dict[str, Any]:
-    return {
-        "options": ["cut", "hold"],
-        "signals": [],
-        "reaction_rules": [],
-        "guidance_option": "hold",
-        "guidance_text": "The common position is hold.",
-        "acceptance_tolerance": 0.5,
-        "uncertainty": [],
-    }
-
-
-def named_committee(
-    people: list[str],
-    represented: list[str],
-    *,
-    rule_kind: str = "majority",
-    extra_claims: list[dict[str, Any]] | None = None,
-    extra_required: list[dict[str, Any]] | None = None,
-    world_facts: list[dict[str, Any]] | None = None,
-    decision_body: str = "the Governing Board",
-) -> dict[str, Any]:
-    """A committee whose *evidence* names ``people`` but whose compiled roster only
-    ``represented`` — the exact shape of the motivating failure. Seat totals are made
-    internally consistent so the classic seat check passes and only the coverage gate
-    can catch the lost members."""
-
-    claims = [
-        _claim(
-            f"r_{p.lower().replace(' ', '_')}",
-            f"{p} is a voting member of {decision_body} and voted to hold at the last meeting.",
-            "member",
-            [p],
-        )
-        for p in people
-    ]
-    if extra_claims:
-        claims += extra_claims
-    n = len(represented)
-    threshold = n if rule_kind == "unanimous" else n // 2 + 1
-    members = [
-        _member(p, f"r_{p.lower().replace(' ', '_')}", chair=(i == 0))
-        for i, p in enumerate(represented)
-    ]
-    required = [
-        {
-            "key": "roster",
-            "description": "verified roster",
-            "evidence_claim_ids": [f"r_{p.lower().replace(' ', '_')}" for p in represented],
-        }
-    ]
-    if extra_required:
-        required += extra_required
-    return {
-        "question_key": "coverage_case",
-        "reality": {
-            "as_of": AS_OF,
-            "horizon": HORIZON,
-            "decision_body": decision_body,
-            "subject_entity": "the measure",
-            "resolution_units": f"{rule_kind} of {n} seats",
-            "institution_id": "board",
-            "institution_name": decision_body,
-            "decision_rule": {
-                "kind": rule_kind,
-                "total_seats": n,
-                "threshold": threshold,
-                "evidence_claim_ids": [],
-            },
-            "expected_voting_seats": n,
-            "target_option": "hold",
-            "terminal": {
-                "mechanism": "committee_vote",
-                "yes_condition": "unanimous_for_option"
-                if rule_kind == "unanimous"
-                else "majority_for_option",
-                "target_option": "hold",
-            },
-            "authoritative_sources": ["roster"],
-            "members": members,
-        },
-        "frame": _minimal_frame(),
-        "world_facts": world_facts or [],
-        "required_reality_facts": required,
-        "sources": [_source(claims)],
-        "outcome": None,
-    }
-
-
-def _inventory(corpus: dict[str, Any]) -> tuple[tuple[EvidenceCandidate, ...], Any]:
     bundle = build_bundle_from_dict(corpus)
     as_of = bundle.as_of or _dt(AS_OF)
     contract = _build_contract("q", as_of, bundle.horizon, bundle)
     view = bundle.evidence_store.view(as_of)
-    return build_candidate_inventory(view, contract), contract
-
-
-def _dt(s: str):
-    from datetime import datetime
-
-    return datetime.fromisoformat(s)
+    return build_candidate_inventory(
+        view, contract, focal_identities=tuple(e.name for e in bundle.spec.entities)
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -195,8 +71,7 @@ def _dt(s: str):
 
 
 def test_case1_five_members_two_compiled_is_rejected() -> None:
-    people = ["Vera Nolan", "Jon Alder", "Gala Reyes", "Omar Castel", "Gabriel Cuadra"]
-    corpus = named_committee(people, represented=people[:2])  # seat total is consistent at 2
+    corpus = named_body_world(PEOPLE5, represented=PEOPLE5[:2])
     with pytest.raises(WorldIntegrityError) as exc:
         compile_dict(corpus)
     missing = " ".join(exc.value.details.get("missing_material_candidates", []))  # type: ignore[union-attr]
@@ -204,14 +79,14 @@ def test_case1_five_members_two_compiled_is_rejected() -> None:
 
 
 def test_case1_all_five_compiled_passes() -> None:
-    people = ["Vera Nolan", "Jon Alder", "Gala Reyes", "Omar Castel", "Gabriel Cuadra"]
-    compiled = compile_dict(named_committee(people, represented=people))
+    compiled = compile_dict(named_body_world(PEOPLE5, represented=PEOPLE5))
     report = compiled.coverage_report
     assert report.is_complete
     persons = [c for c in report.candidates if c.kind is CandidateKind.PERSON]
     assert len(persons) == 5
     for c in persons:
-        assert report.disposition_for(c.candidate_id).disposition is Disposition.INCLUDED  # type: ignore[union-attr]
+        disp = report.disposition_for(c.candidate_id)
+        assert disp is not None and disp.disposition is Disposition.INCLUDED
 
 
 # --------------------------------------------------------------------------- #
@@ -220,11 +95,11 @@ def test_case1_all_five_compiled_passes() -> None:
 
 
 def test_case2_organization_without_individuals_is_covered() -> None:
-    corpus = base_corpus()  # entities are "a"/"b"/"c"/"committee": an org, no persons
-    compiled = compile_dict(corpus)
+    # The organization itself is the acting entity; the evidence names no individuals.
+    compiled = compile_dict(named_body_world([], represented=[], org_is_actor=True))
     report = compiled.coverage_report
     orgs = [c for c in report.candidates if c.kind is CandidateKind.ORGANIZATION]
-    assert orgs, "the decision-body organization must appear as a candidate"
+    assert orgs, "the deciding organization must appear as a candidate"
     org = orgs[0]
     assert org.is_material
     disp = report.disposition_for(org.candidate_id)
@@ -237,21 +112,19 @@ def test_case2_organization_without_individuals_is_covered() -> None:
 # 3. A binding institutional rule that the world omits blocks simulation.
 # --------------------------------------------------------------------------- #
 
+_CHARTER = _claim(
+    "charter_rule",
+    "The board charter requires unanimous consent of all members to adopt any measure.",
+    "unanimous_consent",
+    ["the charter"],
+)
+
 
 def test_case3_omitted_binding_rule_blocks() -> None:
-    # Evidence: the charter requires UNANIMOUS consent; the compiled world uses a plain
-    # majority rule and never represents the unanimity requirement.
-    rule_claim = _claim(
-        "charter_rule",
-        "The board charter requires unanimous consent of all members to adopt any measure.",
-        "unanimous_consent",
-        ["the charter"],
-    )
-    corpus = named_committee(
-        ["Ada North", "Ben East", "Cara West"],
-        represented=["Ada North", "Ben East", "Cara West"],
-        rule_kind="majority",  # WRONG: evidence says unanimous
-        extra_claims=[rule_claim],
+    # Evidence: the charter requires UNANIMOUS consent; the compiled world decides by a
+    # plain majority and never represents the unanimity requirement.
+    corpus = named_body_world(
+        PEOPLE3, represented=PEOPLE3, rule_kind="majority", extra_claims=[_CHARTER]
     )
     with pytest.raises(WorldIntegrityError) as exc:
         compile_dict(corpus)
@@ -260,21 +133,10 @@ def test_case3_omitted_binding_rule_blocks() -> None:
 
 
 def test_case3_represented_rule_passes() -> None:
-    # Same unanimity rule, but the world now models it as a unanimous decision rule.
-    rule_claim = _claim(
-        "charter_rule",
-        "The board charter requires unanimous consent of all members to adopt any measure.",
-        "unanimous_consent",
-        ["the charter"],
+    corpus = named_body_world(
+        PEOPLE3, represented=PEOPLE3, rule_kind="unanimous", extra_claims=[_CHARTER]
     )
-    corpus = named_committee(
-        ["Ada North", "Ben East", "Cara West"],
-        represented=["Ada North", "Ben East", "Cara West"],
-        rule_kind="unanimous",
-        extra_claims=[rule_claim],
-    )
-    compiled = compile_dict(corpus)
-    assert compiled.coverage_report.is_complete
+    assert compile_dict(corpus).coverage_report.is_complete
 
 
 # --------------------------------------------------------------------------- #
@@ -290,11 +152,7 @@ def test_case4_omitted_inwindow_event_blocks() -> None:
         ["the February data print"],
         valid_from=WINDOW_DATE,
     )
-    corpus = named_committee(
-        ["Ada North", "Ben East", "Cara West"],
-        represented=["Ada North", "Ben East", "Cara West"],
-        extra_claims=[event_claim],  # frame ignores it entirely
-    )
+    corpus = named_body_world(PEOPLE3, represented=PEOPLE3, extra_claims=[event_claim])
     with pytest.raises(WorldIntegrityError) as exc:
         compile_dict(corpus)
     missing = " ".join(exc.value.details.get("missing_material_candidates", []))  # type: ignore[union-attr]
@@ -305,39 +163,30 @@ def test_case4_omitted_inwindow_event_blocks() -> None:
 # 5. A relevant document must be accessible to the actors (causal-use).
 # --------------------------------------------------------------------------- #
 
+_BRIEF = _claim(
+    "brief_1",
+    "The confidential staff briefing report sets out the decisive guidance for the vote.",
+    "guidance_brief",
+    ["the staff briefing"],
+)
+_BRIEF_REQUIRED = [
+    {
+        "key": "guidance_document",
+        "description": "the decisive staff briefing",
+        "evidence_claim_ids": ["brief_1"],
+    }
+]
+
 
 def _document_corpus(*, accessible: bool) -> dict[str, Any]:
-    doc_claim = _claim(
-        "brief_1",
-        "The confidential staff briefing report sets out the decisive guidance for the vote.",
-        "guidance_brief",
-        ["the staff briefing"],
+    return named_body_world(
+        PEOPLE3,
+        represented=PEOPLE3,
+        extra_claims=[_BRIEF],
+        extra_required=_BRIEF_REQUIRED,
+        # When accessible, the chair actually holds the briefing (it enters their memory).
+        doc_holder_claims=("brief_1",) if accessible else (),
     )
-    people = ["Ada North", "Ben East", "Cara West"]
-    corpus = named_committee(
-        people,
-        represented=people,
-        extra_claims=[doc_claim],
-        extra_required=[
-            {
-                "key": "guidance_document",
-                "description": "the decisive staff briefing",
-                "evidence_claim_ids": ["brief_1"],
-            }
-        ],
-    )
-    if accessible:
-        # The chair actually holds the briefing: it enters their memory (an actor view).
-        corpus["reality"]["members"][0]["memory_seeds"].append(
-            {
-                "content": "I have read the staff briefing.",
-                "kind": "episodic",
-                "importance": 0.8,
-                "valid_time": ROSTER_PUB,
-                "evidence_claim_ids": ["brief_1"],
-            }
-        )
-    return corpus
 
 
 def test_case5_inaccessible_document_blocks() -> None:
@@ -346,8 +195,7 @@ def test_case5_inaccessible_document_blocks() -> None:
 
 
 def test_case5_accessible_document_is_covered() -> None:
-    compiled = compile_dict(_document_corpus(accessible=True))
-    report = compiled.coverage_report
+    report = compile_dict(_document_corpus(accessible=True)).coverage_report
     docs = [c for c in report.candidates if c.kind is CandidateKind.DOCUMENT and c.is_material]
     assert docs
     disp = report.disposition_for(docs[0].candidate_id)
@@ -368,9 +216,9 @@ def test_case6_incidental_person_is_excluded_with_reason() -> None:
         "commentary",
         ["Jane Quill"],
     )
-    people = ["Ada North", "Ben East", "Cara West"]
-    compiled = compile_dict(named_committee(people, represented=people, extra_claims=[gossip]))
-    report = compiled.coverage_report
+    report = compile_dict(
+        named_body_world(PEOPLE3, represented=PEOPLE3, extra_claims=[gossip])
+    ).coverage_report
     jane = next(c for c in report.candidates if c.canonical_identity == "Jane Quill")
     assert not jane.is_material
     disp = report.disposition_for(jane.candidate_id)
@@ -385,19 +233,15 @@ def test_case6_incidental_person_is_excluded_with_reason() -> None:
 
 
 def test_case7_same_entity_claims_merge_into_one_candidate() -> None:
-    corpus = named_committee(["Ada North", "Ben East"], represented=["Ada North", "Ben East"])
-    # Two more independent claims about Ada from different events.
-    corpus["sources"].append(
-        _source(
-            [
-                _claim("ada_2", "Ada North chairs the board.", "chair", ["Ada North"]),
-                _claim("ada_3", "Ada North favored a hold previously.", "hold", ["Ada North"]),
-            ],
-            sid="src2",
-            lineage="ev2",
+    extra = [
+        _claim("ada_2", "Ada North chairs the board.", "chair", ["Ada North"]),
+        _claim("ada_3", "Ada North favored a hold previously.", "hold", ["Ada North"]),
+    ]
+    candidates = _inventory(
+        named_body_world(
+            ["Ada North", "Ben East"], represented=["Ada North", "Ben East"], extra_claims=extra
         )
     )
-    candidates, _ = _inventory(corpus)
     ada = [c for c in candidates if c.canonical_identity == "Ada North"]
     assert len(ada) == 1  # one canonical person, not three
     assert {"r_ada_north", "ada_2", "ada_3"} <= set(ada[0].claim_ids)
@@ -406,13 +250,13 @@ def test_case7_same_entity_claims_merge_into_one_candidate() -> None:
 def test_case7_alias_candidates_merge_to_one_object() -> None:
     inst = WorldObject(
         object_id="inst",
-        kind="institution",
+        kind="actor",
         name="Central Bank",
         claim_ids=("k1",),
         wired=True,
-        uses=("membership", "terminal"),
+        uses=("actor_view", "action"),
     )
-    spec = WorldSpecView(objects=(inst,), decision_body="Central Bank")
+    spec = WorldSpecView(objects=(inst,), subject_entity="Central Bank")
     a = EvidenceCandidate(
         candidate_id="c_a",
         kind=CandidateKind.ORGANIZATION,
@@ -440,38 +284,20 @@ def test_case7_alias_candidates_merge_to_one_object() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# 8. Conflicting evidence yields UNCERTAIN / REQUIRED_BUT_UNRESOLVED, not a
-#    silent arbitrary choice — and it blocks.
+# 8. Conflicting evidence is never silently resolved — and it blocks.
 # --------------------------------------------------------------------------- #
 
 
 def test_case8_conflicting_evidence_is_not_silently_resolved() -> None:
-    corpus = named_committee(["Ada North", "Ben East"], represented=["Ada North", "Ben East"])
-    corpus["sources"].append(
-        _source(
-            [
-                _claim(
-                    "hawk",
-                    "Kim Vale favors a rate hike.",
-                    "hike",
-                    ["Kim Vale"],
-                    claim_key="vale_stance",
-                ),
-                _claim(
-                    "dove",
-                    "Kim Vale favors a rate cut.",
-                    "cut",
-                    ["Kim Vale"],
-                    claim_key="vale_stance",
-                ),
-            ],
-            sid="conflict",
-            lineage="ev_conf",
-        )
+    conflict = [
+        _claim("hawk", "Kim Vale favors a rate hike.", "hike", ["Kim Vale"], claim_key="vale"),
+        _claim("dove", "Kim Vale favors a rate cut.", "cut", ["Kim Vale"], claim_key="vale"),
+    ]
+    corpus = named_body_world(
+        ["Ada North", "Ben East"], represented=["Ada North", "Ben East"], extra_claims=conflict
     )
     corpus["contradictions"] = [["hawk", "dove"]]
-    candidates, _ = _inventory(corpus)
-    kim = next(c for c in candidates if c.canonical_identity == "Kim Vale")
+    kim = next(c for c in _inventory(corpus) if c.canonical_identity == "Kim Vale")
     assert kim.materiality is Materiality.CONFLICTED
     # With no representation, a conflicted candidate is REQUIRED_BUT_UNRESOLVED and blocks.
     report = assess_coverage((kim,), WorldSpecView(objects=()))
@@ -484,34 +310,32 @@ def test_case8_conflicting_evidence_is_not_silently_resolved() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# 9. The same coverage system works across process types.
+# 9. The same coverage system works across materially different worlds.
 # --------------------------------------------------------------------------- #
 
 
-def test_case9_coverage_runs_for_every_process_type() -> None:
+def test_case9_coverage_runs_for_every_kind_of_world() -> None:
     corpora = {
-        "committee": base_corpus(),
+        "base_committee": base_corpus(),
+        "committee_decision": synthetic_corpus("committee_decision"),
         "individual_response": synthetic_corpus("individual_response"),
-        "population_strata": synthetic_corpus("population_strata"),
-        "seven_member_council": synthetic_corpus("seven_member_council"),
-        "data_shock_board": synthetic_corpus("data_shock_board"),
+        "negotiation": synthetic_corpus("negotiation"),
+        "population_behavior": synthetic_corpus("population_behavior"),
+        "geopolitical_process": synthetic_corpus("geopolitical_process"),
     }
     for name, corpus in corpora.items():
-        compiled = compile_dict(corpus)
-        report = compiled.coverage_report
+        report = compile_dict(corpus).coverage_report
         assert report.is_complete, f"{name} coverage incomplete"
-        # Every candidate carries a disposition regardless of process shape.
+        # Every candidate carries a disposition regardless of world shape.
         assert len(report.dispositions) == report.total_candidates
 
 
 # --------------------------------------------------------------------------- #
-# 10. No production candidate is ever silently dropped: one disposition each.
+# 10. Exclusion challenge, targeted repair, and one disposition per candidate.
 # --------------------------------------------------------------------------- #
 
 
 def test_exclusion_challenge_blocks_a_wrongful_exclusion() -> None:
-    # A rule the deterministic rules treat as immaterial (no procedure word, not
-    # signal-linked) — an independent reviewer that says it could matter must block it.
     cand = EvidenceCandidate(
         candidate_id="x",
         kind=CandidateKind.RULE,
@@ -524,21 +348,22 @@ def test_exclusion_challenge_blocks_a_wrongful_exclusion() -> None:
     spec = WorldSpecView(objects=())
     # No reviewer -> excluded with a recorded reason, run proceeds.
     r0 = assess_coverage((cand,), spec)
-    assert r0.disposition_for(cand.candidate_id).disposition is Disposition.EXCLUDED_IRRELEVANT  # type: ignore[union-attr]
+    d0 = r0.disposition_for(cand.candidate_id)
+    assert d0 is not None and d0.disposition is Disposition.EXCLUDED_IRRELEVANT
     assert r0.is_complete
     # An independent review that disagrees invalidates the exclusion and blocks.
     r1 = assess_coverage((cand,), spec, exclusion_reviewer=lambda c: True)
-    disp = r1.disposition_for(cand.candidate_id)
-    assert disp is not None and disp.disposition is Disposition.UNCERTAIN
-    assert disp.reviewer_stage == "exclusion_challenge"
+    d1 = r1.disposition_for(cand.candidate_id)
+    assert d1 is not None and d1.disposition is Disposition.UNCERTAIN
+    assert d1.reviewer_stage == "exclusion_challenge"
     assert not r1.is_complete
     with pytest.raises(WorldIntegrityError):
         enforce_coverage(r1)
 
 
 class _RepairBackend:
-    """A backend whose first research drops three members, but whose targeted
-    follow-up research (augment_for_coverage) returns the complete roster."""
+    """A backend whose first research drops members, but whose targeted follow-up
+    research (augment_for_coverage) returns the complete roster."""
 
     is_live = False
 
@@ -560,10 +385,10 @@ class _RepairBackend:
 def test_repair_loop_recovers_via_targeted_research() -> None:
     from sworldmodel import DeterministicGateway, ForecastConfig, run_forecast
 
-    people = ["Vera Nolan", "Jon Alder", "Gala Reyes", "Omar Castel", "Gabriel Cuadra"]
-    incomplete = named_committee(people, represented=people[:2])
-    full = named_committee(people, represented=people)
-    backend = _RepairBackend(incomplete, full)
+    backend = _RepairBackend(
+        named_body_world(PEOPLE5, represented=PEOPLE5[:2]),
+        named_body_world(PEOPLE5, represented=PEOPLE5),
+    )
     config = ForecastConfig(
         gateway=DeterministicGateway(), research_backend=backend, max_branches=4
     )
@@ -572,15 +397,13 @@ def test_repair_loop_recovers_via_targeted_research() -> None:
     assert backend.augmented_with is not None
     assert any("Gala Reyes" in m for m in backend.augmented_with)
     assert ctx.compiled.coverage_report.is_complete
-    assert result.integrity_manifest.represented_voting_seats == 5
+    assert result.integrity_manifest.represented_participants == 5
 
 
 def test_repair_loop_blocks_when_augmentation_cannot_help() -> None:
-    # A backend that keeps returning the incomplete world must still be refused.
     from sworldmodel import DeterministicGateway, ForecastConfig, run_forecast
 
-    people = ["Vera Nolan", "Jon Alder", "Gala Reyes"]
-    incomplete = named_committee(people, represented=people[:1])
+    incomplete = named_body_world(PEOPLE3, represented=PEOPLE3[:1])
     backend = _RepairBackend(incomplete, incomplete)  # augment returns the same gap
     config = ForecastConfig(
         gateway=DeterministicGateway(), research_backend=backend, max_branches=4
@@ -590,9 +413,7 @@ def test_repair_loop_blocks_when_augmentation_cannot_help() -> None:
 
 
 def test_case10_every_candidate_gets_exactly_one_disposition() -> None:
-    people = ["Vera Nolan", "Jon Alder", "Gala Reyes"]
-    compiled = compile_dict(named_committee(people, represented=people))
-    report = compiled.coverage_report
+    report = compile_dict(named_body_world(PEOPLE3, represented=PEOPLE3)).coverage_report
     covered_ids = [d.candidate_id for d in report.dispositions]
     assert len(covered_ids) == len(set(covered_ids))  # no double-disposition
     assert set(covered_ids) == {c.candidate_id for c in report.candidates}  # none dropped

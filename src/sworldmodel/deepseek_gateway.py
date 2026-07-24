@@ -31,23 +31,21 @@ DEFAULT_TEMPERATURES: dict[str, float] = {
     "followup_queries": 0.4,
     "extract_claims": 0.1,
     "contradiction": 0.1,
-    "compile_world": 0.3,
-    "compile_actors": 0.3,
-    "compile_uncertainty": 0.3,
+    "compile_world_spec": 0.3,
+    "interpret_novel": 0.2,
+    "exclusion_challenge": 0.1,
     "actor_decision": 0.7,
     "reflect": 0.5,
 }
 DEFAULT_MAX_TOKENS: dict[str, int] = {
     "extract_claims": 3000,
-    # The compile stages emit large nested JSON (a full roster, or a frame with
-    # per-signal reaction rules and nested uncertainty outcomes). Too small a budget
-    # truncates the JSON mid-object, and since every repair retry re-truncates at the
-    # same cap it can never recover — so these get generous, explicit budgets.
-    "compile_reality": 8000,
-    "compile_roster": 8000,
-    "compile_world": 4000,
-    "compile_actors": 4000,
-    "compile_uncertainty": 8000,
+    # The world-compile stage emits large nested JSON (entities, actions, a process
+    # graph, uncertainties and a terminal expression). Too small a budget truncates
+    # the JSON mid-object, and since every repair retry re-truncates at the same cap
+    # it can never recover — so it gets a generous, explicit budget.
+    "compile_world_spec": 8000,
+    "interpret_novel": 1500,
+    "exclusion_challenge": 600,
     "actor_decision": 1500,
 }
 

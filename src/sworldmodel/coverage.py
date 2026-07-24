@@ -23,11 +23,17 @@ Pipeline (canonical production path, not a diagnostic):
     verified evidence
       -> deterministic candidate inventory        (build_candidate_inventory)
       -> materiality review                        (deterministic + optional LLM)
-      -> LLM world compilation using the inventory (universal_compiler / corpus)
+      -> LLM world compilation using the inventory (world_compiler / corpus)
       -> deterministic coverage comparison         (assess_coverage)
-      -> targeted research / compilation repair     (universal_compiler)
+      -> targeted research / compilation repair     (api._compile_with_repair)
       -> world-integrity gate                       (enforce_coverage + verify_reality)
       -> simulation
+
+The comparison runs against the *exact compiled WorldSpec that will be simulated*
+(see :func:`sworldmodel.world_compiler.world_spec_view`), so nothing can be verified
+here and then quietly differ in the world the engine actually executes. Nothing in this
+module assumes a committee, a vote, or any question family: a world element is a
+person, org, rule, document, resource, event, channel, variable, or requirement.
 """
 
 from __future__ import annotations
@@ -155,7 +161,6 @@ class WorldSpecView:
 
     objects: tuple[WorldObject, ...]
     accessible_claim_ids: frozenset[str] = frozenset()  # claims some actor can perceive
-    decision_body: str = ""
     subject_entity: str = ""
 
     def by_kind(self, kind: str) -> list[WorldObject]:
@@ -343,25 +348,27 @@ def build_candidate_inventory(
     contract: ResolutionContract,
     *,
     signal_claim_ids: frozenset[str] = frozenset(),
+    focal_identities: tuple[str, ...] = (),
 ) -> tuple[EvidenceCandidate, ...]:
     """Build the complete candidate inventory from the verified evidence store.
 
     Deterministic and stable: the same evidence always yields the same inventory.
-    ``signal_claim_ids`` are claim ids the causal/uncertainty frame already keys on;
-    a resource/variable/event backed by such a claim is treated as material because
-    the model itself judged it outcome-relevant.
+    ``signal_claim_ids`` are claim ids the compiled world already keys on (a field an
+    uncertainty branches over, an action's supporting evidence); an item backed by such
+    a claim is material because the compiled world itself judged it outcome-relevant.
+    ``focal_identities`` are additional entity names the compiled world names — passing
+    them lets an organization or population that the world treats as an actor count as
+    material without any hardcoded notion of a "decision body".
     """
 
     ctx = _MaterialityContext(
-        body_norm=_norm(contract.decision_body),
-        subject_norm=_norm(contract.subject_entity),
+        focal_norms=_focal_norms((contract.subject_entity, *focal_identities)),
         signal_claim_ids=signal_claim_ids,
         required_fact_ids=frozenset(
             cid for f in contract.required_reality_facts for cid in f.evidence_claim_ids
         ),
         as_of=contract.as_of,
         horizon=contract.horizon,
-        rule_kind=contract.decision_rule.kind,
     )
     return _inventory(view, ctx, contract)
 
@@ -369,11 +376,10 @@ def build_candidate_inventory(
 def build_inventory_from(
     view: EvidenceView,
     *,
-    decision_body: str = "",
     subject_entity: str = "",
+    focal_identities: tuple[str, ...] = (),
     as_of: datetime,
     horizon: datetime,
-    rule_kind: str = "majority",
     required_fact_ids: frozenset[str] = frozenset(),
     signal_claim_ids: frozenset[str] = frozenset(),
 ) -> tuple[EvidenceCandidate, ...]:
@@ -384,15 +390,17 @@ def build_inventory_from(
     """
 
     ctx = _MaterialityContext(
-        body_norm=_norm(decision_body),
-        subject_norm=_norm(subject_entity),
+        focal_norms=_focal_norms((subject_entity, *focal_identities)),
         signal_claim_ids=signal_claim_ids,
         required_fact_ids=required_fact_ids,
         as_of=as_of,
         horizon=horizon,
-        rule_kind=rule_kind,
     )
     return _inventory(view, ctx, None)
+
+
+def _focal_norms(identities: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(n for n in (_norm(i) for i in identities) if n))
 
 
 def _inventory(
@@ -417,8 +425,8 @@ def _inventory(
 def evidence_checklist(
     view: EvidenceView,
     *,
-    decision_body: str = "",
     subject_entity: str = "",
+    focal_identities: tuple[str, ...] = (),
     as_of: datetime,
     horizon: datetime,
     max_items: int = 80,
@@ -429,8 +437,8 @@ def evidence_checklist(
 
     candidates = build_inventory_from(
         view,
-        decision_body=decision_body,
         subject_entity=subject_entity,
+        focal_identities=focal_identities,
         as_of=as_of,
         horizon=horizon,
     )
@@ -451,21 +459,33 @@ def evidence_checklist(
 
 @dataclass(frozen=True)
 class _MaterialityContext:
-    """Everything the deterministic materiality rules need, in one place."""
+    """Everything the deterministic materiality rules need, in one place.
 
-    body_norm: str
-    subject_norm: str
+    ``focal_norms`` are the normalized identities the question actually turns on — the
+    subject entity plus any entity the compiled world already names. They are the
+    universal replacement for a hardcoded "decision body": an organization or
+    population that overlaps a focal identity is material, whatever kind of process
+    the question involves.
+    """
+
+    focal_norms: tuple[str, ...]
     signal_claim_ids: frozenset[str]
     required_fact_ids: frozenset[str]
     as_of: datetime
     horizon: datetime
-    rule_kind: str
 
     def signal_linked(self, claim_ids: tuple[str, ...]) -> bool:
         return bool(set(claim_ids) & self.signal_claim_ids)
 
     def required_linked(self, claim_ids: tuple[str, ...]) -> bool:
         return bool(set(claim_ids) & self.required_fact_ids)
+
+    def mentions_focal(self, text: str) -> bool:
+        norm = _norm(text)
+        return any(f and f in norm for f in self.focal_norms)
+
+    def overlaps_focal(self, norm_id: str) -> bool:
+        return any(_overlaps(norm_id, f) for f in self.focal_norms)
 
 
 @dataclass
@@ -503,7 +523,7 @@ def _entity_candidates(
             group.lineage.add(c.lineage_event_id)
             # A person is a decision-maker (material) when spoken about with a role or
             # vote verb, or when they co-occur in a claim naming the decision body.
-            if _has_words(prop, _ROLE_WORDS) or (ctx.body_norm and ctx.body_norm in _norm(prop)):
+            if _has_words(prop, _ROLE_WORDS) or ctx.mentions_focal(prop):
                 group.role = True
 
     out: list[EvidenceCandidate] = []
@@ -540,13 +560,13 @@ def _entity_materiality(
         return Materiality.MATERIAL if has_role else Materiality.IMMATERIAL
     if kind is CandidateKind.ORGANIZATION:
         # The decision body / subject organization is always material.
-        if _overlaps(norm_id, ctx.body_norm) or _overlaps(norm_id, ctx.subject_norm):
+        if ctx.overlaps_focal(norm_id):
             return Materiality.MATERIAL
         return Materiality.MATERIAL if ctx.signal_linked(claim_ids) else Materiality.IMMATERIAL
     if kind is CandidateKind.POPULATION_GROUP:
         # A population is material when it is the deciding/subject group or the frame
         # keys on it; a group mentioned in passing is not.
-        if _overlaps(norm_id, ctx.body_norm) or _overlaps(norm_id, ctx.subject_norm):
+        if ctx.overlaps_focal(norm_id):
             return Materiality.MATERIAL
         return Materiality.MATERIAL if ctx.signal_linked(claim_ids) else Materiality.IMMATERIAL
     return Materiality.UNKNOWN
@@ -700,25 +720,27 @@ def _derived_candidates(
 
 
 def _resolution_requirements(contract: ResolutionContract) -> list[EvidenceCandidate]:
-    """The terminal predicate and every required reality fact are, by definition,
-    materially relevant: the question cannot resolve without them."""
+    """The declarative terminal and every required reality fact are, by definition,
+    materially relevant: the question cannot resolve without them.
+
+    The terminal is a compiled :class:`~sworldmodel.worldspec.TerminalExpression`, so it
+    is described by its own plain-language condition — there is no mechanism or family
+    to name here."""
 
     out: list[EvidenceCandidate] = []
-    spec = contract.terminal_predicate
+    terminal = contract.terminal
+    identity = terminal.description or contract.target_outcome or "terminal condition"
     out.append(
         EvidenceCandidate(
-            candidate_id=content_id("cand", "resolution", spec.mechanism, spec.yes_condition),
+            candidate_id=content_id("cand", "resolution", identity),
             kind=CandidateKind.RESOLUTION_REQUIREMENT,
-            canonical_identity=f"{spec.mechanism}:{spec.yes_condition}:{spec.target_option}",
-            description=(
-                f"terminal resolves via {spec.mechanism} when {spec.yes_condition} "
-                f"({spec.target_option or spec.target_action})"
-            ),
-            claim_ids=spec.evidence_claim_ids,
+            canonical_identity=f"terminal:{identity}",
+            description=f"the question resolves YES when: {identity}",
+            claim_ids=(),
             lineage_ids=(),
             materiality=Materiality.MATERIAL,
             is_inference=True,
-            inferred_from=spec.evidence_claim_ids,
+            inferred_from=(),
         )
     )
     for fact in contract.required_reality_facts:
