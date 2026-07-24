@@ -17,6 +17,7 @@ from datetime import datetime
 from typing import Any
 
 from .coverage import evidence_checklist
+from .errors import GatewayError
 from .evidence import EvidenceStore, EvidenceView
 from .gateway import GatewayRequest, ModelGateway
 from .ids import prompt_hash
@@ -191,16 +192,46 @@ Return JSON with keys:
 
 Only include an uncertainty if changing it could flip an actor's option. The base case
 (no threshold-crossing surprise) should carry most weight over a short horizon."""
-    resp = gateway.generate(
-        GatewayRequest(
-            task_kind="compile_uncertainty",
-            prompt=prompt,
-            context={"question": question, "options": options},
-            seed=int(prompt_hash("frame" + question)[:8], 16),
-            expected_keys=("options", "uncertainty"),
+    try:
+        resp = gateway.generate(
+            GatewayRequest(
+                task_kind="compile_uncertainty",
+                prompt=prompt,
+                context={"question": question, "options": options},
+                seed=int(prompt_hash("frame" + question)[:8], 16),
+                # `uncertainty` may legitimately be empty (no threshold-crossing driver),
+                # so only `options` is required; the rest is normalized defensively.
+                expected_keys=("options",),
+            )
         )
-    )
-    return _normalize_frame(resp.data, view)
+        data = resp.data
+    except GatewayError:
+        # A frame-stage provider failure must not abort the whole product. Degrade to a
+        # base-case frame (the options and guidance we already verified, no modeled
+        # surprise) so the simulation still runs a real, if less nuanced, trajectory.
+        # The absence of uncertainty is visible in the trace, never hidden.
+        data = _base_case_frame(reality, options)
+    return _normalize_frame(data, view)
+
+
+def _base_case_frame(reality: dict[str, Any], options: list[str]) -> dict[str, Any]:
+    """A minimal valid frame: the verified options, no modeled surprise, and no guidance.
+
+    Guidance is left null on purpose — with no compiled common position, each actor
+    falls back to its own verified prior action rather than being nudged toward the
+    question's YES option, so the degraded base case stays neutral.
+    """
+
+    return {
+        "options": list(options),
+        "signals": [],
+        "reaction_rules": [],
+        "guidance_option": None,
+        "guidance_text": "",
+        "guidance_evidence_ids": [],
+        "acceptance_tolerance": 0.5,
+        "uncertainty": [],
+    }
 
 
 def build_live_bundle(
@@ -214,8 +245,12 @@ def build_live_bundle(
     view = store.view(as_of)
     reality = compile_reality(gateway, question, as_of, horizon, view)
     # A dedicated roster call enumerates the named decision-makers reliably; use it
-    # when it names at least as many actors as the structural compile did.
-    roster = compile_roster(gateway, question, view, reality, horizon)
+    # when it names at least as many actors as the structural compile did. If the
+    # dedicated call fails, fall back to the roster already compiled with reality.
+    try:
+        roster = compile_roster(gateway, question, view, reality, horizon)
+    except GatewayError:
+        roster = []
     if len(roster) >= len(reality.get("members") or []):
         reality["members"] = roster
     frame = compile_frame(gateway, question, view, reality)

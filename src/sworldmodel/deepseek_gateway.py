@@ -39,8 +39,15 @@ DEFAULT_TEMPERATURES: dict[str, float] = {
 }
 DEFAULT_MAX_TOKENS: dict[str, int] = {
     "extract_claims": 3000,
+    # The compile stages emit large nested JSON (a full roster, or a frame with
+    # per-signal reaction rules and nested uncertainty outcomes). Too small a budget
+    # truncates the JSON mid-object, and since every repair retry re-truncates at the
+    # same cap it can never recover — so these get generous, explicit budgets.
+    "compile_reality": 8000,
+    "compile_roster": 8000,
     "compile_world": 4000,
     "compile_actors": 4000,
+    "compile_uncertainty": 8000,
     "actor_decision": 1500,
 }
 
