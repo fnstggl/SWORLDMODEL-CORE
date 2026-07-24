@@ -140,11 +140,18 @@ class ActionExecutor:
         world: WorldState,
         spec: WorldSpec,
         seed: int,
+        *,
+        microstep: int = 0,
     ) -> TurnOutcome:
+        """``microstep`` is the causal layer of the decision that produced this
+        intention. Anything the action schedules is layered after it, so a zero-duration
+        action completing at the same timestamp still completes *after* the decision to
+        take it rather than sorting ahead of it."""
+
         if choice.mode == "novel_action":
             return self._execute_novel(actor, choice, world, spec, seed)
         if choice.mode == "compiled_action":
-            return self._begin_compiled(actor, choice, world, spec)
+            return self._begin_compiled(actor, choice, world, spec, microstep=microstep)
         return TurnOutcome(
             events=[self._note(world, actor, "actor_waited", {"rationale": choice.rationale})],
             status="wait",
@@ -153,7 +160,13 @@ class ActionExecutor:
         )
 
     def _begin_compiled(
-        self, actor: ActorState, choice: ActionChoice, world: WorldState, spec: WorldSpec
+        self,
+        actor: ActorState,
+        choice: ActionChoice,
+        world: WorldState,
+        spec: WorldSpec,
+        *,
+        microstep: int = 0,
     ) -> TurnOutcome:
         action = spec.action(choice.action_id)
         if action is None:
@@ -212,7 +225,7 @@ class ActionExecutor:
             origin=ORIGIN_CONSEQUENCE,
             origin_detail=f"action:{action.action_id}",
             causal_parents=(note.event_id,),
-            microstep=1,
+            microstep=microstep + 1,
         )
         ongoing = OngoingAction(
             action_id=action.action_id,

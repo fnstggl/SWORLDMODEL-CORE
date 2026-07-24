@@ -42,9 +42,14 @@ def verify_reality(
 
     # 0. There must be at least one verified actor to simulate.
     if not actors:
+        # The compiler was told the world must contain at least one actor whose
+        # decisions produce the outcome. Emitting none is a defect in that compilation,
+        # so the caller may compile again from the same evidence before giving up. What
+        # it may not do is simulate a world in which nobody decides anything.
         raise WorldIntegrityError(
-            "no actors were verified from evidence — simulation refused",
-            details={"verified and represented participants": 0},
+            "no actors were compiled — there is nobody whose decisions could produce "
+            "this outcome, so there is nothing to simulate",
+            details={"verified and represented participants": 0, "recompilable": True},
         )
 
     # 1. Every participant the verified evidence names must be on the compiled roster.

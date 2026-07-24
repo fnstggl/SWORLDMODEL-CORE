@@ -105,7 +105,18 @@ def _compile_with_repair(
             # world. Recompiling is the honest response; accepting it or filling the
             # gap would not be. Nothing about the evidence or the question changes.
             if exc.details.get("recompilable"):
-                recompiled = _recompile(question, as_of, horizon, bundle, config)
+                recompiled = _recompile(
+                    question,
+                    as_of,
+                    horizon,
+                    bundle,
+                    config,
+                    "A previous compilation of this question was rejected. Fix exactly "
+                    "this and change nothing else about how you read the evidence:\n"
+                    f"{exc}\n"
+                    "Do not invent support for anything. If the evidence genuinely does "
+                    "not establish who decides this, compile no actors and say so.",
+                )
                 if recompiled is None:
                     raise
                 bundle = recompiled
@@ -127,6 +138,7 @@ def _recompile(
     horizon: datetime,
     bundle: ResearchBundle,
     config: ForecastConfig,
+    reason: str,
 ) -> ResearchBundle | None:
     """Compile the world again from the same verified evidence.
 
@@ -144,13 +156,7 @@ def _recompile(
             as_of,
             horizon,
             bundle.evidence_store.view(as_of),
-            extra_instruction=(
-                "A previous compilation of this question was internally inconsistent: "
-                "the participant count it declared did not match the actors it emitted. "
-                "State expected_participants as exactly the number of entries in "
-                "`actors`, and include every decision-relevant participant the evidence "
-                "names."
-            ),
+            extra_instruction=reason,
             structure_id="primary",
         )
     except (GatewayError, WorldIntegrityError, ValueError, KeyError):

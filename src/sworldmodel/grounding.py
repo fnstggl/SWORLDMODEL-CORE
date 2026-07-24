@@ -490,6 +490,9 @@ def enforce_actor_grounding(report: ActorGroundingReport) -> None:
     raise WorldIntegrityError(
         "actors are not grounded in cited evidence — simulation refused",
         details={
+            # Grounding failed for this compilation. Compiling again from the same
+            # evidence is legitimate; inventing support for an actor is not.
+            "recompilable": True,
             "ungrounded_actors": list(report.ungrounded_actors),
             "misattributed_evidence": list(report.misattributed),
             "missing_previous_actions": list(report.missing_previous_actions),

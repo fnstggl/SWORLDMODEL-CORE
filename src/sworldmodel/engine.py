@@ -298,7 +298,7 @@ def _seed_branch(
     entries: list[ScheduledEntry] = []
     as_of = world.contract.as_of
 
-    for node in spec.process.roots():
+    for node in _entry_nodes(spec):
         at = _node_time(node, as_of)
         entries.append(
             make_entry(
@@ -351,6 +351,24 @@ def _seed_branch(
         ledger.append(applied)
         world = _propagate(world, spec, [applied])
     return world
+
+
+def _entry_nodes(spec: WorldSpec) -> tuple[ProcessNode, ...]:
+    """The nodes the branch calendar is seeded with.
+
+    A node is seeded unless something else enters it. A node whose ``after_node`` names
+    a node that does not exist is *not* entered by anything, so seeding it is what keeps
+    a compiled step from vanishing between compilation and simulation because of one bad
+    reference.
+    """
+
+    known = {n.node_id for n in spec.process.nodes}
+    entered = {nid for n in spec.process.nodes for nid in n.next_nodes if nid in known}
+    return tuple(
+        n
+        for n in spec.process.nodes
+        if n.node_id not in entered and (not n.after_node or n.after_node not in known)
+    )
 
 
 def _plan_entries(actor: ActorState) -> list[ScheduledEntry]:
@@ -976,7 +994,9 @@ def _invoke_actor(
     world = world.with_actor(result.actor)
     diag.actor_call_counts[aid] = diag.actor_call_counts.get(aid, 0) + 1
 
-    outcome = action_exec.execute(result.actor, result.choice, world, spec, seed)
+    outcome = action_exec.execute(
+        result.actor, result.choice, world, spec, seed, microstep=entry.microstep
+    )
     world = world.apply(outcome.events)
     produced = [_find(world, e.event_id) for e in outcome.events]
     for ev in produced:
