@@ -174,16 +174,32 @@ class ActorRuntime:
                 )
             )
             responses.append(rresp)
-            for mem in rresp.data.get("new_memories", []):
-                actor.memory.add_memory(
-                    mem["content"],
-                    kind=mem.get("kind", "thought"),
-                    importance=float(mem.get("importance", 0.5)),
-                    created=now,
-                    evidence_claim_ids=tuple(mem.get("evidence_claim_ids", [])),
-                    depth=1,
-                )
-            beliefs = tuple(list(actor.beliefs) + list(rresp.data.get("beliefs_update", [])))
+            raw_memories = rresp.data.get("new_memories")
+            for mem in raw_memories if isinstance(raw_memories, list) else []:
+                # The model may return either a string or a structured memory.
+                ev_ids: tuple[str, ...] = ()
+                if isinstance(mem, str):
+                    content, kind, importance = mem, "thought", 0.5
+                elif isinstance(mem, dict):
+                    content = str(mem.get("content", "")).strip()
+                    kind = str(mem.get("kind", "thought"))
+                    importance = _as_float(mem.get("importance"), 0.5)
+                    raw_ev = mem.get("evidence_claim_ids")
+                    ev_ids = tuple(str(x) for x in raw_ev) if isinstance(raw_ev, list) else ()
+                else:
+                    continue
+                if content:
+                    actor.memory.add_memory(
+                        content,
+                        kind=kind,
+                        importance=importance,
+                        created=now,
+                        evidence_claim_ids=ev_ids,
+                        depth=1,
+                    )
+            raw_beliefs = rresp.data.get("beliefs_update")
+            if isinstance(raw_beliefs, list):
+                beliefs = tuple(list(actor.beliefs) + [str(x) for x in raw_beliefs])
             accum = 0.0
 
         # 3. plan/react: ask the model for a typed intention.
@@ -279,6 +295,13 @@ class ActorRuntime:
 
 def _as_dict(value: object) -> dict[str, object]:
     return dict(value) if isinstance(value, dict) else {}
+
+
+def _as_float(value: object, default: float) -> float:
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
 
 
 def _as_str_tuple(value: object) -> tuple[str, ...]:
