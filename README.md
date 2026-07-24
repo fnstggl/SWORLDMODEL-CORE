@@ -72,10 +72,14 @@ artifacts/            generated run artifacts (git-ignored)
 
 - The forecast is `weighted_simulated_trajectories` — never a prior or a separate model.
 - A nine-seat board can never become five modeled units; thresholds are never rescaled.
+- Every materially relevant verified evidence item is represented and causally wired
+  into the world, or explicitly excluded with a recorded reason — nothing important is
+  silently dropped between research and simulation (`docs/COVERAGE_INTEGRITY.md`).
 - Actors emit *intentions*; the environment produces *consequences*.
 - No fact available after `as_of` can affect a pastcast (mechanically enforced).
 - Deleting the actor calls changes/kills the forecast.
 - The full run replays from the event ledger.
 
-See `docs/` for the reality-integrity gate, evidence/cutoff model, actor runtime,
-forecast semantics, the legacy-extraction record, and the Banxico evaluation.
+See `docs/` for the reality-integrity gate, evidence-to-world coverage integrity, the
+evidence/cutoff model, actor runtime, forecast semantics, the legacy-extraction record,
+and the Banxico evaluation.
