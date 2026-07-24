@@ -104,6 +104,9 @@ class LiveResearchBackend:
         seen_hashes: set[str] = set()
 
         queries: deque[str] = deque(plan.initial_queries[: self.budget.max_queries])
+        # Per-decision-maker queries surface articles that name each individual actor.
+        for maker in plan.decision_makers[:6]:
+            queries.append(f"{maker} {plan.resolution_event or question}"[:120])
         # Official-domain queries reach primary sources directly.
         terms = plan.resolution_event or question
         for dom in plan.official_domains[:4]:

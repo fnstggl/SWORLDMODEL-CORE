@@ -72,12 +72,15 @@ Return JSON {{"claims": [ {{
         if not isinstance(c, dict):
             continue
         excerpt = str(c.get("supporting_excerpt", "")).strip()
+        entities = tuple(str(e).strip() for e in c.get("entities", []) if str(e).strip())
+        # A claim survives only if its supporting excerpt is actually in the fetched
+        # text — a fabricated proposition is rejected even if its subject is named.
         verified = bool(excerpt) and _contains(haystack, excerpt)
         out.append(
             ExtractedClaim(
                 proposition=str(c.get("proposition", "")).strip(),
                 normalized_value=str(c.get("normalized_value", "")).strip(),
-                entities=tuple(str(e).strip() for e in c.get("entities", []) if str(e).strip()),
+                entities=entities,
                 epistemic_type=_epi(str(c.get("epistemic_type", "observation"))),
                 supporting_excerpt=excerpt,
                 authority_hint=_auth(c.get("authority_hint")),
