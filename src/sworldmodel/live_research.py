@@ -249,7 +249,10 @@ class LiveResearchBackend:
         for s in sources:
             if s.published_at is not None and s.published_at > as_of:
                 trace.rejected.append(
-                    {"url": s.final_url, "reason": f"published after cutoff ({s.published_at.date()})"}
+                    {
+                        "url": s.final_url,
+                        "reason": f"published after cutoff ({s.published_at.date()})",
+                    }
                 )
             elif s.content_hash not in seen_hashes:
                 fresh.append(s)

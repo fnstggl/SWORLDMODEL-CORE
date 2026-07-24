@@ -11,7 +11,7 @@ import json
 import re
 import urllib.parse
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 
 from .http import HttpError, HttpTransport
@@ -75,6 +75,9 @@ def fetch_source(
     # used, rather than being treated as "now" and excluded from a pastcast.
     if published is None:
         published = _header_date(resp.headers.get("last-modified", ""))
+    # A date parsed from a page body may be timezone-naive; make every source date aware
+    # (assume UTC) so cutoff comparisons never mix naive and aware datetimes.
+    published = _aware(published)
     return FetchedSource(
         url=url,
         final_url=resp.final_url,
@@ -145,6 +148,14 @@ def _header_date(value: str) -> datetime | None:
         return parsedate_to_datetime(value)
     except (TypeError, ValueError):
         return None
+
+
+def _aware(dt: datetime | None) -> datetime | None:
+    """Attach UTC to a timezone-naive datetime so cutoff comparisons stay consistent."""
+
+    if dt is not None and dt.tzinfo is None:
+        return dt.replace(tzinfo=UTC)
+    return dt
 
 
 def _looks_textual(text: str) -> bool:
