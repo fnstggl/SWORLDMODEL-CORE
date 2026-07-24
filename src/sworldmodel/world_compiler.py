@@ -18,6 +18,7 @@ a geopolitical process differ only in the *data* the compiler emits — never in
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime
 from typing import Any
 
@@ -36,6 +37,12 @@ from .coverage import (
 from .errors import GatewayError
 from .evidence import EvidenceView
 from .gateway import GatewayRequest, ModelGateway
+from .grounding import (
+    ActorGroundingProfile,
+    assess_actor_grounding,
+    enforce_actor_grounding,
+    profile_from_member,
+)
 from .ids import prompt_hash
 from .models import (
     BranchWeight,
@@ -71,9 +78,11 @@ def build_base_world(
     actor_states: dict[str, ActorState] = {}
     for aspec in spec.actors:
         entity = entities_by_id.get(aspec.entity_id) or _default_actor_entity(aspec)
-        actor_states[aspec.entity_id] = ActorState.from_spec(
-            entity, aspec, default_time=contract.as_of
-        )
+        state = ActorState.from_spec(entity, aspec, default_time=contract.as_of)
+        # Ground each actor as the specific real entity it is, with provenance on every
+        # element, so its prompt carries its own verified history rather than a template.
+        state.grounding = actor_grounding_profile(entity, aspec, contract)
+        actor_states[aspec.entity_id] = state
 
     fields = {f.field_id: f.initial for f in spec.fields if f.initial is not None}
     resources = {f"{r.resource_id}@{r.holder_entity_id}": r.quantity for r in spec.resources}
@@ -120,7 +129,16 @@ def compile_world(
     # Gate 1 — reality integrity: refuse a structurally false world.
     manifest = verify_reality(contract, evidence, base_world.actors)
 
-    # Gate 2 — evidence-to-world coverage against the exact compiled WorldSpec.
+    # Gate 2 — actors must be specific grounded entities, not generic role templates.
+    profiles = tuple(
+        st.grounding
+        for st in base_world.actors.values()
+        if isinstance(st.grounding, ActorGroundingProfile)
+    )
+    grounding_report = assess_actor_grounding(profiles)
+    enforce_actor_grounding(grounding_report)
+
+    # Gate 3 — evidence-to-world coverage against the exact compiled WorldSpec.
     view, signal_claim_ids = world_spec_view(spec, base_world, uncertainties, world_facts)
     inventory = build_candidate_inventory(
         evidence,
@@ -143,6 +161,7 @@ def compile_world(
         scenario_set=scenario_set,
         manifest=manifest,
         coverage_report=coverage_report,
+        actor_grounding=grounding_report,
         uncertainty_variables=uvars,
         compile_responses=tuple(compile_responses),
     )
@@ -150,6 +169,60 @@ def compile_world(
 
 def _default_actor_entity(aspec: ActorSpec) -> EntitySpec:
     return EntitySpec(entity_id=aspec.entity_id, name=aspec.entity_id, kind="person", is_actor=True)
+
+
+# Entity kinds that are deliberately synthetic stand-ins rather than named real people.
+_CONSTRUCTED_KINDS = frozenset({"population_group", "stratum", "segment", "cohort"})
+
+
+def actor_grounding_profile(
+    entity: EntitySpec, aspec: ActorSpec, contract: ResolutionContract
+) -> ActorGroundingProfile:
+    """Build this actor's grounded profile from its compiled evidence.
+
+    Works for any kind of actor: a named person, a head of state, an organization
+    acting as a unit, or a constructed population stratum. The actor's verified history
+    (its memory seeds) is preserved as history with its own citations; the compiled
+    disposition is recorded separately and explicitly marked as an inference.
+    """
+
+    seeds: list[tuple[str, tuple[str, ...]]] = []
+    for raw in aspec.memory_seeds:
+        d = dict(raw)
+        content = str(d.get("content", "")).strip()
+        if content:
+            cids = tuple(str(c) for c in (d.get("evidence_claim_ids") or []))
+            seeds.append((content, cids))
+
+    policy = aspec.policy
+    inclination = ""
+    if policy.default_action_id:
+        params = policy.default_params_dict
+        detail = ", ".join(f"{k}={v}" for k, v in sorted(params.items()))
+        inclination = (
+            f"{policy.default_action_id}({detail})" if detail else policy.default_action_id
+        )
+    reactions = tuple((r.when_field, r.action_id or "wait") for r in policy.rules if r.when_field)
+
+    profile = profile_from_member(
+        actor_id=entity.entity_id,
+        name=entity.name,
+        role=entity.role,
+        authority=entity.authority,
+        previous_action=None,  # history lives in the seeds and is sorted by its wording
+        memory_seeds=tuple(seeds),
+        inclination=inclination or None,
+        reaction_rules=reactions,
+        valid_time=contract.as_of.isoformat(),
+    )
+    constructed = entity.kind in _CONSTRUCTED_KINDS
+    weight = entity.attributes_dict.get("weight") if constructed else None
+    return replace(
+        profile,
+        claim_ids=tuple(entity.evidence_claim_ids),
+        is_constructed_representative=constructed,
+        population_weight=float(weight) if isinstance(weight, (int, float)) else None,
+    )
 
 
 # ---------------------------------------------------------------------------

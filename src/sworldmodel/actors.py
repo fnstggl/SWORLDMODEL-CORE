@@ -90,6 +90,9 @@ class ActorState:
     entity: EntitySpec
     spec: ActorSpec
     memory: MemoryStream
+    # The compiled grounding profile (grounding.ActorGroundingProfile). Typed as object
+    # to keep the import graph acyclic; set by the world compiler for every actor.
+    grounding: object | None = None
     beliefs: tuple[str, ...] = ()
     goals: tuple[str, ...] = ()
     active_plan: str = ""
@@ -198,12 +201,18 @@ class ActorRuntime:
             accum = 0.0
 
         # 4. decide: ask the gateway for a typed ActionChoice over the feasible menu.
+        profile = actor.grounding
         context: dict[str, Any] = {
             "actor_id": actor.actor_id,
             "name": actor.entity.name,
+            "canonical_identity": getattr(profile, "canonical_identity", actor.entity.name),
             "role": actor.role,
             "authority": list(actor.authority),
             "attributes": actor.entity.attributes_dict,
+            # This actor's own grounded history/statements/inclination, each carrying an
+            # explicit epistemic mark. Rendered as its own prompt section.
+            "actor_grounding": _render_grounding(profile),
+            "actor_evidence_claim_ids": list(getattr(profile, "claim_ids", ())),
             "stage": view.stage,
             "question": view.question,
             "subject": view.subject,
@@ -219,15 +228,22 @@ class ActorRuntime:
             "allow_novel": view.allow_novel,
             "policy": _policy_dict(actor.spec),
         }
+        # The rendered prompt is built once and both SENT and RECORDED, so the audit
+        # trail is byte-identical to what the provider actually received.
+        rendered_prompt = render_decision_prompt(context)
         dresp = self.gateway.generate(
             GatewayRequest(
                 task_kind="actor_decision",
-                prompt=render_decision_prompt(context),
+                prompt=rendered_prompt,
                 context=context,
                 seed=seed,
             )
         )
         responses.append(dresp)
+        # The BYTE-EXACT prompt this specific actor received, plus the provider's
+        # parsed response, so the trace can prove what each actor actually saw.
+        context["rendered_prompt"] = rendered_prompt
+        context["provider_response"] = dict(dresp.data)
         choice = self._to_choice(dresp.data, view)
 
         pending = actor.pending_questions
@@ -335,6 +351,13 @@ def _policy_dict(spec: ActorSpec) -> dict[str, Any]:
 
 def _as_list(value: object) -> list[Any]:
     return list(value) if isinstance(value, list) else []
+
+
+def _render_grounding(profile: object) -> str:
+    """Render an actor's grounding profile block, if the actor has one."""
+
+    render = getattr(profile, "render_grounding", None)
+    return str(render()) if callable(render) else ""
 
 
 def _as_float(value: object, default: float) -> float:

@@ -131,7 +131,7 @@ def committee_world(priors: dict[str, str], *, target: str = "hold") -> dict[str
                 "reasoning": f"{aid} prior was {prior}",
                 "memory_seeds": [
                     {
-                        "content": f"My prior position was {prior}.",
+                        "content": f"I, {aid}, voted {prior} at the last meeting.",
                         "kind": "episodic",
                         "importance": 0.7,
                         "evidence_claim_ids": [f"r_{aid}"],
@@ -679,11 +679,27 @@ def geopolitical_world() -> dict[str, Any]:
             {
                 "entity_id": "state_b",
                 "reasoning": "B warns to deter",
+                "memory_seeds": [
+                    {
+                        "content": "We previously issued a formal warning over a comparable incident.",
+                        "kind": "episodic",
+                        "importance": 0.7,
+                        "evidence_claim_ids": ["r_state_b"],
+                    }
+                ],
                 "policy": {"default_action_id": "send_warning", "default_params": {}},
             },
             {
                 "entity_id": "state_a",
                 "reasoning": "A acts only under high provocation",
+                "memory_seeds": [
+                    {
+                        "content": "We have held back from sanctions absent a severe provocation.",
+                        "kind": "episodic",
+                        "importance": 0.7,
+                        "evidence_claim_ids": ["r_state_a"],
+                    }
+                ],
                 "policy": {
                     "default_action_id": "",
                     "rules": [
@@ -807,6 +823,14 @@ def unknown_action_world(action_name: str = "zorptcast_the_glyph") -> dict[str, 
             {
                 "entity_id": "archivist",
                 "reasoning": "always performs the invented action",
+                "memory_seeds": [
+                    {
+                        "content": "I performed this inscription at the previous cycle.",
+                        "kind": "episodic",
+                        "importance": 0.7,
+                        "evidence_claim_ids": ["r_archivist"],
+                    }
+                ],
                 "policy": {"default_action_id": action_name, "default_params": {}},
             }
         ],
@@ -894,6 +918,14 @@ def novel_action_world(*, mode: str) -> dict[str, Any]:
             {
                 "entity_id": "agent",
                 "reasoning": "prefers an action outside the compiled menu",
+                "memory_seeds": [
+                    {
+                        "content": "I have previously improvised when the standing options did not fit.",
+                        "kind": "episodic",
+                        "importance": 0.7,
+                        "evidence_claim_ids": ["r_agent"],
+                    }
+                ],
                 "policy": {"default_novel": novel},
             }
         ],
@@ -1030,7 +1062,7 @@ def named_body_world(
     for i, aid in enumerate(actor_ids):
         seeds = [
             {
-                "content": "My prior position was hold.",
+                "content": f"I, {aid}, voted hold at the last meeting.",
                 "kind": "episodic",
                 "importance": 0.7,
                 "evidence_claim_ids": [entities[i]["evidence_claim_ids"][0]],

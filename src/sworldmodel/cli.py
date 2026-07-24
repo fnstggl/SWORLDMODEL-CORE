@@ -213,6 +213,89 @@ def _run_live(
     return result, audit
 
 
+def cmd_inspect_actors(args: argparse.Namespace) -> int:
+    """Print the exact prompts each actor received, plus a comparison report.
+
+    Reads a written run directory; nothing is reconstructed — the prompts printed are
+    the byte-exact strings recorded when they were sent to the provider.
+    """
+
+    run_dir = Path(args.run_directory)
+    decisions_path = run_dir / "actor_decisions.jsonl"
+    if not decisions_path.exists():
+        print(f"no actor_decisions.jsonl in {run_dir}", file=sys.stderr)
+        return 2
+    records = [json.loads(line) for line in decisions_path.read_text().splitlines() if line.strip()]
+    stage = args.stage
+    chosen: dict[str, dict[str, Any]] = {}
+    for r in records:
+        if stage and r.get("stage") != stage:
+            continue
+        chosen.setdefault(str(r.get("actor_id")), r)
+    if not chosen:
+        print(f"no actor decisions recorded for stage {stage!r}", file=sys.stderr)
+        return 2
+
+    grounding_path = run_dir / "actor_grounding.json"
+    grounding = json.loads(grounding_path.read_text()) if grounding_path.exists() else {}
+    profiles = {p["actor_id"]: p for p in grounding.get("profiles", [])}
+
+    for aid, rec in chosen.items():
+        print("=" * 78)
+        print(f"ACTOR {aid}  ({rec.get('canonical_identity')})  stage={rec.get('stage')}")
+        print("=" * 78)
+        prof = profiles.get(aid, {})
+        if prof:
+            print(f"previous_observed_action : {prof.get('previous_observed_action')}")
+            incl = prof.get("current_evidence_grounded_inclination") or {}
+            print(f"current_inclination      : {incl.get('content')} [{incl.get('provenance')}]")
+            print(f"direct_statements        : {len(prof.get('direct_statements', []))}")
+            print(f"evidence_claim_ids       : {prof.get('claim_ids')}")
+            print(f"missing_information      : {prof.get('missing_information')}")
+        print(f"retrieved_memory_ids     : {rec.get('retrieved_memory_ids')}")
+        print(f"prompt_hash              : {rec.get('prompt_hash')}")
+        print(f"intent                   : {json.dumps(rec.get('intent'))}")
+        print("\n--- EXACT PROMPT SENT TO THE PROVIDER ---")
+        print(rec.get("exact_prompt") or "(not recorded)")
+        print("\n--- EXACT PROVIDER RESPONSE ---")
+        print(json.dumps(rec.get("provider_response")))
+        print()
+
+    _print_actor_comparison(chosen, profiles)
+    return 0
+
+
+def _print_actor_comparison(
+    chosen: dict[str, dict[str, Any]], profiles: dict[str, dict[str, Any]]
+) -> None:
+    print("=" * 78)
+    print("COMPARISON")
+    print("=" * 78)
+    print(
+        f"{'actor':28s} {'previous action (verified)':34s} "
+        f"{'inclination (inferred)':34s} {'stmts':6s} {'claims':6s}"
+    )
+    for aid in chosen:
+        p = profiles.get(aid, {})
+        incl = (p.get("current_evidence_grounded_inclination") or {}).get("content", "")
+        prev = str(p.get("previous_observed_action") or "—")
+        print(
+            f"{aid:28s} {prev[:33]:34s} {str(incl)[:33]:34s} "
+            f"{len(p.get('direct_statements', [])):<6d} {len(p.get('claim_ids', [])):<6d}"
+        )
+    # How much of each prompt is actor-specific rather than shared boilerplate.
+    prompts = {a: r.get("exact_prompt") or "" for a, r in chosen.items()}
+    ids = list(prompts)
+    if len(ids) > 1:
+        import difflib
+
+        base = prompts[ids[0]]
+        print(f"\nprompt similarity vs {ids[0]}:")
+        for aid in ids[1:]:
+            ratio = difflib.SequenceMatcher(None, base, prompts[aid]).ratio()
+            print(f"  {aid:28s} {ratio:.4f}")
+
+
 def cmd_forecast(args: argparse.Namespace) -> int:
     as_of = datetime.fromisoformat(args.as_of)
     out = Path(args.trace) if args.trace else None
@@ -348,6 +431,11 @@ def build_parser() -> argparse.ArgumentParser:
     bl = sub.add_parser("banxico-live", help="question-only LIVE Banxico acceptance run")
     _add_live_args(bl)
     bl.set_defaults(func=cmd_banxico_live)
+
+    ia = sub.add_parser("inspect-actors", help="show the exact prompt each actor received")
+    ia.add_argument("run_directory", help="a written run/trace directory")
+    ia.add_argument("--stage", default="decision", help="protocol stage (default: decision)")
+    ia.set_defaults(func=cmd_inspect_actors)
 
     banxico = sub.add_parser("banxico", help="Banxico corpus fixture (test utility)")
     bsub = banxico.add_subparsers(dest="sub", required=True)

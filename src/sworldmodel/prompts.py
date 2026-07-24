@@ -24,16 +24,41 @@ def _block(title: str, body: Any) -> str:
 
 
 def render_decision_prompt(context: dict[str, Any]) -> str:
+    """Render this actor's decision prompt.
+
+    The prompt is split into two clearly separated sections so the model can never
+    confuse what everyone knows with what *this specific person* knows:
+
+    * ACTOR-SPECIFIC GROUNDING — this actor's identity, own previous actions, own
+      statements, own commitments and inferred inclination, each carrying an explicit
+      epistemic mark (verified / inferred / hypothesis / unknown).
+    * SHARED WORLD CONTEXT — the stage, observations, public facts and the compiled
+      action menu that any participant in this world may validly hold.
+    """
+
+    identity = context.get("canonical_identity") or context.get("name") or context["actor_id"]
+    grounding = str(context.get("actor_grounding") or "").strip()
+    if not grounding:  # no compiled profile: fall back to the raw identity fields
+        grounding = (
+            f"You are {identity}.\nRole: {context.get('role', '')}\n"
+            f"Authority: {', '.join(context.get('authority') or []) or '(none recorded)'}"
+        )
     return "\n\n".join(
         [
-            f"You are {context.get('name', context['actor_id'])}, role "
-            f"{context.get('role', '')}. You act inside a persistent, simulated world.",
+            f"You are {identity}. Act as this specific person, not as a generic role.",
             f"The world exists to resolve this question: {context.get('question', '')}",
-            "Choose ONE action for this turn. You may pick one of the FEASIBLE ACTIONS",
-            "compiled for your world, or — if none fits your situation — propose a NOVEL",
-            "action describing what you attempt, its target, parameters and intended",
-            "effect. A novel action does NOT automatically happen: the world decides.",
-            "You state an intention only; you may never assert a consequence.",
+            "Choose ONE action for this turn. You may pick one of the FEASIBLE COMPILED",
+            "ACTIONS, or — if none fits your situation — propose a NOVEL action describing",
+            "what you attempt, its target, parameters and intended effect. A novel action",
+            "does NOT automatically happen: the world decides. You state an intention only;",
+            "you may never assert a consequence.",
+            "=" * 70 + "\n## ACTOR-SPECIFIC GROUNDING (yours alone)\n" + "=" * 70,
+            grounding,
+            "Items marked VERIFIED_OBSERVATION are established fact. Items marked",
+            "SUPPORTED_INFERENCE are reasoned expectations, not facts — you may act against",
+            "them if your own record and the current situation warrant. Items marked UNKNOWN",
+            "are genuinely not known: do not invent them.",
+            "=" * 70 + "\n## SHARED WORLD CONTEXT (available to participants)\n" + "=" * 70,
             _block("YOUR AUTHORITY (capabilities you hold)", context.get("authority")),
             _block("YOUR ATTRIBUTES", context.get("attributes")),
             _block("CURRENT STAGE", context.get("stage")),

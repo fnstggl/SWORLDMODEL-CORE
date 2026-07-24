@@ -118,8 +118,20 @@ def _two_actor_world(*, eligible_only_a: bool, ping: bool = False) -> dict[str, 
         "subject_entity": "the log",
         "entities": [_person("a", ["act"]), _person("b", ["act"])],
         "actors": [
-            {"entity_id": "a", "policy": {"default_action_id": "do_it"}},
-            {"entity_id": "b", "policy": {"default_action_id": "do_it"}},
+            {
+                "entity_id": aid,
+                "reasoning": f"{aid} acted here before",
+                "memory_seeds": [
+                    {
+                        "content": f"I, {aid}, took this action in the previous cycle.",
+                        "kind": "episodic",
+                        "importance": 0.7,
+                        "evidence_claim_ids": [f"r_{aid}"],
+                    }
+                ],
+                "policy": {"default_action_id": "do_it"},
+            }
+            for aid in ("a", "b")
         ],
         "fields": [],
         "actions": [

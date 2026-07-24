@@ -51,6 +51,16 @@
    {
     "entity_id": "state_b",
     "reasoning": "B warns to deter",
+    "memory_seeds": [
+     {
+      "content": "We previously issued a formal warning over a comparable incident.",
+      "kind": "episodic",
+      "importance": 0.7,
+      "evidence_claim_ids": [
+       "r_state_b"
+      ]
+     }
+    ],
     "policy": {
      "default_action_id": "send_warning",
      "default_params": {}
@@ -59,6 +69,16 @@
    {
     "entity_id": "state_a",
     "reasoning": "A acts only under high provocation",
+    "memory_seeds": [
+     {
+      "content": "We have held back from sanctions absent a severe provocation.",
+      "kind": "episodic",
+      "importance": 0.7,
+      "evidence_claim_ids": [
+       "r_state_a"
+      ]
+     }
+    ],
     "policy": {
      "default_action_id": "",
      "rules": [

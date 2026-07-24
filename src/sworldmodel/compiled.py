@@ -9,6 +9,7 @@ from dataclasses import dataclass
 
 from .coverage import CompilationCoverageReport
 from .gateway import GatewayResponse
+from .grounding import ActorGroundingReport
 from .models import RealityManifest, UncertaintyVariable
 from .uncertainty import ScenarioSet
 from .world import WorldState
@@ -26,5 +27,6 @@ class CompiledWorld:
     scenario_set: ScenarioSet
     manifest: RealityManifest
     coverage_report: CompilationCoverageReport
+    actor_grounding: ActorGroundingReport
     uncertainty_variables: tuple[UncertaintyVariable, ...] = ()
     compile_responses: tuple[GatewayResponse, ...] = ()

@@ -12,7 +12,7 @@ The result is **one** production architecture, not two.
 
 | Role | Branch | SHA |
 |---|---|---|
-| Destination (surviving) | `claude/sworldmodel-core-rebuild-lcfpq1` | `e88a409` before merge |
+| Destination (surviving) | `claude/sworldmodel-core-rebuild-lcfpq1` | `e88a409` at first merge; `e7e8981` after upstream advanced mid-merge |
 | Source (merged in) | `claude/sworldmodel-core-universal-simulator-z8zsfo` | `621cef4` |
 | Merge base | — | `b09c194` |
 | Backup tag | `pre-universal-merge-20260724T204203Z` → `e88a409` | local |
@@ -92,6 +92,8 @@ api.forecast(question, as_of, horizon, config)
 | `coverage.py` | keyed on `decision_body` / `decision_rule.kind` / `terminal_predicate` | **Generalized**: focal identities replace "decision body"; the dead `rule_kind` was dropped; resolution requirements read the declarative `TerminalExpression`. |
 | `test_coverage.py` | committee-schema corpora | **Ported** to WorldSpec corpora (`_worlds.named_body_world`); all 10 coverage cases preserved. |
 | `compiler.py` / `universal_compiler.py` / `runtime.py` (modify/delete) | rebuilt modified, universal deleted | **Deleted**, after extracting `_world_spec_view` → `world_compiler.world_spec_view`, `_exclusion_reviewer` → `world_compiler.exclusion_reviewer`, and the checklist injection into the live compile. |
+| `grounding.py` (arrived upstream mid-merge) | built for committee `MemberSpec`s | **Kept and ported**: `world_compiler.actor_grounding_profile` builds a profile from any universal `EntitySpec`/`ActorSpec` (named person, organization-as-actor, or constructed stratum); the gate runs as gate 2 in the one compiler. |
+| `prompts.render_decision_prompt` (upstream rewrote it) | committee prompt with grounding split vs universal action-menu prompt | **Fused**: universal compiled-action menu + upstream's ACTOR-SPECIFIC GROUNDING / SHARED WORLD CONTEXT split with epistemic marks. |
 
 ## Duplicate production paths removed
 
@@ -115,11 +117,17 @@ proves none is reachable from `api.forecast()`.
   touched by compiled effects.
 * **Persistent pending needs.** `ActorState.pending_questions` is carried across
   invocations, surfaced in the decision prompt, and is itself a scheduling trigger.
+* **Grounded actors, universally.** Every actor carries an `ActorGroundingProfile` built
+  from its own compiled evidence; the compiler refuses a world whose named actors are
+  only a name plus a generic role, or whose personal record names someone else. Actor
+  fixtures now carry actor-specific, action-worded history, and each decision records the
+  byte-exact prompt that actor received.
 
 ## Tests and smoke runs
 
-* `137 passed` (unit, invariants, integration, acceptance); `ruff` clean;
-  `mypy --strict` clean on 37 source files.
+* `150 passed` (unit, invariants, integration, acceptance — including the 12 upstream
+  grounding tests and the 17 coverage cases); `ruff` clean; `mypy --strict` clean on 38
+  source files.
 * Cross-domain, one entry point, no source changes: committee 0.80, geopolitical 0.40,
   individual response 0.60, negotiation 0.70, population behavior 0.50.
 * Banxico pastcast: p = 0.72, coverage complete (27 material candidates), Brier 0.0784,
@@ -128,6 +136,13 @@ proves none is reachable from `api.forecast()`.
   claims rejected / 4 verified claims → coverage complete → compiled a bespoke world
   (`publicly_release_model`, date-based declarative terminal) → resolved from
   trajectories. 12 calls, 28 139 tokens, 0 retries, 0 failures, ~6.2 s average latency.
+
+## Integrating upstream work that landed mid-merge
+
+While this merge was in progress, three commits (`2add7f9`, `b49405c`, `e7e8981`) were
+pushed to CORE-REBUILT adding the actor-grounding system. They were merged in on the
+same branch (a second `--no-ff` merge, no third branch), and `grounding.py` was ported
+to the universal actor model rather than kept beside it.
 
 ## Remaining limitations
 
