@@ -78,6 +78,31 @@ class ResearchTrace:
         }
 
 
+@dataclass
+class ResearchSession:
+    """Cumulative research state for one question.
+
+    The canonical unit of live research. Everything a previous attempt verified —
+    claims, fetched URLs, content hashes, query history, rejection reasons — persists
+    here, so a follow-up attempt EXTENDS the evidence rather than rebuilding it.
+    """
+
+    question: str
+    as_of: datetime
+    horizon: datetime
+    plan: ResearchPlan
+    store: EvidenceStore = field(default_factory=EvidenceStore)
+    trace: ResearchTrace = field(default_factory=ResearchTrace)
+    seen_urls: set[str] = field(default_factory=set)
+    seen_hashes: set[str] = field(default_factory=set)
+    completed_queries: set[str] = field(default_factory=set)
+    attempts: int = 0
+
+    @property
+    def claim_count(self) -> int:
+        return len(self.store.all())
+
+
 class LiveResearchBackend:
     is_live = True
 
@@ -93,6 +118,30 @@ class LiveResearchBackend:
         self.transport = transport or UrllibTransport()
         self.budget = budget or ResearchBudget()
         self._now = now  # injectable for tests; else datetime.now(tz) at call time
+        # Cumulative sessions keyed by (question, as_of, horizon): a retry continues
+        # the same session so previously verified evidence is never discarded.
+        self._sessions: dict[tuple[str, str, str], ResearchSession] = {}
+
+    def _session(self, question: str, as_of: datetime, horizon: datetime) -> ResearchSession:
+        """Get or create the cumulative session for this question.
+
+        Evidence is accumulated ACROSS attempts: a retry extends the store built by the
+        previous attempt instead of starting from an empty one. Without this, search
+        variance can silently lose facts an earlier attempt already verified, which is
+        the direct cause of run-to-run inconsistency.
+        """
+
+        key = (question, as_of.isoformat(), horizon.isoformat())
+        session = self._sessions.get(key)
+        if session is None:
+            session = ResearchSession(
+                question=question,
+                as_of=as_of,
+                horizon=horizon,
+                plan=plan_research(self.gateway, question, as_of, horizon),
+            )
+            self._sessions[key] = session
+        return session
 
     def research(
         self,
@@ -104,13 +153,18 @@ class LiveResearchBackend:
     ) -> ResearchBundle:
         now = self._now or datetime.now(as_of.tzinfo)
         t0 = time.monotonic()
-        plan = plan_research(self.gateway, question, as_of, horizon)
-        trace = ResearchTrace()
-        store = EvidenceStore()
-        seen_urls: set[str] = set()
-        seen_hashes: set[str] = set()
+        session = self._session(question, as_of, horizon)
+        plan = session.plan
+        trace = session.trace
+        store = session.store
+        seen_urls = session.seen_urls
+        seen_hashes = session.seen_hashes
+        session.attempts += 1
+        trace.stop_reason = ""  # re-decided for this attempt
 
-        queries: deque[str] = deque(plan.initial_queries[: self.budget.max_queries])
+        # Only queries not already run are worth spending budget on.
+        fresh_initial = [q for q in plan.initial_queries if q not in session.completed_queries]
+        queries: deque[str] = deque(fresh_initial[: self.budget.max_queries])
         # Targeted queries (coverage repair) go first so they run even under a budget.
         for q in extra_queries:
             queries.appendleft(q[:120])
@@ -159,6 +213,10 @@ class LiveResearchBackend:
                     queries.append(q)
         if not trace.stop_reason:
             trace.stop_reason = "round/time/query budget reached"
+        # Persist what this attempt ran so a later attempt does not repeat it, and so
+        # the cumulative claim count reflects everything verified so far.
+        session.completed_queries.update(trace.queries)
+        trace.claim_count = len(store.all())
 
         compilation, resp = compile_world_spec_live(
             self.gateway, question, as_of, horizon, store.view(as_of)
@@ -190,14 +248,25 @@ class LiveResearchBackend:
         missing: list[str],
         prior: ResearchBundle,
     ) -> ResearchBundle | None:
-        """Targeted follow-up research when the coverage gate finds a material item
-        absent. Each missing candidate becomes an explicit query so the follow-up
-        research goes looking for exactly what the world was missing."""
+        """Targeted follow-up research when a gate finds something missing.
 
-        queries = tuple(_missing_query(m) for m in missing if _missing_query(m))
+        Each missing item becomes an explicit query. The call CONTINUES the cumulative
+        session for this question, so everything the previous attempt verified is still
+        present: the follow-up only adds the missing facts (and reconciles conflicts).
+        It never starts from an empty evidence store.
+        """
+
+        queries = tuple(q for m in missing if (q := _missing_query(m)))
         if not queries:
             return None
-        return self.research(question, as_of, horizon, extra_queries=queries)
+        before = self._session(question, as_of, horizon).claim_count
+        bundle = self.research(question, as_of, horizon, extra_queries=queries)
+        after = self._session(question, as_of, horizon).claim_count
+        if after < before:  # pragma: no cover - defensive; the store only grows
+            raise AssertionError(
+                f"research augmentation lost evidence ({before} -> {after} claims)"
+            )
+        return bundle
 
     # -- research loop helpers --------------------------------------------------
 

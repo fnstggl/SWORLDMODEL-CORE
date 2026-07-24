@@ -24,6 +24,7 @@ not branch on the kind of question.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime
 
 from .compiled import CompiledWorld
@@ -32,6 +33,7 @@ from .engine import RunResult, run
 from .errors import WorldIntegrityError
 from .models import ForecastResult, ResolutionContract
 from .outcomes import aggregate
+from .repair import classify_failure
 from .research import ResearchBundle
 from .tracing import TraceContext
 from .world_compiler import compile_world
@@ -63,16 +65,21 @@ def _compile_with_repair(
     *,
     max_attempts: int = 3,
 ) -> tuple[ResearchBundle, CompiledWorld]:
-    """Compile the world, and if the coverage gate finds a materially relevant
-    candidate missing, run targeted follow-up research and recompile before giving up.
+    """Compile the world; when a gate refuses for a reason more evidence could honestly
+    fix, run targeted follow-up research and recompile before giving up.
 
-    The gate itself is non-negotiable: if the missing candidates still cannot be
-    represented after the backend has exhausted its follow-up research, the final
-    :class:`WorldIntegrityError` propagates and simulation is refused. A backend that
-    cannot augment (offline corpus/mock) simply blocks on the first failure.
+    Every refusal is classified into a typed :class:`IntegrityFailure` and routed by
+    kind — a coverage omission, a world with no actors, a participant shortfall, an
+    ungrounded actor, or an unverified required fact each produce their own targeted
+    research need. The gates are never weakened: a structurally false world (surplus
+    roster, duplicated participant, decisive contradiction) is classified as
+    non-repairable and refuses immediately. If targeted research still cannot satisfy
+    the gate, the final :class:`WorldIntegrityError` propagates and simulation is
+    refused. A backend that cannot augment simply blocks on the first failure.
     """
 
     backend = config.research_backend
+    repairs: list[dict[str, object]] = []
     for attempt in range(max_attempts):
         evidence_view = bundle.evidence_store.view(as_of)
         contract = _build_contract(question, as_of, horizon, bundle)
@@ -88,13 +95,17 @@ def _compile_with_repair(
                 max_branches=config.max_branches,
                 compile_responses=bundle.compile_responses,
             )
-            return bundle, compiled
+            return replace(bundle, repair_log=tuple(repairs)), compiled
         except WorldIntegrityError as exc:
-            missing = exc.details.get("missing_material_candidates")
+            failure = classify_failure(exc)
             augment = getattr(backend, "augment_for_coverage", None)
-            if not isinstance(missing, list) or augment is None or attempt == max_attempts - 1:
+            repairs.append({**failure.as_dict(), "attempt": attempt})
+            if not failure.retryable or augment is None or attempt == max_attempts - 1:
                 raise
-            augmented = augment(question, as_of, horizon, [str(m) for m in missing], bundle)
+            needs = list(failure.targeted_research_needs) or list(failure.missing_candidates)
+            if not needs:
+                raise
+            augmented = augment(question, as_of, horizon, needs, bundle)
             if augmented is None:
                 raise
             bundle = augmented

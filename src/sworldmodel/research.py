@@ -61,6 +61,8 @@ class ResearchBundle:
     reference_class: dict[str, str] | None = None
     outcome: dict[str, Any] | None = None  # post-cutoff; never used by the forecast
     live_trace: dict[str, Any] | None = None
+    # Typed record of every integrity failure repaired on the way to a valid world.
+    repair_log: tuple[dict[str, Any], ...] = ()
     compile_responses: tuple[Any, ...] = ()
 
 
