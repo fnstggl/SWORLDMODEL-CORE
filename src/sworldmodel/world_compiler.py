@@ -34,7 +34,7 @@ from .coverage import (
     enforce_coverage,
     evidence_checklist,
 )
-from .errors import GatewayError
+from .errors import GatewayError, WorldIntegrityError
 from .evidence import EvidenceView
 from .gateway import GatewayRequest, ModelGateway
 from .grounding import (
@@ -75,9 +75,19 @@ def build_base_world(
     world_facts: tuple[WorldFact, ...],
 ) -> WorldState:
     entities_by_id = {e.entity_id: e for e in spec.entities}
+    orphans = sorted(a.entity_id for a in spec.actors if a.entity_id not in entities_by_id)
+    if orphans:
+        # Inventing an entity here would put a person in the simulation that verified
+        # reality never described, and the coverage gate — which enumerates entities —
+        # would never see them.
+        raise WorldIntegrityError(
+            f"actors {orphans} were compiled without a matching entity. Every actor must be "
+            "a declared entity carrying its own evidence citations.",
+            details={"orphan_actors": orphans},
+        )
     actor_states: dict[str, ActorState] = {}
     for aspec in spec.actors:
-        entity = entities_by_id.get(aspec.entity_id) or _default_actor_entity(aspec)
+        entity = entities_by_id[aspec.entity_id]
         state = ActorState.from_spec(entity, aspec, default_time=contract.as_of)
         # Ground each actor as the specific real entity it is, with provenance on every
         # element, so its prompt carries its own verified history rather than a template.
@@ -167,10 +177,6 @@ def compile_world(
     )
 
 
-def _default_actor_entity(aspec: ActorSpec) -> EntitySpec:
-    return EntitySpec(entity_id=aspec.entity_id, name=aspec.entity_id, kind="person", is_actor=True)
-
-
 # Entity kinds that are deliberately synthetic stand-ins rather than named real people.
 _CONSTRUCTED_KINDS = frozenset({"population_group", "stratum", "segment", "cohort"})
 
@@ -194,15 +200,11 @@ def actor_grounding_profile(
             cids = tuple(str(c) for c in (d.get("evidence_claim_ids") or []))
             seeds.append((content, cids))
 
-    policy = aspec.policy
-    inclination = ""
-    if policy.default_action_id:
-        params = policy.default_params_dict
-        detail = ", ".join(f"{k}={v}" for k, v in sorted(params.items()))
-        inclination = (
-            f"{policy.default_action_id}({detail})" if detail else policy.default_action_id
-        )
-    reactions = tuple((r.when_field, r.action_id or "wait") for r in policy.rules if r.when_field)
+    # An actor's inclination is its compiled *reasoning* about why it leans as it does,
+    # marked as an inference. It is never a pre-selected action: nothing here may tell
+    # the runtime what this actor is going to do.
+    inclination = aspec.reasoning.strip()
+    reactions: tuple[tuple[str, str], ...] = ()
 
     profile = profile_from_member(
         actor_id=entity.entity_id,
@@ -454,11 +456,17 @@ def _referenced_fields(spec: WorldSpec, uncertainties: tuple[UncertaintySpec, ..
         for eff in action.effects:
             used |= _effect_fields(eff)
     for node in spec.process.nodes:
-        used |= _expr_fields(node.condition)
+        used |= _expr_fields(node.entry_condition)
         for eff in node.effects:
             used |= _effect_fields(eff)
-    for a in spec.actors:
-        used.update(r.when_field for r in a.policy.rules if r.when_field)
+    for proc in spec.external_processes:
+        for occ in proc.occurrences:
+            used |= _expr_fields(occ.condition)
+            for eff in occ.effects:
+                used |= _effect_fields(eff)
+    for rule in spec.wake_rules:
+        if rule.on_field_change:
+            used.add(rule.on_field_change)
     used |= _expr_fields(spec.terminal.yes_when) | _expr_fields(spec.terminal.unresolved_when)
     return used
 
@@ -634,10 +642,13 @@ def parse_uncertainties(
         parsed_outcomes: list[UncertaintyOutcome] = []
         for o in outcomes:
             prov = o.get("provenance")
+            # An unlabeled weight is an unjustified weight. Defaulting to a strong
+            # label (explicit_model) would let an invented number outrank an honest
+            # one in the weakest-provenance ordering that stamps the branch.
             provenance = (
                 WeightProvenance(prov)
                 if prov in _VALID_PROVENANCE
-                else WeightProvenance.EXPLICIT_MODEL
+                else WeightProvenance.SYMMETRIC_IGNORANCE
             )
             parsed_outcomes.append(
                 UncertaintyOutcome(
@@ -661,9 +672,20 @@ def parse_uncertainties(
                 reversal_capable=bool(u.get("reversal_capable", True)),
                 outcomes=tuple(parsed_outcomes),
                 constraining_evidence_ids=constraining,
+                depends_on=tuple(str(d) for d in (u.get("depends_on") or [])),
+                release_at=_parse_iso(u.get("release_at")),
             )
         )
     return tuple(out)
+
+
+def _parse_iso(value: object) -> datetime | None:
+    if isinstance(value, str) and value.strip():
+        try:
+            return datetime.fromisoformat(value.strip())
+        except ValueError:
+            return None
+    return None
 
 
 def parse_world_facts(items: Any, default_time: datetime) -> tuple[WorldFact, ...]:

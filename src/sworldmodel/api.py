@@ -101,13 +101,29 @@ def _compile_with_repair(
     raise AssertionError("unreachable")  # pragma: no cover
 
 
-def _limitations(config: ForecastConfig) -> tuple[str, ...]:
-    return (
-        f"actor behavior produced by gateway {config.gateway.model_id!r}; offline runs use a "
-        "deterministic calibrated-behavior reasoner, not a frontier LLM.",
-        "branch weights on uncertain future data are epistemic (symmetric-ignorance / "
-        "explicit-model); the reported bounds expose that sensitivity.",
-    )
+def _limitations(config: ForecastConfig, run_result: RunResult) -> tuple[str, ...]:
+    """State honestly what this particular run's number does and does not rest on."""
+
+    out = [
+        f"actor behavior was produced by {config.gateway.model_id!r}; every actor decision in "
+        "the trace is a real provider call, and deleting those calls deletes the forecast.",
+        "branch weights on uncertain future values are epistemic (symmetric-ignorance or "
+        "explicit-model); the reported unconditional bounds expose that sensitivity.",
+    ]
+    stops = {
+        d.stop_reason
+        for d in run_result.diagnostics.values()
+        if d.stop_reason and d.stop_reason != "schedule exhausted"
+    }
+    for stop in sorted(stops):
+        out.append(f"at least one branch ended early: {stop}")
+    beyond = sum(len(d.pending_beyond_horizon) for d in run_result.diagnostics.values())
+    if beyond:
+        out.append(
+            f"{beyond} scheduled world events fall after the horizon and were never executed; "
+            "the question's window closed before that part of the process."
+        )
+    return tuple(out)
 
 
 def run_forecast(
@@ -119,11 +135,7 @@ def run_forecast(
     bundle, compiled = _compile_with_repair(question, as_of, horizon, bundle, config)
     contract = _build_contract(question, as_of, horizon, bundle)
 
-    run_result: RunResult = run(compiled, config.gateway, seed=config.seed)
-
-    diagnostics: tuple[tuple[str, str], ...] = ()
-    if config.include_reference_class_diagnostic and bundle.reference_class:
-        diagnostics = tuple(sorted(bundle.reference_class.items()))
+    run_result: RunResult = run(compiled, config.gateway, seed=config.seed, budget=config.budget)
 
     trace_location = str(config.trace_dir) if config.trace_dir else "(not written)"
     result = aggregate(
@@ -136,8 +148,8 @@ def run_forecast(
         trace_location=trace_location,
         model_call_count=config.gateway.call_count,
         token_usage=config.gateway.total_tokens,
-        limitations=_limitations(config),
-        diagnostics=diagnostics,
+        limitations=_limitations(config, run_result),
+        diagnostics=(),
     )
     ctx = TraceContext(
         contract=contract,

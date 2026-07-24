@@ -132,7 +132,15 @@ class EntitySpec:
     or channel. ``is_actor`` marks the ones that perceive and act. ``authority`` is a
     free set of capability tokens (e.g. ``"vote"``, ``"sign_treaty"``, ``"reply"``)
     that actions may require — the tokens are compiled from evidence, not enumerated
-    in code."""
+    in code.
+
+    ``representation_scale`` is the compiler's explicit choice of *what level of thing
+    this is*: one person, an organization acting as a unit, a subunit, a stratum of a
+    population, a network, or a non-agent process. Choosing it wrongly is a modeling
+    error the trace should be able to show, so it is recorded rather than implied.
+    ``represents_count`` says how many real units this entity stands for, so an
+    aggregate can never silently masquerade as a single decision-maker.
+    """
 
     entity_id: str
     name: str
@@ -142,6 +150,8 @@ class EntitySpec:
     authority: tuple[str, ...] = ()
     attributes: tuple[tuple[str, Any], ...] = ()  # generic typed facts (e.g. ("weight", 40))
     evidence_claim_ids: tuple[str, ...] = ()
+    representation_scale: str = "individual"
+    represents_count: int | None = None
 
     @property
     def attributes_dict(self) -> dict[str, Any]:
@@ -149,57 +159,34 @@ class EntitySpec:
 
 
 @dataclass(frozen=True)
-class ActorPolicyRule:
-    """A compiled, deterministic behavioral rule the offline reasoner executes: when
-    an observed field crosses a threshold (or equals a value), the actor takes a
-    specific compiled/novel action. This generalizes reaction rules with no notion of
-    "vote" or "option". The live LLM actor decides freely; this only makes the
-    deterministic path reproducible."""
-
-    when_field: str
-    op: str  # "above" | "below" | "equals" | "present"
-    value: Any
-    action_id: str = ""  # "" -> wait
-    params: tuple[tuple[str, Any], ...] = ()
-    novel: tuple[tuple[str, Any], ...] = ()  # optional novel-action proposal instead of action_id
-
-    @property
-    def params_dict(self) -> dict[str, Any]:
-        return dict(self.params)
-
-    @property
-    def novel_dict(self) -> dict[str, Any]:
-        return dict(self.novel)
-
-
-@dataclass(frozen=True)
-class ActorPolicy:
-    """The compiled disposition of an actor for the deterministic path: an ordered
-    rule list (first match wins) and a default action taken when it is this actor's
-    turn and no rule fires."""
-
-    default_action_id: str = ""  # "" -> wait
-    default_params: tuple[tuple[str, Any], ...] = ()
-    default_novel: tuple[tuple[str, Any], ...] = ()
-    rules: tuple[ActorPolicyRule, ...] = ()
-
-    @property
-    def default_params_dict(self) -> dict[str, Any]:
-        return dict(self.default_params)
-
-    @property
-    def default_novel_dict(self) -> dict[str, Any]:
-        return dict(self.default_novel)
-
-
-@dataclass(frozen=True)
 class ActorSpec:
-    """An entity that acts, plus its compiled disposition and seed memories."""
+    """An entity that acts: its evidence-grounded starting state.
+
+    There is no compiled behavioral policy and no default action. An actor's behavior
+    comes from the model that plays it; if that model cannot be reached, the branch's
+    mass stays unresolved. A compiled ``default_action_id`` would be exactly the
+    "deterministic stand-in wearing the actor's name" this runtime exists to prevent.
+
+    The initial plan is *grounded*, not invented: ``initial_plan_basis`` must say which
+    verified schedule, role obligation or existing commitment makes it admissible, and
+    a sparse grounded plan is preferred over a detailed fictional one.
+    """
 
     entity_id: str
-    policy: ActorPolicy
     memory_seeds: tuple[tuple[tuple[str, Any], ...], ...] = ()  # each seed: dict-as-sorted-items
     reasoning: str = ""
+    goals: tuple[str, ...] = ()
+    initial_plan_goal: str = ""
+    initial_plan_steps: tuple[tuple[tuple[str, Any], ...], ...] = ()
+    initial_plan_basis: str = ""
+    initial_plan_evidence_ids: tuple[str, ...] = ()
+    initial_commitments: tuple[tuple[tuple[str, Any], ...], ...] = ()
+
+    def initial_plan_steps_dicts(self) -> tuple[dict[str, Any], ...]:
+        return tuple(dict(s) for s in self.initial_plan_steps)
+
+    def initial_commitment_dicts(self) -> tuple[dict[str, Any], ...]:
+        return tuple(dict(c) for c in self.initial_commitments)
 
 
 # ---------------------------------------------------------------------------
@@ -262,6 +249,14 @@ class ActionDefinition:
     is a declarative :class:`Expr` over world state that must be true. ``resource_costs``
     are (resource_id, amount) that must be available and are consumed. Timing gates the
     action to stages / a time window. ``valid_targets`` optionally restricts targets.
+
+    Taking an action is not the same as the action *happening*. ``duration_seconds``
+    is how long it takes; its effects land at completion, not at the moment of
+    intention. ``completion_conditions`` are re-checked at completion — an action begun
+    in a world that has since changed can fail, and it fails visibly rather than being
+    applied to a world its actor never saw. ``delivery_delay_seconds`` and
+    ``notice_delay_seconds`` separate a consequence occurring from it reaching someone
+    and from that person actually noticing it.
     """
 
     action_id: str
@@ -278,6 +273,11 @@ class ActionDefinition:
     visibility: str = "public"  # public | private | role
     effects: tuple[Effect, ...] = ()
     evidence_claim_ids: tuple[str, ...] = ()
+    duration_seconds: int = 0
+    completion_conditions: Expr = field(default_factory=true_expr)
+    delivery_delay_seconds: int = 0
+    notice_delay_seconds: int = 0
+    observers: tuple[str, ...] = ()  # who may observe the result; empty -> from visibility
 
     def eligible(self, actor_role: str, actor_id: str) -> bool:
         for sel in self.eligible_actors:
@@ -295,30 +295,40 @@ class ActionDefinition:
 
 @dataclass(frozen=True)
 class ProcessNode:
-    """One moment in the compiled process. The runtime, on reaching a node:
+    """One scheduled moment of the compiled process, placed on the real calendar.
 
-    1. skips it if ``condition`` is false;
-    2. advances time by ``advance_seconds`` (and to ``at`` if given);
-    3. applies environment ``effects`` (briefings, data releases, scheduled fires);
-    4. for each of ``rounds``, lets every participant act, offering the compiled
-       actions in ``action_ids`` (``"*"`` = all this actor is eligible for) plus, if
-       ``allow_novel``, a novel-action proposal.
+    A node is *not* a turn. When its scheduled time arrives the runtime checks
+    ``entry_condition``; if true it applies the environment ``effects`` and sets the
+    ``stage``, and the participants named here gain a decision **opportunity** — a
+    reason to be woken, which the engine turns into an actor invocation only if the
+    actor is actually free and affected. Nothing here calls anybody a fixed number of
+    times, and there is deliberately no ``rounds`` field: how often an actor acts is
+    decided by what happens to it.
 
-    ``participants`` are entity ids, ``role:<role>`` selectors, or ``"*"`` (all
-    actors). ``stage`` is a free label the compiler chooses; it gates action timing
-    and is shown to actors. Nothing here says "committee" or "vote"."""
+    Timing is either absolute (``at``) or relative to another node's completion
+    (``after_node`` + ``delay_seconds``). ``next_nodes`` are entered when this node
+    completes, so a compiled process is a graph on the calendar rather than a list the
+    runtime walks. ``deadline`` marks a real cutoff that itself wakes participants.
+
+    ``participants`` are entity ids, ``role:<role>`` selectors, or ``"*"``. ``stage``
+    is a free label the compiler chooses; it gates action feasibility and is shown to
+    actors. Nothing here says "committee", "vote", or names any kind of question.
+    """
 
     node_id: str
     description: str = ""
     stage: str = ""
-    condition: Expr = field(default_factory=true_expr)
-    advance_seconds: int = 0
-    at: Any = None  # ISO datetime string or None
+    entry_condition: Expr = field(default_factory=true_expr)
+    at: Any = None  # ISO datetime string
+    after_node: str = ""  # schedule relative to another node's completion
+    delay_seconds: int = 0
     effects: tuple[Effect, ...] = ()
     participants: tuple[str, ...] = ()
     action_ids: tuple[str, ...] = ("*",)
     allow_novel: bool = True
-    rounds: int = 1
+    deadline: Any = None  # ISO datetime string; wakes participants when reached
+    next_nodes: tuple[str, ...] = ()
+    evidence_claim_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -327,6 +337,73 @@ class ProcessGraph:
 
     def node_ids(self) -> tuple[str, ...]:
         return tuple(n.node_id for n in self.nodes)
+
+    def node(self, node_id: str) -> ProcessNode | None:
+        for n in self.nodes:
+            if n.node_id == node_id:
+                return n
+        return None
+
+    def roots(self) -> tuple[ProcessNode, ...]:
+        """Nodes that are not entered by another node, i.e. those the runtime seeds the
+        schedule with. Everything else is reached causally."""
+
+        entered = {nid for n in self.nodes for nid in n.next_nodes}
+        return tuple(n for n in self.nodes if n.node_id not in entered and not n.after_node)
+
+
+@dataclass(frozen=True)
+class ExternalOccurrence:
+    """One happening of a non-agent process, at an exact time."""
+
+    at: Any  # ISO datetime string
+    description: str = ""
+    effects: tuple[Effect, ...] = ()
+    condition: Expr = field(default_factory=true_expr)
+
+
+@dataclass(frozen=True)
+class ExternalProcess:
+    """A causally relevant part of the world that is not an actor: a scheduled data
+    release, a market or administrative clock, a delivery system, a legal deadline, a
+    publication cycle.
+
+    These evolve through typed world events on their own schedule. Compiling them is
+    what makes it unnecessary to invent an LLM "actor" whose only job is to make the
+    weather happen.
+    """
+
+    process_id: str
+    description: str = ""
+    occurrences: tuple[ExternalOccurrence, ...] = ()
+    evidence_claim_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class WakeRule:
+    """A compiled, scenario-specific reason for an actor to be brought back.
+
+    The compiler discovers *what matters to whom* in this particular world; the runtime
+    owns when it fires and enforces it. Only mechanically checkable forms exist, so no
+    relevance score is ever invented.
+    """
+
+    rule_id: str
+    wakes: tuple[str, ...] = ()  # entity ids / role: selectors / "*"
+    reason: str = ""
+    on_record_in: str = ""  # a record appended to this collection
+    on_field_change: str = ""  # this world field changed
+    on_event_type: str = ""  # a create_event with this event_type
+    on_information_from: str = ""  # this actor communicated
+    evidence_claim_ids: tuple[str, ...] = ()
+
+    def is_checkable(self) -> bool:
+        return bool(
+            self.on_record_in
+            or self.on_field_change
+            or self.on_event_type
+            or self.on_information_from
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -398,6 +475,10 @@ class WorldSpec:
     terminal: TerminalExpression
     subject_entity: str = ""
     resolution_units: str = ""
+    external_processes: tuple[ExternalProcess, ...] = ()
+    wake_rules: tuple[WakeRule, ...] = ()
+    structure_id: str = "primary"
+    structure_rationale: str = ""
 
     def action(self, action_id: str) -> ActionDefinition | None:
         for a in self.actions:
@@ -433,32 +514,25 @@ def parse_entity(d: dict[str, Any]) -> EntitySpec:
         authority=_strs(d.get("authority")),
         attributes=_items(d.get("attributes")),
         evidence_claim_ids=_strs(d.get("evidence_claim_ids")),
+        representation_scale=str(d.get("representation_scale", "individual")),
+        represents_count=(
+            int(d["represents_count"]) if d.get("represents_count") is not None else None
+        ),
     )
 
 
 def parse_actor(d: dict[str, Any]) -> ActorSpec:
-    p = d.get("policy") or {}
-    rules = tuple(
-        ActorPolicyRule(
-            when_field=str(r.get("when_field", "")),
-            op=str(r.get("op", "present")),
-            value=r.get("value"),
-            action_id=str(r.get("action_id", "")),
-            params=_items(r.get("params")),
-            novel=_items(r.get("novel")),
-        )
-        for r in (p.get("rules") or [])
-    )
+    plan = d.get("initial_plan") or {}
     return ActorSpec(
         entity_id=str(d["entity_id"]),
-        policy=ActorPolicy(
-            default_action_id=str(p.get("default_action_id", "")),
-            default_params=_items(p.get("default_params")),
-            default_novel=_items(p.get("default_novel")),
-            rules=rules,
-        ),
         memory_seeds=tuple(_items(s) for s in (d.get("memory_seeds") or [])),
         reasoning=str(d.get("reasoning", "")),
+        goals=_strs(d.get("goals")),
+        initial_plan_goal=str(plan.get("goal", "")),
+        initial_plan_steps=tuple(_items(s) for s in (plan.get("steps") or [])),
+        initial_plan_basis=str(plan.get("basis", "")),
+        initial_plan_evidence_ids=_strs(plan.get("evidence_claim_ids")),
+        initial_commitments=tuple(_items(c) for c in (d.get("commitments") or [])),
     )
 
 
@@ -486,22 +560,65 @@ def parse_action(d: dict[str, Any]) -> ActionDefinition:
         visibility=str(d.get("visibility", "public")),
         effects=parse_effects(d.get("effects")),
         evidence_claim_ids=_strs(d.get("evidence_claim_ids")),
+        duration_seconds=int(d.get("duration_seconds", 0) or 0),
+        completion_conditions=(
+            parse_expr(d["completion_conditions"])
+            if d.get("completion_conditions")
+            else true_expr()
+        ),
+        delivery_delay_seconds=int(d.get("delivery_delay_seconds", 0) or 0),
+        notice_delay_seconds=int(d.get("notice_delay_seconds", 0) or 0),
+        observers=_strs(d.get("observers")),
     )
 
 
 def parse_node(d: dict[str, Any]) -> ProcessNode:
+    cond = d.get("entry_condition") or d.get("condition")
     return ProcessNode(
         node_id=str(d["node_id"]),
         description=str(d.get("description", "")),
         stage=str(d.get("stage", "")),
-        condition=parse_expr(d["condition"]) if d.get("condition") else true_expr(),
-        advance_seconds=int(d.get("advance_seconds", 0)),
+        entry_condition=parse_expr(cond) if cond else true_expr(),
         at=d.get("at"),
+        after_node=str(d.get("after_node", "")),
+        delay_seconds=int(d.get("delay_seconds", 0) or 0),
         effects=parse_effects(d.get("effects")),
         participants=_strs(d.get("participants")),
         action_ids=_strs(d.get("action_ids")) or ("*",),
         allow_novel=bool(d.get("allow_novel", True)),
-        rounds=int(d.get("rounds", 1)),
+        deadline=d.get("deadline"),
+        next_nodes=_strs(d.get("next_nodes")),
+        evidence_claim_ids=_strs(d.get("evidence_claim_ids")),
+    )
+
+
+def parse_external_process(d: dict[str, Any]) -> ExternalProcess:
+    return ExternalProcess(
+        process_id=str(d["process_id"]),
+        description=str(d.get("description", "")),
+        occurrences=tuple(
+            ExternalOccurrence(
+                at=o.get("at"),
+                description=str(o.get("description", "")),
+                effects=parse_effects(o.get("effects")),
+                condition=parse_expr(o["condition"]) if o.get("condition") else true_expr(),
+            )
+            for o in (d.get("occurrences") or [])
+        ),
+        evidence_claim_ids=_strs(d.get("evidence_claim_ids")),
+    )
+
+
+def parse_wake_rule(d: dict[str, Any]) -> WakeRule:
+    return WakeRule(
+        rule_id=str(d.get("rule_id", "")),
+        wakes=_strs(d.get("wakes")),
+        reason=str(d.get("reason", "")),
+        on_record_in=str(d.get("on_record_in", "")),
+        on_field_change=str(d.get("on_field_change", "")),
+        on_event_type=str(d.get("on_event_type", "")),
+        on_information_from=str(d.get("on_information_from", "")),
+        evidence_claim_ids=_strs(d.get("evidence_claim_ids")),
     )
 
 
@@ -564,4 +681,12 @@ def parse_world_spec(d: dict[str, Any]) -> WorldSpec:
         terminal=parse_terminal(d["terminal"]),
         subject_entity=str(d.get("subject_entity", "")),
         resolution_units=str(d.get("resolution_units", "")),
+        external_processes=tuple(
+            parse_external_process(p) for p in (d.get("external_processes") or [])
+        ),
+        wake_rules=tuple(
+            r for r in (parse_wake_rule(w) for w in (d.get("wake_rules") or [])) if r.is_checkable()
+        ),
+        structure_id=str(d.get("structure_id", "primary")),
+        structure_rationale=str(d.get("structure_rationale", "")),
     )

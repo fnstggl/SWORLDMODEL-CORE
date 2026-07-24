@@ -1,37 +1,112 @@
-"""The one universal event runtime.
+"""The one universal runtime: an event-driven clock over compiled worlds.
 
-For each genuine-uncertainty scenario we clone the verified world, release the
-scenario's uncertain future data, and drive the *compiled* process graph — advancing
-time, applying environment effects, and letting each participant perceive, plan, and
-act by choosing among its feasible compiled actions or proposing a novel one. The
-terminal is then evaluated by the deterministic declarative evaluator from the actual
-world state.
+The loop is the same for every question::
 
-There is exactly one runtime. It does **not** branch on the kind of question: a
-committee vote, an individual response, a negotiation, a population behavior, and a
-geopolitical process are all just different compiled :class:`WorldSpec` programs
-executed here. Adding a new kind of question adds compiled data, never a runtime
-branch. Delete the actor calls and the records disappear — there is no second, hidden
-model.
+    next scheduled thing on the branch calendar
+      -> apply it to the external world
+      -> work out who could see the result, when it reaches them, when they notice
+      -> wake ONLY the actors it actually affects, and record why each was woken
+      -> the actor retrieves memories, inspects its plan, and continues / revises /
+         interrupts / replaces it, then emits an intention
+      -> the environment validates the intention and either starts it or refuses it
+      -> consequences enter the queue at their real times
+      -> advance to the next real event
+
+There is no tick, no round, no "one turn per actor", no per-stage actor schedule. How
+many times an actor is invoked is an *output* of the trajectory, not a constant: an
+actor that nothing reaches is never invoked, and an actor in a busy exchange may be
+invoked many times. Two branches routinely invoke the same actor a different number of
+times because different things happen in them.
+
+The runtime does not branch on the kind of question. A committee decision, a single
+message reply, a negotiation, a population process and a multi-state process are all
+compiled :class:`~sworldmodel.worldspec.WorldSpec` programs executed here. Supporting a
+new kind of question adds compiled *data*; it never adds a branch in this file.
+
+Nothing here can save a run. When the model cannot be reached the branch's mass stays
+unresolved; when a trajectory stops making progress it stops, and says so.
 """
 
 from __future__ import annotations
 
-from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timedelta
 from typing import Any
 
-from .actors import ActorRuntime
+from .actors import (
+    PLAN_ACTIVE,
+    ActorRuntime,
+    ActorState,
+)
 from .compiled import CompiledWorld
 from .effects import EffectExecutor
 from .errors import GatewayError
-from .executor import ActionExecutor
+from .executor import KIND_ACTION_COMPLETION, ActionExecutor
 from .expressions import evaluate
 from .gateway import ModelGateway
 from .models import BranchOutcome, BranchWeight, Event, TrajectorySummary, Visibility
+from .schedule import (
+    ORIGIN_ACTOR_PLAN,
+    ORIGIN_CONSEQUENCE,
+    ORIGIN_EXTERNAL,
+    ORIGIN_PROCESS,
+    ScheduledEntry,
+    make_entry,
+)
 from .uncertainty import Scenario
-from .world import WorldState
-from .worldspec import ProcessNode, TerminalExpression, WorldSpec
+from .world import Delivery, WorldState
+from .worldspec import ProcessNode, TerminalExpression, WakeRule, WorldSpec
+
+# Structural schedule-entry kinds. These are runtime mechanics, not domain event types:
+# what a "message" or a "vote" is lives entirely in compiled data.
+KIND_PROCESS_NODE = "process_node"
+KIND_EXTERNAL = "external_occurrence"
+KIND_NOTICE = "information_noticed"
+KIND_DECISION = "actor_decision"
+KIND_COMMITMENT_DUE = "commitment_due"
+KIND_REVISIT = "revisit_condition"
+KIND_NEED_DEADLINE = "information_need_deadline"
+KIND_PLAN_STEP = "plan_step_due"
+KIND_DEADLINE = "process_deadline"
+
+# Why an actor was woken. Every invocation carries exactly one of these plus a detail.
+WAKE_OPPORTUNITY = "process_opportunity"
+WAKE_DIRECTED = "directed_information"
+WAKE_RULE = "compiled_wake_rule"
+WAKE_REVISIT = "own_revisit_condition"
+WAKE_NEED_MET = "pending_need_answered"
+WAKE_NEED_FAILED = "pending_need_unanswered_at_deadline"
+WAKE_COMMITMENT = "commitment_due"
+WAKE_OWN_ACTION = "own_action_resolved"
+WAKE_PLAN_STEP = "own_plan_step_due"
+WAKE_DEADLINE = "deadline_reached"
+
+# Reasons that interrupt an actor who is in the middle of doing something. A mere
+# opportunity does not: an actor with a plan in progress keeps working on it.
+_INTERRUPTING = frozenset(
+    {
+        WAKE_DIRECTED,
+        WAKE_RULE,
+        WAKE_REVISIT,
+        WAKE_NEED_MET,
+        WAKE_NEED_FAILED,
+        WAKE_COMMITMENT,
+        WAKE_OWN_ACTION,
+        WAKE_DEADLINE,
+    }
+)
+
+
+@dataclass(frozen=True)
+class RunBudget:
+    """Hard stops that bound a trajectory. Reaching one *ends* the branch and marks it
+    unresolved with the reason; it never forces a decision, inserts a default action or
+    resolves a terminal that the world did not reach."""
+
+    max_events: int = 600
+    max_actor_calls: int = 80
+    max_batches: int = 400
+    no_progress_batches: int = 8
 
 
 @dataclass(frozen=True)
@@ -44,19 +119,43 @@ class TerminalEvaluation:
 
 @dataclass
 class ActorDecisionRecord:
+    """The complete record of one actor invocation — enough to replay it and enough to
+    show that the actor, not the runtime, decided."""
+
     branch_id: str
     actor_id: str
+    branch_time: str
     stage: str
-    trigger: str
-    decision_context: dict[str, object]
+    wake_reason: str
+    wake_detail: str
+    trigger_event_ids: list[str]
+    delivered_observation_ids: list[str]
+    noticed_observation_ids: list[str]
     retrieved_memory_ids: list[str]
-    choice: dict[str, object]
-    status: str
-    reason: str
+    plan_before: dict[str, object] | None
+    plan_after: dict[str, object] | None
+    plan_disposition: str
+    state_before: dict[str, object]
+    state_after: dict[str, object]
+    decision_context: dict[str, object]
+    intent: dict[str, object]
+    validation_status: str
+    validation_reason: str
     event_ids: list[str]
+    world_version_at_decision: int
     prompt_hash: str
     model: str
     tokens_out: int
+
+
+@dataclass
+class BranchDiagnostics:
+    actor_call_counts: dict[str, int] = field(default_factory=dict)
+    batches: int = 0
+    events: int = 0
+    stop_reason: str = "schedule exhausted"
+    pending_beyond_horizon: list[dict[str, Any]] = field(default_factory=list)
+    unfired_in_horizon: int = 0
 
 
 @dataclass
@@ -68,32 +167,53 @@ class RunResult:
     final_worlds: dict[str, WorldState]
     truncated_mass: float
     truncated_reason: str
+    diagnostics: dict[str, BranchDiagnostics] = field(default_factory=dict)
 
 
-def run(compiled: CompiledWorld, gateway: ModelGateway, *, seed: int) -> RunResult:
+def run(
+    compiled: CompiledWorld,
+    gateway: ModelGateway,
+    *,
+    seed: int,
+    budget: RunBudget | None = None,
+) -> RunResult:
     effects = EffectExecutor()
     action_exec = ActionExecutor(gateway, effects)
     actor_runtime = ActorRuntime(gateway)
+    budget = budget or RunBudget()
 
     branch_outcomes: list[BranchOutcome] = []
     summaries: list[TrajectorySummary] = []
     ledger: list[Event] = []
     decisions: list[ActorDecisionRecord] = []
     final_worlds: dict[str, WorldState] = {}
+    diagnostics: dict[str, BranchDiagnostics] = {}
 
     for scenario in compiled.scenario_set.scenarios:
         weight = BranchWeight(scenario.weight, scenario.provenance, scenario.provenance_detail)
         world = compiled.base_world.clone(new_branch_id=scenario.scenario_id, weight=weight)
+        diag = BranchDiagnostics()
+        diagnostics[scenario.scenario_id] = diag
         try:
-            world = _release_scenario_data(world, scenario, effects, ledger)
-            world = _run_graph(
-                world, compiled.spec, effects, action_exec, actor_runtime, seed, decisions, ledger
+            world = _seed_branch(world, compiled.spec, scenario, effects, ledger)
+            world = _event_loop(
+                world,
+                compiled.spec,
+                effects,
+                action_exec,
+                actor_runtime,
+                seed,
+                decisions,
+                ledger,
+                budget,
+                diag,
             )
-            world = _finalize(world, compiled.spec.terminal, effects, ledger)
+            world = _finalize(world, compiled.spec.terminal, effects, ledger, diag)
         except GatewayError as exc:
+            diag.stop_reason = f"provider_failure: {exc}"
             final_worlds[scenario.scenario_id] = world
             branch_outcomes.append(_unresolved_outcome(scenario, f"provider_failure: {exc}"))
-            summaries.append(_unresolved_summary(scenario, "provider failure"))
+            summaries.append(_unresolved_summary(scenario, f"provider failure: {exc}"))
             continue
         final_worlds[scenario.scenario_id] = world
         branch_outcomes.append(_branch_outcome(world, scenario))
@@ -107,250 +227,893 @@ def run(compiled: CompiledWorld, gateway: ModelGateway, *, seed: int) -> RunResu
         final_worlds=final_worlds,
         truncated_mass=compiled.scenario_set.truncated_mass,
         truncated_reason=compiled.scenario_set.truncated_reason,
+        diagnostics=diagnostics,
     )
 
 
-def _release_scenario_data(
-    world: WorldState, scenario: Scenario, effects: EffectExecutor, ledger: list[Event]
-) -> WorldState:
-    """Deliver the scenario's uncertain future field levels as an observable data
-    release (a simulated branch hypothesis, not a post-cutoff fact)."""
-
-    if not scenario.field_levels:
-        return world
-    as_of = world.contract.as_of
-    horizon = world.contract.horizon
-    t_data = as_of + (horizon - as_of) / 2
-    ev = effects.raw_event(
-        world.with_time(t_data),
-        kind="release_data",
-        actor_id=None,
-        payload={"fields": dict(scenario.field_levels), "epistemic_type": "hypothesis"},
-        visibility=Visibility.PUBLIC,
-    )
-    world = world.apply([ev])
-    ledger.append(_last(world))
-    return world
+# ---------------------------------------------------------------------------
+# Seeding the branch calendar
+# ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
-class _Activation:
-    """A justified reason to invoke one actor now. An actor is never invoked on a
-    fixed schedule: it is invoked because something in the world actually affects it."""
-
-    actor_id: str
-    reason: str
-
-
-def _run_graph(
+def _seed_branch(
     world: WorldState,
     spec: WorldSpec,
+    scenario: Scenario,
     effects: EffectExecutor,
-    action_exec: ActionExecutor,
-    actor_runtime: ActorRuntime,
-    seed: int,
-    decisions: list[ActorDecisionRecord],
     ledger: list[Event],
 ) -> WorldState:
-    for node in spec.process.nodes:
-        if not bool(evaluate(node.condition, world)):
-            continue
-        world = _advance(world, node)
-        if node.stage:
-            world = world.with_stage(node.stage)
-        # 1. environment effects for the node (briefings, data releases, scheduling).
-        if node.effects:
-            env_events = effects.build_events(world, node.effects, {"actor": None, "self": None})
-            world = world.apply(env_events)
-            for ev in env_events:
-                ledger.append(_find(world, ev.event_id))
-        # 2. interaction: event-driven actor invocation (never a fixed turn order).
-        world = _drive_activations(
-            world, spec, node, effects, action_exec, actor_runtime, seed, decisions, ledger
-        )
-    return world
+    """Put the compiled world's *own* calendar into the queue, plus this branch's
+    hypothesis about the uncertain future.
 
-
-def _drive_activations(
-    world: WorldState,
-    spec: WorldSpec,
-    node: ProcessNode,
-    effects: EffectExecutor,
-    action_exec: ActionExecutor,
-    actor_runtime: ActorRuntime,
-    seed: int,
-    decisions: list[ActorDecisionRecord],
-    ledger: list[Event],
-) -> WorldState:
-    """Invoke actors from events until nothing further affects anyone.
-
-    An actor enters the queue only with a concrete trigger: information it has not yet
-    perceived, an opportunity (a feasible compiled action in this node), an unmet
-    information need it recorded earlier, or a consequence of another actor's completed
-    action that reaches it. An actor with no trigger is simply not invoked — inertia is
-    preserved rather than manufacturing decorative activity.
-
-    ``node.rounds`` is a *budget* (the most times one actor may be re-invoked in this
-    node), not a schedule: it bounds cascades without forcing anyone to act.
+    The queue is seeded from three real sources — the compiled process's entry nodes,
+    the compiled external (non-agent) processes, and the actors' grounded initial plan
+    steps and commitments. Nothing is scheduled for the sake of giving anyone a turn.
     """
 
-    participants = _participants(world, spec, node)
-    if not participants:
-        return world
-    budget = max(1, node.rounds)
-    turns: dict[str, int] = dict.fromkeys(participants, 0)
+    entries: list[ScheduledEntry] = []
+    as_of = world.contract.as_of
 
-    queue: deque[_Activation] = deque()
-    for aid in participants:
-        reason = _trigger_for(world, spec, node, action_exec, aid)
-        if reason:
-            queue.append(_Activation(aid, reason))
+    for node in spec.process.roots():
+        at = _node_time(node, as_of)
+        entries.append(
+            make_entry(
+                at=at,
+                kind=KIND_PROCESS_NODE,
+                payload={"node_id": node.node_id},
+                origin=ORIGIN_PROCESS,
+                origin_detail=node.node_id,
+            )
+        )
 
-    while queue:
-        activation = queue.popleft()
-        aid = activation.actor_id
-        if aid not in world.actors or turns.get(aid, 0) >= budget:
+    for proc in spec.external_processes:
+        for i, occ in enumerate(proc.occurrences):
+            at = _parse_dt(occ.at) or as_of
+            entries.append(
+                make_entry(
+                    at=at,
+                    kind=KIND_EXTERNAL,
+                    payload={"process_id": proc.process_id, "index": i},
+                    origin=ORIGIN_EXTERNAL,
+                    origin_detail=proc.process_id,
+                )
+            )
+
+    for aid, actor in world.actors.items():
+        entries.extend(_plan_entries(actor))
+        entries.extend(_commitment_entries(actor))
+
+    world = world.with_schedule(world.schedule.push(*entries))
+
+    # This branch's hypothesis about an uncertain future value. If the compiler knows
+    # when that value becomes public it is released then; otherwise it is a standing
+    # condition of the branch from the start. It is never dropped at an invented
+    # midpoint of the forecast window just to give the world something to react to.
+    if scenario.field_levels:
+        at = scenario.release_at or as_of
+        ev = effects.raw_event(
+            world.with_time(max(world.time, at)),
+            kind="release_data",
+            actor_id=None,
+            payload={
+                "fields": dict(scenario.field_levels),
+                "epistemic_type": "hypothesis",
+                "branch_conditions": dict(scenario.conditions),
+            },
+            visibility=Visibility.PUBLIC,
+        )
+        world = world.apply([ev])
+        applied = world.event_history[-1]
+        ledger.append(applied)
+        world = _propagate(world, spec, [applied])
+    return world
+
+
+def _plan_entries(actor: ActorState) -> list[ScheduledEntry]:
+    """An actor's own planned future steps are real future causes: they put an
+    opportunity on the calendar rather than waiting for the world to poke the actor."""
+
+    out: list[ScheduledEntry] = []
+    if actor.plan is None or actor.plan.status != PLAN_ACTIVE:
+        return out
+    for step in actor.plan.steps:
+        if step.at is None or step.status in ("done", "abandoned"):
             continue
-        # Re-check at pop time: the world moved since this activation was queued.
-        if not _trigger_for(world, spec, node, action_exec, aid):
+        out.append(
+            make_entry(
+                at=step.at,
+                kind=KIND_PLAN_STEP,
+                actor_id=actor.actor_id,
+                payload={"plan_id": actor.plan.plan_id, "step": step.description},
+                origin=ORIGIN_ACTOR_PLAN,
+                origin_detail=f"{actor.actor_id}:{actor.plan.plan_id}",
+            )
+        )
+    return out
+
+
+def _commitment_entries(actor: ActorState) -> list[ScheduledEntry]:
+    out: list[ScheduledEntry] = []
+    for c in actor.open_commitments():
+        if c.due is None:
             continue
-        turns[aid] = turns.get(aid, 0) + 1
-        before = len(world.event_history)
-        world = _actor_turn(
+        out.append(
+            make_entry(
+                at=c.due,
+                kind=KIND_COMMITMENT_DUE,
+                actor_id=actor.actor_id,
+                payload={"commitment": c.text},
+                origin=ORIGIN_ACTOR_PLAN,
+                origin_detail=f"{actor.actor_id}:commitment",
+            )
+        )
+    return out
+
+
+# ---------------------------------------------------------------------------
+# The loop
+# ---------------------------------------------------------------------------
+
+
+def _event_loop(
+    world: WorldState,
+    spec: WorldSpec,
+    effects: EffectExecutor,
+    action_exec: ActionExecutor,
+    actor_runtime: ActorRuntime,
+    seed: int,
+    decisions: list[ActorDecisionRecord],
+    ledger: list[Event],
+    budget: RunBudget,
+    diag: BranchDiagnostics,
+) -> WorldState:
+    horizon = world.contract.horizon
+    stale_batches = 0
+    last_digest = world.state_digest()
+
+    while True:
+        if diag.batches >= budget.max_batches:
+            diag.stop_reason = f"batch budget exhausted ({budget.max_batches})"
+            break
+        if diag.events >= budget.max_events:
+            diag.stop_reason = f"event budget exhausted ({budget.max_events})"
+            break
+        if sum(diag.actor_call_counts.values()) >= budget.max_actor_calls:
+            diag.stop_reason = f"actor-call budget exhausted ({budget.max_actor_calls})"
+            break
+
+        schedule, batch = world.schedule.pop_batch(horizon=horizon)
+        if not batch:
+            diag.stop_reason = "schedule exhausted"
+            break
+        world = world.with_schedule(schedule)
+        world = world.with_time(batch[0].at)
+        diag.batches += 1
+
+        produced: list[Event] = []
+        for entry in _merge_decisions(batch):
+            world, evs = _dispatch(
+                world,
+                spec,
+                entry,
+                effects,
+                action_exec,
+                actor_runtime,
+                seed,
+                decisions,
+                ledger,
+                budget,
+                diag,
+            )
+            produced.extend(evs)
+        diag.events += len(produced)
+
+        digest = world.state_digest()
+        if not produced and digest == last_digest:
+            stale_batches += 1
+            if stale_batches >= budget.no_progress_batches:
+                diag.stop_reason = (
+                    f"no progress: {stale_batches} consecutive batches changed nothing"
+                )
+                break
+        else:
+            stale_batches = 0
+            last_digest = digest
+
+    diag.pending_beyond_horizon = [
+        e.as_dict() for e in world.schedule.beyond_horizon(horizon=horizon)[:50]
+    ]
+    diag.unfired_in_horizon = world.schedule.pending_count(horizon=horizon)
+    return world
+
+
+def _merge_decisions(batch: tuple[ScheduledEntry, ...]) -> tuple[ScheduledEntry, ...]:
+    """Collapse simultaneous wake-ups of the same actor into one invocation.
+
+    Two independent things can reach the same person at the same instant. That is one
+    moment of their attention, not two: they are told both reasons and decide once.
+    """
+
+    merged: dict[tuple[str, str], ScheduledEntry] = {}
+    out: list[ScheduledEntry] = []
+    for entry in batch:
+        if entry.kind != KIND_DECISION or not entry.actor_id:
+            out.append(entry)
+            continue
+        key = (entry.actor_id, entry.at.isoformat())
+        existing = merged.get(key)
+        if existing is None:
+            merged[key] = entry
+            continue
+        p, q = existing.payload_dict, entry.payload_dict
+        combined = dict(p)
+        combined["wake_reason"] = f"{p.get('wake_reason')}+{q.get('wake_reason')}"
+        combined["wake_detail"] = f"{p.get('wake_detail')}; {q.get('wake_detail')}"
+        combined["observation_ids"] = list(
+            dict.fromkeys(
+                list(p.get("observation_ids") or []) + list(q.get("observation_ids") or [])
+            )
+        )
+        combined["node_id"] = p.get("node_id") or q.get("node_id") or ""
+        merged[key] = make_entry(
+            at=entry.at,
+            kind=KIND_DECISION,
+            actor_id=entry.actor_id,
+            payload=combined,
+            origin=existing.origin,
+            origin_detail=existing.origin_detail,
+            causal_parents=tuple(dict.fromkeys(existing.causal_parents + entry.causal_parents)),
+            microstep=min(existing.microstep, entry.microstep),
+        )
+    out.extend(merged.values())
+    return tuple(sorted(out, key=lambda e: e.sort_key()))
+
+
+def _dispatch(
+    world: WorldState,
+    spec: WorldSpec,
+    entry: ScheduledEntry,
+    effects: EffectExecutor,
+    action_exec: ActionExecutor,
+    actor_runtime: ActorRuntime,
+    seed: int,
+    decisions: list[ActorDecisionRecord],
+    ledger: list[Event],
+    budget: RunBudget,
+    diag: BranchDiagnostics,
+) -> tuple[WorldState, list[Event]]:
+    kind = entry.kind
+    if kind == KIND_PROCESS_NODE:
+        return _fire_process_node(world, spec, entry, effects, ledger)
+    if kind == KIND_EXTERNAL:
+        return _fire_external(world, spec, entry, effects, ledger)
+    if kind == KIND_ACTION_COMPLETION:
+        return _complete_action(world, spec, entry, action_exec, ledger)
+    if kind == KIND_NOTICE:
+        return _notice(world, spec, entry)
+    if kind == KIND_DECISION:
+        return _invoke_actor(
             world,
-            aid,
-            node,
             spec,
+            entry,
             effects,
             action_exec,
             actor_runtime,
             seed,
             decisions,
             ledger,
-            trigger=activation.reason,
+            budget,
+            diag,
         )
-        new_events = world.event_history[before:]
-        # A completed action can reach other actors (information, a response, or a
-        # newly-feasible option). Those are the only follow-up invocations.
-        for other in participants:
-            if other == aid or turns.get(other, 0) >= budget:
-                continue
-            reason = _consequence_trigger(world, spec, node, action_exec, other, new_events)
-            if reason:
-                queue.append(_Activation(other, reason))
-    return world
+    if kind in (
+        KIND_COMMITMENT_DUE,
+        KIND_REVISIT,
+        KIND_NEED_DEADLINE,
+        KIND_PLAN_STEP,
+        KIND_DEADLINE,
+    ):
+        return _wake_from_entry(world, spec, entry, action_exec)
+    return world, []
 
 
-def _trigger_for(
+# -- world-side entries ------------------------------------------------------
+
+
+def _fire_process_node(
     world: WorldState,
     spec: WorldSpec,
-    node: ProcessNode,
+    entry: ScheduledEntry,
+    effects: EffectExecutor,
+    ledger: list[Event],
+) -> tuple[WorldState, list[Event]]:
+    node = spec.process.node(str(entry.payload_dict.get("node_id", "")))
+    if node is None:
+        return world, []
+    if not bool(evaluate(node.entry_condition, world)):
+        # The node's moment came and its precondition was not met. That is a real
+        # outcome, not a reason to retry until it is.
+        ev = effects.raw_event(
+            world,
+            kind="create_event",
+            actor_id=None,
+            payload={
+                "event_type": "process_node_skipped",
+                "text": f"{node.node_id}: entry condition not met",
+            },
+            visibility=Visibility.PUBLIC,
+        )
+        world = world.apply([ev])
+        ledger.append(world.event_history[-1])
+        return world, [world.event_history[-1]]
+
+    if node.stage:
+        world = world.with_stage(node.stage)
+
+    produced: list[Event] = []
+    if node.effects:
+        env_events = effects.build_events(world, node.effects, {"actor": None, "self": None})
+        world = world.apply(env_events)
+        for ev in env_events:
+            applied = _find(world, ev.event_id)
+            ledger.append(applied)
+            produced.append(applied)
+        world = _propagate(world, spec, produced)
+
+    follow: list[ScheduledEntry] = []
+    for nxt_id in node.next_nodes:
+        nxt = spec.process.node(nxt_id)
+        if nxt is None:
+            continue
+        at = _node_time(nxt, world.time, after=world.time)
+        follow.append(
+            make_entry(
+                at=at,
+                kind=KIND_PROCESS_NODE,
+                payload={"node_id": nxt.node_id},
+                origin=ORIGIN_PROCESS,
+                origin_detail=f"{node.node_id}->{nxt.node_id}",
+                causal_parents=tuple(e.event_id for e in produced),
+                microstep=entry.microstep + 1,
+            )
+        )
+    deadline = _parse_dt(node.deadline)
+    if deadline is not None:
+        for aid in _participants(world, spec, node):
+            follow.append(
+                make_entry(
+                    at=deadline,
+                    kind=KIND_DEADLINE,
+                    actor_id=aid,
+                    payload={"node_id": node.node_id, "detail": f"deadline for {node.node_id}"},
+                    origin=ORIGIN_PROCESS,
+                    origin_detail=f"{node.node_id}:deadline",
+                )
+            )
+
+    # Participants gain an *opportunity*: a reason to be woken, not a scheduled turn.
+    for aid in _participants(world, spec, node):
+        follow.append(
+            _decision_entry(
+                at=world.time,
+                actor_id=aid,
+                reason=WAKE_OPPORTUNITY,
+                detail=f"{node.node_id}: {node.description or node.stage or 'opportunity to act'}",
+                node_id=node.node_id,
+                causal_parents=tuple(e.event_id for e in produced),
+                # +2, not +1: whatever this node delivered is noticed at +1, so the
+                # actor arrives at its opportunity already knowing what just happened
+                # rather than being asked to act on a world it has not seen.
+                microstep=entry.microstep + 2,
+            )
+        )
+    if follow:
+        world = world.with_schedule(world.schedule.push(*follow))
+    return world, produced
+
+
+def _fire_external(
+    world: WorldState,
+    spec: WorldSpec,
+    entry: ScheduledEntry,
+    effects: EffectExecutor,
+    ledger: list[Event],
+) -> tuple[WorldState, list[Event]]:
+    p = entry.payload_dict
+    proc = next(
+        (x for x in spec.external_processes if x.process_id == str(p.get("process_id"))), None
+    )
+    if proc is None:
+        return world, []
+    idx = int(p.get("index", 0))
+    if idx >= len(proc.occurrences):
+        return world, []
+    occ = proc.occurrences[idx]
+    if not bool(evaluate(occ.condition, world)):
+        return world, []
+    produced: list[Event] = []
+    if occ.effects:
+        evs = effects.build_events(world, occ.effects, {"actor": None, "self": None})
+        world = world.apply(evs)
+        for ev in evs:
+            applied = _find(world, ev.event_id)
+            ledger.append(applied)
+            produced.append(applied)
+        world = _propagate(world, spec, produced)
+    return world, produced
+
+
+def _complete_action(
+    world: WorldState,
+    spec: WorldSpec,
+    entry: ScheduledEntry,
     action_exec: ActionExecutor,
-    actor_id: str,
-) -> str:
-    """Why this actor should act now, or '' when nothing affects it."""
+    ledger: list[Event],
+) -> tuple[WorldState, list[Event]]:
+    """Finish an in-flight action. Its effects land now, in the world as it is now."""
 
-    actor = world.actors.get(actor_id)
+    aid = str(entry.actor_id)
+    actor = world.actors.get(aid)
+    outcome = action_exec.complete(world, entry, spec)
+    world = world.apply(outcome.events)
+    produced = [_find(world, e.event_id) for e in outcome.events]
+    for ev in produced:
+        ledger.append(ev)
+    world = _propagate(world, spec, produced, source_action_id=outcome.action_id)
+
+    if actor is not None:
+        status = "completed" if outcome.status == "executed" else "failed"
+        ongoing = actor.current_action
+        updated = (
+            replace(ongoing, status=status)
+            if ongoing is not None and ongoing.action_id == outcome.action_id
+            else None
+        )
+        world = world.with_actor(replace(world.actors[aid], current_action=updated))
+        if status == "failed":
+            # A failure is news the actor needs: what it set out to do did not happen,
+            # and it may now do something else. A *success* is not news — the actor
+            # already knows it acted, and waking it here would make every completed
+            # action immediately prompt another one, which is a treadmill, not a life.
+            # After a success the actor comes back only when its own plan, a commitment,
+            # or something in the world brings it back.
+            world = world.with_schedule(
+                world.schedule.push(
+                    _decision_entry(
+                        at=world.time,
+                        actor_id=aid,
+                        reason=WAKE_OWN_ACTION,
+                        detail=f"your action {outcome.action_id!r} failed: {outcome.reason}",
+                        causal_parents=tuple(e.event_id for e in produced),
+                        microstep=entry.microstep + 1,
+                    )
+                )
+            )
+    return world, produced
+
+
+def _notice(
+    world: WorldState, spec: WorldSpec, entry: ScheduledEntry
+) -> tuple[WorldState, list[Event]]:
+    """An actor's attention arrives: everything available to it by now becomes noticed.
+
+    Noticing is where information enters the actor's world — not delivery. Whether it
+    then *acts* is a separate question answered below, and the answer is usually no.
+    """
+
+    aid = str(entry.actor_id)
+    actor = world.actors.get(aid)
     if actor is None:
-        return ""
-    reasons: list[str] = []
-    if world.view_for(actor_id).observations:
-        reasons.append("information")
-    if action_exec.feasible_actions(world, node, actor, spec):
-        reasons.append("opportunity")
-    if actor.pending_questions:
-        reasons.append("pending_need")
-    if not reasons and node.allow_novel and world.view_for(actor_id).public_facts:
-        # An actor with no compiled option may still propose a novel action, but only
-        # when it has something to go on; otherwise it stays inert.
-        return ""
-    return "+".join(reasons)
+        return world, []
+    available = world.available_unnoticed(aid, by=world.time)
+    if not available:
+        return world, []
+    ids = frozenset(d.event_id for d in available)
+    # The world records that the actor noticed these; the actor records that it has
+    # folded them into memory, which happens when it is next invoked. Setting the
+    # actor-side marker here would make the information vanish before it was ever put
+    # in front of the actor.
+    world = world.mark_noticed(aid, ids, world.time)
+    world = world.with_actor(
+        replace(
+            world.actors[aid],
+            available_event_ids=world.actors[aid].available_event_ids - ids,
+        )
+    )
+
+    reason, detail = _relevance(world, spec, world.actors[aid], ids)
+    if reason:
+        world = world.with_schedule(
+            world.schedule.push(
+                _decision_entry(
+                    at=world.time,
+                    actor_id=aid,
+                    reason=reason,
+                    detail=detail,
+                    observation_ids=tuple(sorted(ids)),
+                    causal_parents=tuple(sorted(ids)),
+                    microstep=entry.microstep + 1,
+                )
+            )
+        )
+    return world, []
 
 
-def _consequence_trigger(
+def _wake_from_entry(
+    world: WorldState, spec: WorldSpec, entry: ScheduledEntry, action_exec: ActionExecutor
+) -> tuple[WorldState, list[Event]]:
+    """A time-based cause fires: a commitment falls due, a self-set revisit arrives, a
+    requested answer definitively failed to come, a planned step's moment arrives, or a
+    real deadline is reached."""
+
+    aid = str(entry.actor_id or "")
+    actor = world.actors.get(aid)
+    if actor is None:
+        return world, []
+    p = entry.payload_dict
+    mapping = {
+        KIND_COMMITMENT_DUE: (
+            WAKE_COMMITMENT,
+            f"your commitment is due: {p.get('commitment', '')}",
+        ),
+        KIND_REVISIT: (WAKE_REVISIT, f"the condition you set has arrived: {p.get('detail', '')}"),
+        KIND_NEED_DEADLINE: (
+            WAKE_NEED_FAILED,
+            f"you are still waiting on: {p.get('question', '')} — it has not arrived",
+        ),
+        KIND_PLAN_STEP: (WAKE_PLAN_STEP, f"your planned step is due: {p.get('step', '')}"),
+        KIND_DEADLINE: (WAKE_DEADLINE, str(p.get("detail", "a deadline has been reached"))),
+    }
+    reason, detail = mapping[entry.kind]
+
+    if entry.kind == KIND_NEED_DEADLINE:
+        # Only wake for a need that is genuinely still open.
+        q = str(p.get("question", ""))
+        if not any(n.question == q and not n.resolved for n in actor.pending_needs):
+            return world, []
+
+    world = world.with_schedule(
+        world.schedule.push(
+            _decision_entry(
+                at=world.time,
+                actor_id=aid,
+                reason=reason,
+                detail=detail,
+                causal_parents=entry.causal_parents,
+                microstep=entry.microstep + 1,
+            )
+        )
+    )
+    return world, []
+
+
+# -- the actor invocation ----------------------------------------------------
+
+
+def _invoke_actor(
     world: WorldState,
     spec: WorldSpec,
-    node: ProcessNode,
-    action_exec: ActionExecutor,
-    actor_id: str,
-    new_events: tuple[Event, ...],
-) -> str:
-    """Whether another actor's completed action actually reaches this actor."""
-
-    if not new_events:
-        return ""
-    actor = world.actors.get(actor_id)
-    if actor is None:
-        return ""
-    view = world.view_for(actor_id)
-    fresh = {o.obs_id for o in view.observations}
-    if any(ev.event_id in fresh for ev in new_events):
-        return "response_to_completed_action"
-    if actor.pending_questions and view.observations:
-        return "pending_need_met"
-    return ""
-
-
-def _actor_turn(
-    world: WorldState,
-    actor_id: str,
-    node: ProcessNode,
-    spec: WorldSpec,
+    entry: ScheduledEntry,
     effects: EffectExecutor,
     action_exec: ActionExecutor,
     actor_runtime: ActorRuntime,
     seed: int,
     decisions: list[ActorDecisionRecord],
     ledger: list[Event],
-    *,
-    trigger: str = "",
-) -> WorldState:
-    actor = world.actors[actor_id]
+    budget: RunBudget,
+    diag: BranchDiagnostics,
+) -> tuple[WorldState, list[Event]]:
+    aid = str(entry.actor_id)
+    actor = world.actors.get(aid)
+    if actor is None:
+        return world, []
+    p = entry.payload_dict
+    reason = str(p.get("wake_reason", ""))
+    detail = str(p.get("wake_detail", ""))
+
+    # An actor busy with its own unfinished action is not interrupted by a mere
+    # opportunity. This is what makes a plan persist across events.
+    if actor.is_busy and reason not in _INTERRUPTING:
+        return world, []
+
+    node = spec.process.node(str(p.get("node_id", ""))) if p.get("node_id") else None
     feasible = action_exec.feasible_actions(world, node, actor, spec)
-    base_view = world.view_for(actor_id, None)
-    view = _with_menu(base_view, feasible, node, action_exec)
+    allow_novel = node.allow_novel if node is not None else True
+    if not feasible and not allow_novel:
+        return world, []
 
-    choice, new_actor, responses, context = actor_runtime.step(actor, view, seed=seed)
-    world = world.with_actor(new_actor)
+    base_view = world.view_for(aid)
+    view = replace(
+        base_view,
+        feasible_actions=tuple(action_exec.action_card(a) for a in feasible),
+        allow_novel=allow_novel,
+        trigger_kind=reason,
+        trigger_detail=detail,
+        trigger_obs_id=(list(p.get("observation_ids") or []) or [None])[0],
+    )
+    world = world.with_schedule(
+        world.schedule.drop_matching(kind=KIND_DECISION, actor_id=aid, at=world.time)
+    )
+    state_before = actor.state_dict()
+    version_at_decision = world.version
 
-    outcome = action_exec.execute(actor, choice, world, spec, seed)
-    responses.extend(_gw_responses(outcome.gateway_responses))
+    result = actor_runtime.step(actor, view, seed=seed)
+    world = world.with_actor(result.actor)
+    diag.actor_call_counts[aid] = diag.actor_call_counts.get(aid, 0) + 1
+
+    outcome = action_exec.execute(result.actor, result.choice, world, spec, seed)
     world = world.apply(outcome.events)
-    for ev in outcome.events:
-        ledger.append(_find(world, ev.event_id))
+    produced = [_find(world, e.event_id) for e in outcome.events]
+    for ev in produced:
+        ledger.append(ev)
+    world = _propagate(world, spec, produced)
 
-    rmi = context.get("retrieved_memory_ids")
-    retrieved_ids = [str(x) for x in rmi] if isinstance(rmi, list) else []
+    updated = world.actors[aid]
+    if outcome.ongoing is not None:
+        updated = replace(updated, current_action=outcome.ongoing)
+    elif outcome.status in ("rejected", "wait", "failed"):
+        updated = replace(updated, current_action=None)
+    world = world.with_actor(updated)
+
+    follow: list[ScheduledEntry] = list(outcome.scheduled)
+    follow.extend(_plan_entries(updated))
+    follow.extend(_commitment_entries(updated))
+    follow.extend(_revisit_entries(updated, world))
+    follow.extend(_need_deadline_entries(updated))
+    if outcome.status == "rejected":
+        # A refusal is information the actor receives. It may then choose something
+        # else — a genuine new decision, not a rewrite of the one it made.
+        follow.append(
+            _decision_entry(
+                at=world.time,
+                actor_id=aid,
+                reason=WAKE_OWN_ACTION,
+                detail=f"your attempt was refused: {outcome.reason}",
+                causal_parents=tuple(e.event_id for e in produced),
+                microstep=entry.microstep + 2,
+            )
+        )
+    if follow:
+        world = world.with_schedule(world.schedule.push(*follow))
+
+    responses = result.responses + list(outcome.gateway_responses)
+    gw = [r for r in responses if hasattr(r, "prompt_hash")]
     decisions.append(
         ActorDecisionRecord(
             branch_id=world.branch_id,
-            actor_id=actor_id,
+            actor_id=aid,
+            branch_time=view.branch_time.isoformat(),
             stage=view.stage,
-            trigger=trigger,
-            decision_context=context,
-            retrieved_memory_ids=retrieved_ids,
-            choice={
-                "mode": choice.mode,
-                "action_id": choice.action_id,
-                "params": dict(choice.params),
-                "target": choice.target,
-                "novel_description": choice.novel_description,
-                "rationale": choice.rationale,
+            wake_reason=reason,
+            wake_detail=detail,
+            trigger_event_ids=list(entry.causal_parents),
+            delivered_observation_ids=[d.event_id for d in world.deliveries if d.actor_id == aid],
+            noticed_observation_ids=result.noticed_obs_ids,
+            retrieved_memory_ids=result.retrieved_memory_ids,
+            plan_before=result.plan_before,
+            plan_after=result.plan_after,
+            plan_disposition=result.plan_disposition,
+            state_before=state_before,
+            state_after=world.actors[aid].state_dict(),
+            decision_context=result.context,
+            intent={
+                "mode": result.choice.mode,
+                "action_id": result.choice.action_id,
+                "params": dict(result.choice.params),
+                "target": result.choice.target,
+                "novel_description": result.choice.novel_description,
+                "novel_intended_effect": result.choice.novel_intended_effect,
+                "rationale": result.choice.rationale,
             },
-            status=outcome.status,
-            reason=outcome.reason,
-            event_ids=[e.event_id for e in outcome.events],
-            prompt_hash=responses[-1].prompt_hash if responses else "",
-            model=responses[-1].model if responses else "",
-            tokens_out=responses[-1].tokens_out if responses else 0,
+            validation_status=outcome.status,
+            validation_reason=outcome.reason,
+            event_ids=[e.event_id for e in produced],
+            world_version_at_decision=version_at_decision,
+            prompt_hash=gw[-1].prompt_hash if gw else "",
+            model=gw[-1].model if gw else "",
+            tokens_out=gw[-1].tokens_out if gw else 0,
         )
     )
-    return world
+    return world, produced
+
+
+# ---------------------------------------------------------------------------
+# Information propagation and relevance
+# ---------------------------------------------------------------------------
+
+
+def _propagate(
+    world: WorldState,
+    spec: WorldSpec,
+    events: list[Event],
+    *,
+    source_action_id: str = "",
+) -> WorldState:
+    """Turn events into *deliveries* and schedule the moments they may be noticed.
+
+    Visibility says who could ever see it. Delivery says when it reached them. Notice
+    says when they took it in. Each is a separate recorded transition with its own
+    timestamp, because collapsing them is how simulators accidentally give everyone
+    perfect, instant, universal awareness.
+    """
+
+    action = spec.action(source_action_id) if source_action_id else None
+    deliver_delay = timedelta(seconds=action.delivery_delay_seconds if action else 0)
+    notice_delay = timedelta(seconds=action.notice_delay_seconds if action else 0)
+
+    deliveries: list[Delivery] = []
+    entries: list[ScheduledEntry] = []
+    for ev in events:
+        if ev.kind not in _OBSERVABLE_EVENT_KINDS:
+            continue
+        for aid in world.observers_of(ev):
+            available_at = ev.time + deliver_delay
+            notice_at = available_at + notice_delay
+            deliveries.append(
+                Delivery(
+                    event_id=ev.event_id,
+                    actor_id=aid,
+                    available_at=available_at,
+                    notice_at=notice_at,
+                    channel=str(ev.payload_dict.get("channel", "")),
+                )
+            )
+            entries.append(
+                make_entry(
+                    at=notice_at,
+                    kind=KIND_NOTICE,
+                    actor_id=aid,
+                    payload={"about": ev.event_id},
+                    origin=ORIGIN_CONSEQUENCE,
+                    origin_detail=f"delivery:{ev.event_id}",
+                    causal_parents=(ev.event_id,),
+                    microstep=1,
+                )
+            )
+    if not deliveries:
+        return world
+    world = world.deliver(tuple(deliveries))
+    for aid in {d.actor_id for d in deliveries}:
+        world = world.with_actor(
+            replace(
+                world.actors[aid],
+                available_event_ids=world.actors[aid].available_event_ids
+                | {d.event_id for d in deliveries if d.actor_id == aid},
+            )
+        )
+    return world.with_schedule(world.schedule.push(*entries))
+
+
+# Event kinds that carry observable content. Bookkeeping kinds (an action starting, an
+# attempt being refused) are private to the acting actor and are handled separately.
+_OBSERVABLE_EVENT_KINDS = frozenset(
+    {
+        "deliver_information",
+        "release_data",
+        "create_event",
+        "schedule_event",
+        "append_record",
+        "create_or_update_document",
+        "update_commitment",
+        "action_rejected",
+        "action_failed",
+    }
+)
+
+
+def _relevance(
+    world: WorldState, spec: WorldSpec, actor: ActorState, noticed: frozenset[str]
+) -> tuple[str, str]:
+    """Is what this actor just noticed a reason to reconsider?
+
+    Being able to see something is not a reason to act on it. An actor is brought back
+    only for a *stated* cause: information addressed to it, a compiled wake rule for
+    this world, a condition it named itself, or an answer (or definitive non-answer) to
+    something it asked. Otherwise it remembers what it saw and carries on — which is
+    what people do, and what keeps this from becoming a machine that consults everyone
+    about everything.
+    """
+
+    by_id = {e.event_id: e for e in world.event_history}
+    events = [by_id[i] for i in sorted(noticed) if i in by_id]
+
+    for ev in events:
+        if actor.actor_id in ev.audience or actor.actor_id in ev.target_ids:
+            return WAKE_DIRECTED, f"{ev.kind} addressed to you from {ev.actor_id or 'environment'}"
+
+    for ev in events:
+        for cond in actor.revisit_conditions:
+            if cond.on_information_from and cond.on_information_from == (ev.actor_id or ""):
+                return WAKE_REVISIT, cond.description
+            if cond.on_record_in and ev.kind == "append_record":
+                if str(ev.payload_dict.get("collection", "")) == cond.on_record_in:
+                    return WAKE_REVISIT, cond.description
+            if cond.on_field_change and ev.kind in ("set_field", "release_data", "adjust_field"):
+                data = ev.payload_dict
+                names = set(dict(data.get("fields", {})).keys()) | {str(data.get("field", ""))}
+                if cond.on_field_change in names:
+                    return WAKE_REVISIT, cond.description
+
+    for need in actor.open_needs():
+        for ev in events:
+            if need.asked_of and (ev.actor_id or "") == need.asked_of:
+                return WAKE_NEED_MET, f"an answer arrived from {need.asked_of}: {need.question}"
+
+    for ev in events:
+        for rule in spec.wake_rules:
+            if _rule_matches(rule, ev) and _selects(world, spec, rule.wakes, actor.actor_id):
+                return WAKE_RULE, rule.reason or rule.rule_id
+
+    return "", ""
+
+
+def _rule_matches(rule: WakeRule, ev: Event) -> bool:
+    data = ev.payload_dict
+    if rule.on_record_in and ev.kind == "append_record":
+        return str(data.get("collection", "")) == rule.on_record_in
+    if rule.on_event_type and ev.kind in ("create_event", "schedule_event"):
+        return str(data.get("event_type", "")) == rule.on_event_type
+    if rule.on_field_change and ev.kind in ("set_field", "adjust_field", "release_data"):
+        names = set(dict(data.get("fields", {})).keys()) | {str(data.get("field", ""))}
+        return rule.on_field_change in names
+    if rule.on_information_from:
+        return (ev.actor_id or "") == rule.on_information_from
+    return False
+
+
+def _revisit_entries(actor: ActorState, world: WorldState) -> list[ScheduledEntry]:
+    """A revisit the actor set for a specific time becomes a real future wake-up."""
+
+    out: list[ScheduledEntry] = []
+    for cond in actor.revisit_conditions:
+        if cond.at is None or cond.at <= world.time:
+            continue
+        out.append(
+            make_entry(
+                at=cond.at,
+                kind=KIND_REVISIT,
+                actor_id=actor.actor_id,
+                payload={"detail": cond.description},
+                origin=ORIGIN_ACTOR_PLAN,
+                origin_detail=f"{actor.actor_id}:revisit",
+            )
+        )
+    return out
+
+
+def _need_deadline_entries(actor: ActorState) -> list[ScheduledEntry]:
+    """Waiting for something that never comes is itself an event."""
+
+    out: list[ScheduledEntry] = []
+    for need in actor.open_needs():
+        if need.deadline is None:
+            continue
+        out.append(
+            make_entry(
+                at=need.deadline,
+                kind=KIND_NEED_DEADLINE,
+                actor_id=actor.actor_id,
+                payload={"question": need.question},
+                origin=ORIGIN_ACTOR_PLAN,
+                origin_detail=f"{actor.actor_id}:need",
+            )
+        )
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Terminal
+# ---------------------------------------------------------------------------
 
 
 def _finalize(
-    world: WorldState, terminal: TerminalExpression, effects: EffectExecutor, ledger: list[Event]
+    world: WorldState,
+    terminal: TerminalExpression,
+    effects: EffectExecutor,
+    ledger: list[Event],
+    diag: BranchDiagnostics,
 ) -> WorldState:
+    # Nothing further is scheduled inside the window, so the branch's clock reaches the
+    # horizon. This is the end of the question's window, not a jump over live events.
     world = world.with_time(world.contract.horizon)
     evaluation = evaluate_terminal(world, terminal)
     world = world.set_terminal(evaluation)
@@ -361,18 +1124,18 @@ def _finalize(
         payload={
             "event_type": "result_recorded",
             "text": evaluation.reason,
-            "data": {"outcome": evaluation.outcome or "unresolved"},
+            "data": {"outcome": evaluation.outcome or "unresolved", "stop": diag.stop_reason},
         },
         visibility=Visibility.PUBLIC,
     )
     world = world.apply([ev])
-    ledger.append(_last(world))
+    ledger.append(world.event_history[-1])
     return world
 
 
 def evaluate_terminal(world: WorldState, terminal: TerminalExpression) -> TerminalEvaluation:
     """The single place YES/NO/unresolved is decided — deterministic, from world state,
-    via the universal operators only. No LLM, no fixed mechanism family."""
+    through the universal operators only. No LLM, no mechanism family, no default."""
 
     if bool(evaluate(terminal.unresolved_when, world)):
         return TerminalEvaluation(
@@ -395,28 +1158,62 @@ def evaluate_terminal(world: WorldState, terminal: TerminalExpression) -> Termin
 # ---------------------------------------------------------------------------
 
 
-def _advance(world: WorldState, node: ProcessNode) -> WorldState:
-    if isinstance(node.at, str) and node.at:
+def _decision_entry(
+    *,
+    at: datetime,
+    actor_id: str,
+    reason: str,
+    detail: str,
+    node_id: str = "",
+    observation_ids: tuple[str, ...] = (),
+    causal_parents: tuple[str, ...] = (),
+    microstep: int = 1,
+) -> ScheduledEntry:
+    return make_entry(
+        at=at,
+        kind=KIND_DECISION,
+        actor_id=actor_id,
+        payload={
+            "wake_reason": reason,
+            "wake_detail": detail,
+            "node_id": node_id,
+            "observation_ids": list(observation_ids),
+        },
+        origin=ORIGIN_CONSEQUENCE,
+        origin_detail=f"wake:{reason}",
+        causal_parents=causal_parents,
+        microstep=microstep,
+    )
+
+
+def _node_time(node: ProcessNode, default: datetime, *, after: datetime | None = None) -> datetime:
+    at = _parse_dt(node.at)
+    if at is not None:
+        return at
+    base = after if after is not None else default
+    return base + timedelta(seconds=max(0, node.delay_seconds))
+
+
+def _parse_dt(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str) and value.strip():
         try:
-            from datetime import datetime
-
-            world = world.with_time(datetime.fromisoformat(node.at))
+            return datetime.fromisoformat(value.strip())
         except ValueError:
-            pass
-    if node.advance_seconds:
-        from datetime import timedelta
-
-        world = world.with_time(world.time + timedelta(seconds=node.advance_seconds))
-    return world
+            return None
+    return None
 
 
 def _participants(world: WorldState, spec: WorldSpec, node: ProcessNode) -> tuple[str, ...]:
     if not node.participants:
-        return ()  # an environment-only node: no actor acts here
-    if node.participants == ("*",):
-        return tuple(a.entity_id for a in spec.actors if a.entity_id in world.actors)
+        return ()  # an environment-only node: nobody acts here
+    return _select(world, spec, node.participants)
+
+
+def _select(world: WorldState, spec: WorldSpec, selectors: tuple[str, ...]) -> tuple[str, ...]:
     out: list[str] = []
-    for sel in node.participants:
+    for sel in selectors:
         if sel == "*":
             out.extend(a.entity_id for a in spec.actors if a.entity_id in world.actors)
         elif sel.startswith("role:"):
@@ -424,27 +1221,15 @@ def _participants(world: WorldState, spec: WorldSpec, node: ProcessNode) -> tupl
             out.extend(aid for aid, a in world.actors.items() if a.role == role)
         elif sel in world.actors:
             out.append(sel)
-    # preserve declared actor order, de-duplicated
     order = {a.entity_id: i for i, a in enumerate(spec.actors)}
     return tuple(sorted(dict.fromkeys(out), key=lambda x: order.get(x, 1 << 30)))
 
 
-def _with_menu(
-    view: Any, feasible: list[Any], node: ProcessNode, action_exec: ActionExecutor
-) -> Any:
-    from dataclasses import replace
-
-    cards = tuple(action_exec.action_card(a) for a in feasible)
-    return replace(view, feasible_actions=cards, allow_novel=node.allow_novel)
-
-
-def _gw_responses(items: list[Any]) -> list[Any]:
-    return list(items)
+def _selects(world: WorldState, spec: WorldSpec, selectors: tuple[str, ...], actor_id: str) -> bool:
+    return actor_id in _select(world, spec, selectors)
 
 
 def _highlights(world: WorldState) -> tuple[tuple[str, str], ...]:
-    """A compact, human-readable snapshot of the decisive world state for the report."""
-
     out: list[tuple[str, str]] = []
     for coll, recs in world.records:
         for r in recs:
@@ -452,10 +1237,6 @@ def _highlights(world: WorldState) -> tuple[tuple[str, str], ...]:
     for name, value in world.fields:
         out.append((f"field:{name}", str(value)))
     return tuple(out)
-
-
-def _last(world: WorldState) -> Event:
-    return world.event_history[-1]
 
 
 def _find(world: WorldState, event_id: str) -> Event:

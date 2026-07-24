@@ -199,10 +199,15 @@ class TraceContext:
         return lines
 
     def actor_decision_lines(self) -> list[str]:
-        """One record per actor decision, carrying the BYTE-EXACT prompt that was sent
-        to the provider (not a reconstruction) plus the provider's parsed response, so
-        the trace can prove what each specific actor actually received and why it was
-        invoked at that moment."""
+        """One record per actor invocation — the stable contract a replay or a frontend
+        reads.
+
+        Each record answers, without reconstruction: what woke this actor and when, what
+        had been delivered to it, what it actually noticed, which memories it retrieved,
+        what its plan was before, what it decided to do with that plan, what it intended,
+        what the world allowed, and what its state was afterwards. The prompt is the
+        byte-exact string that was sent.
+        """
 
         out = []
         for d in self.run_result.actor_decisions:
@@ -215,19 +220,29 @@ class TraceContext:
                         "branch_id": d.branch_id,
                         "actor_id": d.actor_id,
                         "canonical_identity": ctx.get("canonical_identity"),
+                        "branch_time": d.branch_time,
                         "stage": d.stage,
-                        "trigger": d.trigger,
-                        "actor_evidence_claim_ids": ctx.get("actor_evidence_claim_ids", []),
+                        "wake_reason": d.wake_reason,
+                        "wake_detail": d.wake_detail,
+                        "trigger_event_ids": d.trigger_event_ids,
+                        "delivered_observation_ids": d.delivered_observation_ids,
+                        "noticed_observation_ids": d.noticed_observation_ids,
                         "retrieved_memory_ids": d.retrieved_memory_ids,
-                        "observed_event_ids": _observed_ids(ctx.get("observations")),
+                        "plan_before": d.plan_before,
+                        "plan_disposition": d.plan_disposition,
+                        "plan_after": d.plan_after,
+                        "state_before": d.state_before,
+                        "state_after": d.state_after,
+                        "actor_evidence_claim_ids": ctx.get("actor_evidence_claim_ids", []),
                         "feasible_actions": ctx.get("feasible_actions", []),
                         "local_view": ctx,
                         "exact_prompt": prompt,
                         "provider_response": response,
-                        "choice": d.choice,
-                        "status": d.status,
-                        "reason": d.reason,
+                        "intent": d.intent,
+                        "validation_status": d.validation_status,
+                        "validation_reason": d.validation_reason,
                         "applied_event_ids": d.event_ids,
+                        "world_version_at_decision": d.world_version_at_decision,
                         "prompt_hash": d.prompt_hash,
                         "model": d.model,
                     }
@@ -332,8 +347,21 @@ class TraceContext:
             )
         add("")
 
-        add("## 7. Compiled process graph")
-        add("- " + " -> ".join(f"{n.node_id}({n.stage})" for n in spec.process.nodes) + "\n")
+        add("## 7. Compiled process graph, external processes and wake rules")
+        for n in spec.process.nodes:
+            when = n.at or (f"after {n.after_node}+{n.delay_seconds}s" if n.after_node else "start")
+            add(
+                f"- **{n.node_id}** ({n.stage}) at {when}; participants "
+                f"{list(n.participants) or 'none'} -> {list(n.next_nodes) or 'end'}"
+            )
+        for proc in spec.external_processes:
+            add(
+                f"- external **{proc.process_id}**: {proc.description} "
+                f"({len(proc.occurrences)} occurrences)"
+            )
+        for rule in spec.wake_rules:
+            add(f"- wake **{rule.rule_id}**: wakes {list(rule.wakes)} because {rule.reason}")
+        add("")
 
         add("## 8. External uncertain events and branch weights")
         for u in self.compiled.uncertainty_variables:
@@ -342,12 +370,42 @@ class TraceContext:
                 add(f"    - {o.value}: weight {o.weight.value} [{o.weight.provenance.value}]")
         add("")
 
-        add("## 9. Actor decisions (local view -> action choice -> events)")
+        add("## 9. Actor invocations (what woke them -> what they intended -> what happened)")
+        add(
+            "Invocation counts differ by actor and by branch because different things "
+            "happened to them. Nothing here is scheduled.\n"
+        )
         for d in self.run_result.actor_decisions:
-            c = d.choice
+            c = d.intent
             add(
-                f"- [{d.branch_id}] {d.actor_id} @ {d.stage}: {c['mode']} "
-                f"{c.get('action_id') or c.get('novel_description')} -> {d.status} ({d.reason})"
+                f"- [{d.branch_id}] {d.branch_time} {d.actor_id} woken by "
+                f"*{d.wake_reason}* ({d.wake_detail}); plan: {d.plan_disposition}; "
+                f"intent {c['mode']} {c.get('action_id') or c.get('novel_description')} "
+                f"-> {d.validation_status} ({d.validation_reason})"
+            )
+        add("")
+
+        add("### 9b. Invocations per actor per branch")
+        per: dict[tuple[str, str], list[str]] = {}
+        for d in self.run_result.actor_decisions:
+            per.setdefault((d.branch_id, d.actor_id), []).append(d.wake_reason)
+        for (branch, actor), reasons in sorted(per.items()):
+            counts: dict[str, int] = {}
+            for r in reasons:
+                counts[r] = counts.get(r, 0) + 1
+            add(
+                f"- {branch} / {actor}: {len(reasons)} — "
+                + ", ".join(f"{k}×{v}" for k, v in sorted(counts.items()))
+            )
+        add("")
+
+        add("### 9c. Branch execution diagnostics")
+        for bid, diag in sorted(self.run_result.diagnostics.items()):
+            add(
+                f"- {bid}: {diag.batches} time-batches, {diag.events} events, "
+                f"stopped because *{diag.stop_reason}*; "
+                f"{diag.unfired_in_horizon} entries never fired in-horizon, "
+                f"{len(diag.pending_beyond_horizon)} scheduled beyond the horizon"
             )
         add("")
 

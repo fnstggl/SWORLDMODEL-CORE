@@ -24,7 +24,31 @@ def test_no_uncertainty_gives_single_baseline() -> None:
     assert len(ss.scenarios) == 1
     assert ss.scenarios[0].weight == 1.0
     assert ss.truncated_mass == 0.0
-    assert dict(ss.scenarios[0].field_levels) == {"s": 0.0}
+    # A baseline branch releases nothing: the verified starting state is already in the
+    # base world, and re-announcing it would look to actors like something happening.
+    assert ss.scenarios[0].field_levels == ()
+
+
+def test_dependent_uncertainties_are_refused_rather_than_crossed() -> None:
+    """Two unknowns the compiler itself called dependent must not be multiplied."""
+
+    import pytest
+
+    from sworldmodel.errors import WorldIntegrityError
+
+    specs = (
+        UncertaintySpec("s", "unknown", True, (_outcome("lo", 0.5, 0.0), _outcome("hi", 0.5, 1.0))),
+        UncertaintySpec(
+            "t",
+            "unknown",
+            True,
+            (_outcome("lo", 0.5, 0.0), _outcome("hi", 0.5, 1.0)),
+            depends_on=("s",),
+        ),
+    )
+    with pytest.raises(WorldIntegrityError) as exc:
+        enumerate_scenarios(specs, {})
+    assert "dependence" in str(exc.value)
 
 
 def test_product_weights_and_mass_conserved() -> None:
