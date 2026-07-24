@@ -78,7 +78,16 @@ class TraceContext:
         }
 
     def evidence_manifest(self) -> dict[str, Any]:
+        """Every claim with enough provenance to be re-verified against its source.
+
+        A manifest that records only that a claim exists is not an audit trail. Each
+        entry carries the URL actually fetched (the archived capture, for a pastcast),
+        the excerpt it was verified against, and the content hash of the document it
+        came from, so a reader can go back to the page and check.
+        """
+
         claims = self.evidence_store.all()
+        provenance = {r["claim_id"]: r for r in self.evidence_store.provenance_records()}
         return {
             "claim_count": len(claims),
             "independent_event_count": len(self.evidence_store.independent_event_ids()),
@@ -101,6 +110,9 @@ class TraceContext:
                     "authority_level": int(c.authority_level),
                     "epistemic_type": c.epistemic_type.value,
                     "lineage_event_id": c.lineage_event_id,
+                    "source_url": c.source_url,
+                    "supporting_excerpt": c.supporting_excerpt,
+                    "provenance": provenance.get(c.id, {}),
                 }
                 for c in claims
             ],
