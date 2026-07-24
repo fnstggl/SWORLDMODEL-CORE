@@ -72,6 +72,7 @@ KIND_DEADLINE = "process_deadline"
 # Why an actor was woken. Every invocation carries exactly one of these plus a detail.
 WAKE_OPPORTUNITY = "process_opportunity"
 WAKE_DIRECTED = "directed_information"
+WAKE_COMMUNICATION = "communication_from_another_actor"
 WAKE_RULE = "compiled_wake_rule"
 WAKE_REVISIT = "own_revisit_condition"
 WAKE_NEED_MET = "pending_need_answered"
@@ -86,6 +87,7 @@ WAKE_DEADLINE = "deadline_reached"
 _INTERRUPTING = frozenset(
     {
         WAKE_DIRECTED,
+        WAKE_COMMUNICATION,
         WAKE_RULE,
         WAKE_REVISIT,
         WAKE_NEED_MET,
@@ -983,6 +985,10 @@ def _propagate(
     return world.with_schedule(world.schedule.push(*entries))
 
 
+# Event kinds that are a *person saying or undertaking something*, as opposed to the
+# world changing. Only these make another participant's act inherently worth noticing.
+_COMMUNICATION_KINDS = frozenset({"deliver_information", "update_commitment"})
+
 # Event kinds that carry observable content. Bookkeeping kinds (an action starting, an
 # attempt being refused) are private to the acting actor and are handled separately.
 _OBSERVABLE_EVENT_KINDS = frozenset(
@@ -1006,11 +1012,12 @@ def _relevance(
     """Is what this actor just noticed a reason to reconsider?
 
     Being able to see something is not a reason to act on it. An actor is brought back
-    only for a *stated* cause: information addressed to it, a compiled wake rule for
-    this world, a condition it named itself, or an answer (or definitive non-answer) to
-    something it asked. Otherwise it remembers what it saw and carries on — which is
-    what people do, and what keeps this from becoming a machine that consults everyone
-    about everything.
+    only for a *stated* cause, checked from most specific to least: something addressed
+    to it personally, an answer to a question it actually asked, a condition it named
+    itself, another participant saying or undertaking something, or a rule the compiler
+    wrote for this particular world. Otherwise it remembers what it saw and carries on —
+    which is what people do, and what keeps this from becoming a machine that consults
+    everyone about everything.
     """
 
     by_id = {e.event_id: e for e in world.event_history}
@@ -1019,6 +1026,11 @@ def _relevance(
     for ev in events:
         if actor.actor_id in ev.audience or actor.actor_id in ev.target_ids:
             return WAKE_DIRECTED, f"{ev.kind} addressed to you from {ev.actor_id or 'environment'}"
+
+    for need in actor.open_needs():
+        for ev in events:
+            if need.asked_of and (ev.actor_id or "") == need.asked_of:
+                return WAKE_NEED_MET, f"an answer arrived from {need.asked_of}: {need.question}"
 
     for ev in events:
         for cond in actor.revisit_conditions:
@@ -1033,10 +1045,16 @@ def _relevance(
                 if cond.on_field_change in names:
                     return WAKE_REVISIT, cond.description
 
-    for need in actor.open_needs():
-        for ev in events:
-            if need.asked_of and (ev.actor_id or "") == need.asked_of:
-                return WAKE_NEED_MET, f"an answer arrived from {need.asked_of}: {need.question}"
+    # A person communicating is not ambient noise. Something another participant said or
+    # undertook, reaching you, is a reason to reconsider even when it was said to
+    # everyone — which is not true of a data release or a record being filed. Those stay
+    # ambient unless a compiled wake rule says otherwise.
+    for ev in events:
+        if ev.actor_id and ev.actor_id in world.actors and ev.kind in _COMMUNICATION_KINDS:
+            return (
+                WAKE_COMMUNICATION,
+                f"{ev.actor_id} communicated: {str(ev.payload_dict.get('text', ''))[:120]}",
+            )
 
     for ev in events:
         for rule in spec.wake_rules:

@@ -339,6 +339,73 @@ def test_an_answer_arriving_wakes_the_actor_that_asked() -> None:
     assert WAKE_NEED_MET in triggers, triggers
 
 
+def test_three_messages_at_three_times_produce_three_invocations() -> None:
+    """Materially different things arriving at different real times each get a reaction.
+
+    A fixed schedule gives one turn regardless. Here the count is three because three
+    things happened.
+    """
+
+    data = single_response_world()
+    data["world_spec"]["external_processes"] = [
+        {
+            "process_id": "incoming",
+            "description": "three separate messages arrive on three days",
+            "occurrences": [
+                {
+                    "at": f"2026-05-2{day}T09:00:00+00:00",
+                    "description": f"message {day}",
+                    "effects": [
+                        {
+                            "op": "deliver_information",
+                            "to": ["recipient"],
+                            "text": f"message {day}: a materially different request",
+                        }
+                    ],
+                }
+                for day in (2, 4, 6)
+            ],
+        }
+    ]
+    data["world_spec"]["process"]["nodes"] = []  # nothing but the messages
+
+    times: list[str] = []
+
+    def decide(ctx: dict) -> dict:
+        times.append(str(ctx["branch_time"])[:10])
+        return wait_decision("noted")
+
+    gw = _gateway(decide)
+    compiled = _compile(data, gw)
+    run(compiled, gw, seed=0)
+
+    assert sorted(set(times)) == ["2026-05-22", "2026-05-24", "2026-05-26"], times
+
+
+def test_another_participant_speaking_is_a_reason_but_a_data_release_is_not() -> None:
+    """A person saying something reaches you differently from the world changing."""
+
+    data = scheduled_multiparty_world()
+    data["world_spec"]["wake_rules"] = []  # no compiled rule covers either event
+    reasons: list[str] = []
+
+    def decide(ctx: dict) -> dict:
+        reasons.append(str(ctx["why_you_are_deciding_now"]["trigger"]))
+        if ctx["stage"] == "preparation" and ctx["actor_id"] == "member_0":
+            return act("circulate_note", {"text": "my reading of the situation"})
+        if ctx["stage"] == "session":
+            return act("record_position", {"position": "hold"})
+        return wait_decision()
+
+    gw = _gateway(decide)
+    compiled = _compile(data, gw)
+    run(compiled, gw, seed=0)
+
+    assert "communication_from_another_actor" in reasons, reasons
+    # The external measurement is public and no rule covers it: nobody was woken for it.
+    assert all(r != "compiled_wake_rule" for r in reasons)
+
+
 # ---------------------------------------------------------------------------
 # 4. Plans persist; only material events interrupt them
 # ---------------------------------------------------------------------------
