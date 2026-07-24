@@ -549,14 +549,35 @@ class LiveResearchBackend:
             session.seen_hashes.add(s.content_hash)
         if not chosen:
             return 0
+
+        def _extract(s: FetchedSource) -> tuple[FetchedSource, ExtractionResult | None, str]:
+            """Read one source. A provider failure here costs us *that source*.
+
+            Research is a best-effort gathering pass over many documents. One page whose
+            extraction call will not come back is a page we did not read, and the honest
+            response is to record it as unread and carry on with the rest — not to
+            abandon the question. This is the opposite of an *actor* call failing, where
+            a decision genuinely did not happen and the branch's mass must stay
+            unresolved. The distinction is between "we could not read a source" and "we
+            do not know what someone decided".
+            """
+
+            try:
+                return s, extract_claims(self.gateway, question, s, as_of), ""
+            except GatewayError as exc:
+                return s, None, str(exc)
+
         with ThreadPoolExecutor(max_workers=self.budget.extract_concurrency) as pool:
-            batches = list(
-                pool.map(lambda s: (s, extract_claims(self.gateway, question, s, as_of)), chosen)
-            )
+            batches = list(pool.map(_extract, chosen))
         session.extract_calls += len(chosen)
         trace.extract_calls += len(chosen)
         added = 0
-        for source, result in batches:
+        for source, result, failure in batches:
+            if result is None:
+                trace.rejected.append(
+                    {"url": source.fetched_url, "reason": f"extraction failed: {failure}"}
+                )
+                continue
             trace.extraction_calls.append(
                 {
                     "fetched_url": source.fetched_url,
