@@ -174,6 +174,30 @@ A full green live run *was* confirmed on the pre-grounding merge commit (`91ec5a
 complete, a bespoke compiled world, resolved from trajectories — 12 calls, 28 139
 tokens, 0 retries, ~6.2 s average latency.
 
+## Post-merge live validation (branch `claude/post-merge-live-validation`, PR #1)
+
+Live runs after the checkpoint peeled back one gate at a time. Each refusal was correct
+— a world that would have been false if simulated — and three produced concrete fixes,
+all on the follow-up branch, none of which reintroduces scenario-family routing or
+semantic coercion:
+
+1. **Roster shortfall never reached the repair loop.** `_compile_with_repair` keys repair
+   on the coverage gate's `missing_material_candidates`; the reality gate raised with
+   only counts, so a "12 claimed / 5 represented" FOMC roster aborted instead of
+   triggering targeted research. `verify_reality` now names a *shortfall* in the label
+   shape the loop already parses. A *surplus* roster stays unrepairable — that is a false
+   world, not a research gap.
+2. **Ungrounded required-reality facts blocked runs (merge regression).** Rebuilt dropped
+   uncitable required facts in `universal_compiler._normalize_reality` (commit
+   `7720653`); that module was deleted by this merge and the filter was never carried
+   into `world_compiler`. Restored, with the gate itself unchanged: a fact that *does*
+   cite evidence keeps its citations, so an unavailable citation still refuses.
+3. **An undetermined terminal term crashed the run.** Every coercion in `expressions` is
+   total except `_time`, which raised a bare `ValueError` on a missing value, aborting a
+   whole forecast. It now raises a typed `UndeterminedExpressionError`; the engine turns
+   that into an *unresolved branch* and the executor into "action not currently
+   feasible". Unknown stays unknown — never rendered as NO.
+
 ## Remaining limitations
 
 * The coverage gate's materiality rules are deterministic keyword lexicons; the LLM
