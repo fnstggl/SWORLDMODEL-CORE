@@ -144,6 +144,36 @@ pushed to CORE-REBUILT adding the actor-grounding system. They were merged in on
 same branch (a second `--no-ff` merge, no third branch), and `grounding.py` was ported
 to the universal actor model rather than kept beside it.
 
+## Live-path status under the stricter gates (open issue)
+
+The grounding gate arrived with the upstream merge and made the live path stricter.
+Three live question-only runs were attempted after it landed, and **all three were
+refused** — correctly, but they mean no green end-to-end live run has been confirmed
+since grounding was integrated:
+
+| Question | Refused by | Detail |
+|---|---|---|
+| GPT-5 release by 2026-09-30 | grounding gate | compiled actor `openai` had no verified history |
+| same, after prompt hardening | reality gate | the compiled world contained no actors at all |
+| Fed cuts at the Sept 2026 FOMC | reality gate | claimed 12 participants, represented 5 |
+
+The gates are behaving as designed: each refusal is a world that would have been false
+if simulated, and the last run shows the compile prompt is getting closer (12/1 → 12/5)
+without getting there. The underlying defect is that the live compiler under-enumerates
+a large roster while self-reporting the true size.
+
+The clear next step is to route the reality gate's roster mismatch into the existing
+repair loop. Today `api._compile_with_repair` only reacts to the coverage gate's
+`missing_material_candidates`; a roster shortfall raises `WorldIntegrityError` without
+that key and therefore propagates immediately, even though "find the other seven
+members" is exactly the kind of gap `augment_for_coverage` exists to close. That change
+was **not** made here because it could not be verified live within this session.
+
+A full green live run *was* confirmed on the pre-grounding merge commit (`91ec5a9`):
+5 queries, 9 sources fetched, 4 unsupported claims rejected, 4 verified claims, coverage
+complete, a bespoke compiled world, resolved from trajectories — 12 calls, 28 139
+tokens, 0 retries, ~6.2 s average latency.
+
 ## Remaining limitations
 
 * The coverage gate's materiality rules are deterministic keyword lexicons; the LLM
