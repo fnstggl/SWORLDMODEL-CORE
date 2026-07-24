@@ -27,6 +27,22 @@ from .research_planner import ResearchPlan
 _VALID_PROVENANCE = {p.value for p in WeightProvenance}
 
 
+def _candidate_persons(view: EvidenceView) -> list[str]:
+    """Distinct multi-word (person-like) entities named across the available claims.
+
+    An evidence-derived checklist so the roster call enumerates every named actor,
+    including those attested only once. Names come only from verified claims.
+    """
+
+    seen: dict[str, None] = {}
+    for c in view.available():
+        for ent in c.entities:
+            e = ent.strip()
+            if e and len(e.split()) >= 2 and e not in seen:
+                seen[e] = None
+    return list(seen)
+
+
 def _render_evidence(view: EvidenceView, *, limit: int = 140) -> str:
     claims = sorted(view.available(), key=lambda c: (-int(c.authority_level), c.id))[:limit]
     return "\n".join(
@@ -85,14 +101,18 @@ def compile_roster(
     """
 
     evidence = _render_evidence(view)
+    candidates = _candidate_persons(view)
     prompt = f"""From the evidence below, ENUMERATE EVERY individual decision-maker
 (board/committee member, voting seat, or the focal actor) NAMED in the evidence and
-relevant to the question. List ALL of them — do not summarize or omit any. Cite only
-claim ids that appear in the evidence.
+relevant to the question. List ALL of them — do not summarize or omit any. A person
+named in ANY claim (including a vote/attribution claim like "X voted to hold") is a
+member and MUST be listed even if mentioned only once. Cite only claim ids that appear
+in the evidence.
 
 QUESTION: {question}
 DECISION BODY: {reality.get("decision_body")}
 The body has approximately {reality.get("expected_voting_seats")} decision-makers.
+INDIVIDUALS NAMED IN THE EVIDENCE (include every one who is a decision-maker): {candidates}
 
 EVIDENCE (id | proposition = value):
 {evidence}
