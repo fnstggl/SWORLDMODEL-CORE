@@ -492,6 +492,33 @@ def test_case9_coverage_runs_for_every_process_type() -> None:
 # --------------------------------------------------------------------------- #
 
 
+def test_exclusion_challenge_blocks_a_wrongful_exclusion() -> None:
+    # A rule the deterministic rules treat as immaterial (no procedure word, not
+    # signal-linked) — an independent reviewer that says it could matter must block it.
+    cand = EvidenceCandidate(
+        candidate_id="x",
+        kind=CandidateKind.RULE,
+        canonical_identity="a five-day notice requirement",
+        description="members must be given five days notice before any binding vote",
+        claim_ids=("k1",),
+        lineage_ids=("e1",),
+        materiality=Materiality.IMMATERIAL,
+    )
+    spec = WorldSpecView(objects=())
+    # No reviewer -> excluded with a recorded reason, run proceeds.
+    r0 = assess_coverage((cand,), spec)
+    assert r0.disposition_for(cand.candidate_id).disposition is Disposition.EXCLUDED_IRRELEVANT  # type: ignore[union-attr]
+    assert r0.is_complete
+    # An independent review that disagrees invalidates the exclusion and blocks.
+    r1 = assess_coverage((cand,), spec, exclusion_reviewer=lambda c: True)
+    disp = r1.disposition_for(cand.candidate_id)
+    assert disp is not None and disp.disposition is Disposition.UNCERTAIN
+    assert disp.reviewer_stage == "exclusion_challenge"
+    assert not r1.is_complete
+    with pytest.raises(WorldIntegrityError):
+        enforce_coverage(r1)
+
+
 class _RepairBackend:
     """A backend whose first research drops three members, but whose targeted
     follow-up research (augment_for_coverage) returns the complete roster."""

@@ -33,6 +33,7 @@ Pipeline (canonical production path, not a diagnostic):
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
@@ -43,6 +44,10 @@ from .ids import content_id
 from .models import ResolutionContract
 
 _WORD = re.compile(r"[a-z0-9]+")
+
+# An independent second opinion on an exclusion: given a candidate the deterministic
+# rules would drop, return True iff omitting it could plausibly change the outcome.
+ExclusionReviewer = Callable[["EvidenceCandidate"], bool]
 
 
 def _norm(text: str) -> str:
@@ -763,10 +768,21 @@ class _Assessment:
 def assess_coverage(
     candidates: tuple[EvidenceCandidate, ...],
     spec: WorldSpecView,
+    *,
+    exclusion_reviewer: ExclusionReviewer | None = None,
 ) -> CompilationCoverageReport:
     """Compare the candidate inventory against the compiled world and assign one
     disposition to every candidate. A material candidate that is not represented, or
-    represented but not causally wired, is recorded as missing."""
+    represented but not causally wired, is recorded as missing.
+
+    ``exclusion_reviewer`` is an independent second opinion (a separate review pass
+    from the compiler): given a candidate the deterministic rules would exclude as
+    irrelevant, it answers whether omitting it could still plausibly change an actor's
+    knowledge, authority, feasible actions, a constraint, a branch, timing, or the
+    outcome. If it says yes, the exclusion is invalid — the candidate becomes
+    UNCERTAIN and blocks, per the exclusion-challenge rule. Disagreement never
+    silently resolves in favor of dropping the item.
+    """
 
     a = _Assessment()
     claimed_objects: dict[str, str] = {}  # object_id -> first candidate_id that used it
@@ -810,20 +826,18 @@ def assess_coverage(
 
         # Represented somewhere but not wired into the simulation == not covered.
         if matched and not wired:
-            a.dispositions.append(
-                CandidateDisposition(
-                    candidate_id=cand.candidate_id,
-                    disposition=(
-                        Disposition.REQUIRED_BUT_UNRESOLVED
-                        if cand.is_material
-                        else Disposition.EXCLUDED_IRRELEVANT
-                    ),
-                    compiled_object_ids=tuple(o.object_id for o in matched),
-                    reason="present in the world specification but disconnected from the simulation",
-                )
-            )
             if cand.is_material:
+                a.dispositions.append(
+                    CandidateDisposition(
+                        candidate_id=cand.candidate_id,
+                        disposition=Disposition.REQUIRED_BUT_UNRESOLVED,
+                        compiled_object_ids=tuple(o.object_id for o in matched),
+                        reason="present in the world specification but disconnected from the simulation",
+                    )
+                )
                 a.missing.append(_label(cand, "represented but not causally wired"))
+            else:
+                _record_exclusion(a, cand, exclusion_reviewer, objects=matched)
             continue
 
         # Not represented at all.
@@ -837,17 +851,46 @@ def assess_coverage(
             )
             a.missing.append(_label(cand, "material but absent"))
         else:
-            # An immaterial item may be excluded, but the exclusion is recorded with a
-            # concrete, evidence-grounded reason — it never silently disappears.
-            a.dispositions.append(
-                CandidateDisposition(
-                    candidate_id=cand.candidate_id,
-                    disposition=Disposition.EXCLUDED_IRRELEVANT,
-                    reason=_exclusion_reason(cand),
-                )
-            )
+            _record_exclusion(a, cand, exclusion_reviewer)
 
     return _report(candidates, a)
+
+
+def _record_exclusion(
+    a: _Assessment,
+    cand: EvidenceCandidate,
+    reviewer: ExclusionReviewer | None,
+    *,
+    objects: list[WorldObject] | None = None,
+) -> None:
+    """Record an EXCLUDED_IRRELEVANT disposition — unless an independent reviewer says
+    the item could still matter, in which case the exclusion is invalid and it becomes
+    UNCERTAIN and blocks (the exclusion challenge)."""
+
+    if reviewer is not None and reviewer(cand):
+        a.dispositions.append(
+            CandidateDisposition(
+                candidate_id=cand.candidate_id,
+                disposition=Disposition.UNCERTAIN,
+                compiled_object_ids=tuple(o.object_id for o in (objects or [])),
+                reason="exclusion challenged: an independent review found it could change the outcome",
+                reviewer_stage="exclusion_challenge",
+            )
+        )
+        a.missing.append(_label(cand, "exclusion rejected by independent review"))
+        return
+    a.dispositions.append(
+        CandidateDisposition(
+            candidate_id=cand.candidate_id,
+            disposition=Disposition.EXCLUDED_IRRELEVANT,
+            compiled_object_ids=tuple(o.object_id for o in (objects or [])),
+            reason=(
+                "present in the world specification but disconnected from the simulation"
+                if objects
+                else _exclusion_reason(cand)
+            ),
+        )
+    )
 
 
 def _match_objects(cand: EvidenceCandidate, spec: WorldSpecView) -> list[WorldObject]:

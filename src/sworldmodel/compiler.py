@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from .actors import ActorState
 from .coverage import (
     CompilationCoverageReport,
+    EvidenceCandidate,
+    ExclusionReviewer,
     WorldObject,
     WorldSpecView,
     assess_coverage,
@@ -276,7 +278,9 @@ def compile_world(
     inventory = build_candidate_inventory(
         evidence, contract, signal_claim_ids=signal_claim_ids
     )
-    coverage_report = assess_coverage(inventory, spec_view)
+    coverage_report = assess_coverage(
+        inventory, spec_view, exclusion_reviewer=_exclusion_reviewer(gateway)
+    )
     enforce_coverage(coverage_report)
 
     base_world = WorldState(
@@ -310,6 +314,77 @@ def compile_world(
         compile_responses=(resp,),
         coverage_report=coverage_report,
     )
+
+
+# Kinds whose incidental exclusion is most dangerous to get wrong — a lost rule,
+# event, document, channel, org, population, or external process can silently change
+# the outcome. Persons excluded for lack of any role signal, and generic
+# variables/prior-actions, are far less likely to be miscategorized, so they are not
+# challenged (keeping the live LLM cost bounded).
+_CHALLENGE_KINDS = frozenset(
+    {
+        "rule",
+        "scheduled_event",
+        "document",
+        "channel",
+        "organization",
+        "population_group",
+        "external_process",
+        "causal_relation",
+        "resource",
+    }
+)
+_MAX_CHALLENGES = 12
+
+
+def _exclusion_reviewer(gateway: ModelGateway) -> ExclusionReviewer | None:
+    """An independent LLM review of borderline exclusions (live gateways only).
+
+    The compiler may not drop a candidate merely by deeming it irrelevant: for the
+    consequential kinds, a separate model pass is asked whether omitting it could
+    plausibly change an actor's knowledge, authority, feasible actions, a constraint,
+    a branch, timing, or the outcome. A "yes" invalidates the exclusion and blocks.
+    Offline/deterministic gateways get no reviewer, so the gate stays deterministic.
+    """
+
+    if not getattr(gateway, "is_live", False):
+        return None
+    budget = {"n": 0}
+
+    def review(cand: EvidenceCandidate) -> bool:
+        if cand.kind.value not in _CHALLENGE_KINDS or budget["n"] >= _MAX_CHALLENGES:
+            return False
+        budget["n"] += 1
+        prompt = (
+            "An automated compiler is about to EXCLUDE the following verified evidence "
+            "item from a simulated world as irrelevant. Challenge that decision.\n\n"
+            f"ITEM ({cand.kind.value}): {cand.canonical_identity}\n"
+            f"DESCRIPTION: {cand.description}\n\n"
+            "Would including or removing this item plausibly change an actor's "
+            "knowledge, authority, feasible actions, a resource constraint, the causal "
+            "pathway, an uncertainty branch, the timing of events, or the terminal "
+            'outcome? Reply JSON {"could_matter": true|false, "why": "..."}. '
+            "Answer true only if it plausibly could."
+        )
+        try:
+            resp = gateway.generate(
+                GatewayRequest(
+                    task_kind="exclusion_challenge",
+                    prompt=prompt,
+                    context={"candidate_id": cand.candidate_id},
+                    seed=0,
+                    expected_keys=("could_matter",),
+                )
+            )
+        except Exception:
+            # A provider failure must not silently drop the item: treat as "could matter".
+            return True
+        val = resp.data.get("could_matter")
+        if isinstance(val, bool):
+            return val
+        return str(val).strip().lower() in ("true", "yes", "1")
+
+    return review
 
 
 def _world_spec_view(
