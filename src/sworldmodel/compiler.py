@@ -13,6 +13,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .actors import ActorState
+from .coverage import (
+    CompilationCoverageReport,
+    WorldObject,
+    WorldSpecView,
+    assess_coverage,
+    build_candidate_inventory,
+    enforce_coverage,
+)
 from .evidence import EvidenceView
 from .gateway import GatewayRequest, GatewayResponse, ModelGateway
 from .models import (
@@ -52,6 +60,7 @@ class CompiledWorld:
     proposal_text: str
     briefing_text: str
     compile_responses: tuple[GatewayResponse, ...]
+    coverage_report: CompilationCoverageReport
 
 
 def _rule_to_dict(r: ReactionRule) -> dict[str, object]:
@@ -253,6 +262,23 @@ def compile_world(
     uncertainty_variables = _uncertainty_variables(frame)
     causal_graph = _causal_graph(frame, voting_ids)
 
+    # 5. Evidence-to-world coverage gate — refuse to simulate a world that silently
+    #    dropped a materially relevant, verified evidence candidate. This is enforced
+    #    deterministically and generalizes beyond the roster to every world element.
+    wired_actor_ids = (
+        set(voting_ids)
+        if contract.terminal_predicate.mechanism != "actor_action"
+        else {m.actor_id for m in bundle.members}
+    )
+    spec_view, signal_claim_ids = _world_spec_view(
+        contract, bundle, actor_states, institution, frame, wired_actor_ids
+    )
+    inventory = build_candidate_inventory(
+        evidence, contract, signal_claim_ids=signal_claim_ids
+    )
+    coverage_report = assess_coverage(inventory, spec_view)
+    enforce_coverage(coverage_report)
+
     base_world = WorldState(
         branch_id="root",
         parent_branch_id=None,
@@ -282,7 +308,132 @@ def compile_world(
         proposal_text=proposal_text,
         briefing_text=briefing_text,
         compile_responses=(resp,),
+        coverage_report=coverage_report,
     )
+
+
+def _world_spec_view(
+    contract: ResolutionContract,
+    bundle: ResearchBundle,
+    actor_states: dict[str, ActorState],
+    institution: InstitutionSpec,
+    frame: ScenarioFrame,
+    wired_actor_ids: set[str],
+) -> tuple[WorldSpecView, frozenset[str]]:
+    """Describe the compiled world for the coverage comparison: every world object,
+    whether it is causally wired, and the claims actors can actually perceive."""
+
+    objects: list[WorldObject] = []
+    accessible: set[str] = set()
+
+    for aid, st in actor_states.items():
+        d = st.definition
+        seed_ids = {cid for s in d.memory_seeds for cid in s.evidence_claim_ids}
+        claim_ids = tuple(sorted(set(d.evidence_claim_ids) | seed_ids))
+        accessible.update(claim_ids)
+        wired = aid in wired_actor_ids
+        uses: tuple[str, ...] = ("actor_view",)
+        if wired and d.is_voting_seat:
+            uses = ("actor_view", "vote", "terminal")
+        elif wired:
+            uses = ("actor_view", "action")
+        objects.append(
+            WorldObject(
+                object_id=aid,
+                kind="actor",
+                name=d.name,
+                claim_ids=claim_ids,
+                wired=wired,
+                uses=uses,
+            )
+        )
+
+    objects.append(
+        WorldObject(
+            object_id=institution.institution_id,
+            kind="institution",
+            name=institution.name,
+            claim_ids=institution.evidence_claim_ids,
+            wired=True,
+            uses=("membership", "terminal"),
+        )
+    )
+    objects.append(
+        WorldObject(
+            object_id="decision_rule",
+            kind="rule",
+            name=f"{contract.decision_rule.kind} rule",
+            claim_ids=contract.decision_rule.evidence_claim_ids,
+            wired=True,
+            uses=("terminal",),
+        )
+    )
+    objects.append(
+        WorldObject(
+            object_id="terminal",
+            kind="terminal",
+            name=(
+                f"{contract.terminal_predicate.mechanism}:"
+                f"{contract.terminal_predicate.yes_condition}"
+            ),
+            claim_ids=contract.terminal_predicate.evidence_claim_ids,
+            wired=True,
+            uses=("terminal",),
+        )
+    )
+
+    reaction_signals = {r.trigger_signal for r in frame.reaction_rules}
+    uncertainty_signals = {u.signal for u in frame.uncertainty}
+    signal_claim_ids: set[str] = set(frame.guidance_evidence_ids)
+    for s in frame.signals:
+        signal_claim_ids.update(s.evidence_claim_ids)
+        accessible.update(s.evidence_claim_ids)
+        wired = s.name in reaction_signals or s.name in uncertainty_signals
+        objects.append(
+            WorldObject(
+                object_id=f"signal:{s.name}",
+                kind="signal",
+                name=s.name,
+                claim_ids=s.evidence_claim_ids,
+                wired=wired,
+                uses=("reaction",) if wired else (),
+            )
+        )
+    for r in frame.reaction_rules:
+        signal_claim_ids.update(r.evidence_claim_ids)
+    for u in frame.uncertainty:
+        signal_claim_ids.update(u.constraining_evidence_ids)
+        objects.append(
+            WorldObject(
+                object_id=f"uncertainty:{u.signal}",
+                kind="scheduled_event",
+                name=u.signal,
+                claim_ids=u.constraining_evidence_ids,
+                wired=True,
+                uses=("reaction", "branch"),
+            )
+        )
+
+    for wf in bundle.world_facts:
+        accessible.update(wf.evidence_claim_ids)
+        objects.append(
+            WorldObject(
+                object_id=wf.fact_id,
+                kind="world_fact",
+                name=wf.text[:48],
+                claim_ids=wf.evidence_claim_ids,
+                wired=True,
+                uses=("actor_view",),
+            )
+        )
+
+    view = WorldSpecView(
+        objects=tuple(objects),
+        accessible_claim_ids=frozenset(accessible),
+        decision_body=contract.decision_body,
+        subject_entity=contract.subject_entity,
+    )
+    return view, frozenset(signal_claim_ids)
 
 
 def _uncertainty_variables(frame: ScenarioFrame) -> tuple[UncertaintyVariable, ...]:
