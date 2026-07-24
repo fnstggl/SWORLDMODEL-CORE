@@ -757,6 +757,22 @@ def _normalize_compilation(
 
     _filter(ws)
     data["world_spec"] = ws
+
+    # Keep only required-reality facts the compiler could actually ground in available
+    # evidence. A fact the model *names* but cannot cite (e.g. "the body has authority",
+    # or a terminal date already given by the contract horizon) is not a verified
+    # load-bearing fact and must not block the run — the participant-count, grounding and
+    # coverage checks are independent and evidence-grounded, so real gaps are still
+    # caught. A fact that DOES cite evidence is left untouched, so a citation that is
+    # unavailable by the cutoff still refuses the run.
+    grounded_facts = []
+    for rf in data.get("required_reality_facts") or []:
+        cited = [str(i) for i in (rf.get("evidence_claim_ids") or []) if str(i) in available]
+        rf["evidence_claim_ids"] = cited
+        if cited:
+            grounded_facts.append(rf)
+    data["required_reality_facts"] = grounded_facts
+
     data["subject_entity"] = _s(data.get("subject_entity")) or _s(ws.get("title")) or "the subject"
     data["resolution_units"] = _s(data.get("resolution_units")) or "the outcome"
     data["target_outcome"] = _s(data.get("target_outcome")) or "the YES condition"

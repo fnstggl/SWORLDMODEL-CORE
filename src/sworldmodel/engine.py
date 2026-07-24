@@ -24,7 +24,7 @@ from typing import Any
 from .actors import ActorRuntime
 from .compiled import CompiledWorld
 from .effects import EffectExecutor
-from .errors import GatewayError
+from .errors import GatewayError, UndeterminedExpressionError
 from .executor import ActionExecutor
 from .expressions import evaluate
 from .gateway import ModelGateway
@@ -374,14 +374,24 @@ def evaluate_terminal(world: WorldState, terminal: TerminalExpression) -> Termin
     """The single place YES/NO/unresolved is decided — deterministic, from world state,
     via the universal operators only. No LLM, no fixed mechanism family."""
 
-    if bool(evaluate(terminal.unresolved_when, world)):
+    try:
+        if bool(evaluate(terminal.unresolved_when, world)):
+            return TerminalEvaluation(
+                resolved=False,
+                outcome=None,
+                reason=terminal.description or "terminal condition not determinable",
+                highlights=_highlights(world),
+            )
+        yes = bool(evaluate(terminal.yes_when, world))
+    except UndeterminedExpressionError as exc:
+        # The terminal reads something this branch never determined. That is an honest
+        # unresolved outcome — not a NO, and not a crashed run.
         return TerminalEvaluation(
             resolved=False,
             outcome=None,
-            reason=terminal.description or "terminal condition not determinable",
+            reason=f"terminal depends on a value the world never determined: {exc}",
             highlights=_highlights(world),
         )
-    yes = bool(evaluate(terminal.yes_when, world))
     return TerminalEvaluation(
         resolved=True,
         outcome="YES" if yes else "NO",
