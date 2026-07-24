@@ -266,7 +266,7 @@ def run_forecast(
     for alt in assessment.alternatives:
         try:
             _, alt_compiled = _compile_alternative(question, as_of, horizon, bundle, config, alt)
-        except (WorldIntegrityError, GatewayError) as exc:
+        except (WorldIntegrityError, GatewayError, ValueError, KeyError) as exc:
             # A possibility we could not faithfully represent is not a possibility we
             # get to ignore. Its mass stays unresolved and widens the bounds.
             unrepresentable.append((alt, f"{type(exc).__name__}: {exc}"))

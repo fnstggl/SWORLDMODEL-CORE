@@ -29,6 +29,7 @@ unresolved; when a trajectory stops making progress it stops, and says so.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import Any
@@ -172,17 +173,67 @@ class RunResult:
     diagnostics: dict[str, BranchDiagnostics] = field(default_factory=dict)
 
 
+@dataclass
+class _BranchRun:
+    """One branch's complete result, produced independently of every other branch."""
+
+    scenario: Scenario
+    world: WorldState
+    ledger: list[Event]
+    decisions: list[ActorDecisionRecord]
+    diagnostics: BranchDiagnostics
+    failure: str = ""
+
+
 def run(
     compiled: CompiledWorld,
     gateway: ModelGateway,
     *,
     seed: int,
     budget: RunBudget | None = None,
+    max_concurrent_branches: int = 4,
 ) -> RunResult:
-    effects = EffectExecutor()
-    action_exec = ActionExecutor(gateway, effects)
-    actor_runtime = ActorRuntime(gateway)
+    """Simulate every branch of the compiled world.
+
+    Branches are genuinely independent possible worlds — they share no state, and each
+    carries its own clock, its own actors and its own effect sequence — so they are run
+    concurrently. This is a wall-clock decision only: nothing about a trajectory depends
+    on which other branches were running at the time, and results are assembled in
+    scenario order so the output is identical either way.
+    """
+
     budget = budget or RunBudget()
+    scenarios = list(compiled.scenario_set.scenarios)
+    workers = max(1, min(max_concurrent_branches, len(scenarios)))
+
+    def run_one(scenario: Scenario) -> _BranchRun:
+        # Per-branch executor: the effect sequence must not interleave across branches,
+        # or two independent worlds would produce each other's event ids.
+        effects = EffectExecutor()
+        action_exec = ActionExecutor(gateway, effects)
+        actor_runtime = ActorRuntime(gateway)
+        ledger: list[Event] = []
+        decisions: list[ActorDecisionRecord] = []
+        diag = BranchDiagnostics()
+        weight = BranchWeight(scenario.weight, scenario.provenance, scenario.provenance_detail)
+        world = compiled.base_world.clone(new_branch_id=scenario.scenario_id, weight=weight)
+        try:
+            world = _seed_branch(world, compiled.spec, scenario, effects, ledger)
+            world = _event_loop(
+                world, compiled.spec, effects, action_exec, actor_runtime, seed,
+                decisions, ledger, budget, diag,
+            )
+            world = _finalize(world, compiled.spec.terminal, effects, ledger, diag)
+        except GatewayError as exc:
+            diag.stop_reason = f"provider_failure: {exc}"
+            return _BranchRun(scenario, world, ledger, decisions, diag, f"provider_failure: {exc}")
+        return _BranchRun(scenario, world, ledger, decisions, diag)
+
+    if workers == 1:
+        runs = [run_one(s) for s in scenarios]
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            runs = list(pool.map(run_one, scenarios))
 
     branch_outcomes: list[BranchOutcome] = []
     summaries: list[TrajectorySummary] = []
@@ -191,35 +242,17 @@ def run(
     final_worlds: dict[str, WorldState] = {}
     diagnostics: dict[str, BranchDiagnostics] = {}
 
-    for scenario in compiled.scenario_set.scenarios:
-        weight = BranchWeight(scenario.weight, scenario.provenance, scenario.provenance_detail)
-        world = compiled.base_world.clone(new_branch_id=scenario.scenario_id, weight=weight)
-        diag = BranchDiagnostics()
-        diagnostics[scenario.scenario_id] = diag
-        try:
-            world = _seed_branch(world, compiled.spec, scenario, effects, ledger)
-            world = _event_loop(
-                world,
-                compiled.spec,
-                effects,
-                action_exec,
-                actor_runtime,
-                seed,
-                decisions,
-                ledger,
-                budget,
-                diag,
-            )
-            world = _finalize(world, compiled.spec.terminal, effects, ledger, diag)
-        except GatewayError as exc:
-            diag.stop_reason = f"provider_failure: {exc}"
-            final_worlds[scenario.scenario_id] = world
-            branch_outcomes.append(_unresolved_outcome(scenario, f"provider_failure: {exc}"))
-            summaries.append(_unresolved_summary(scenario, f"provider failure: {exc}"))
-            continue
-        final_worlds[scenario.scenario_id] = world
-        branch_outcomes.append(_branch_outcome(world, scenario))
-        summaries.append(_summary(world, scenario))
+    for br in runs:  # scenario order, so the assembled result is deterministic
+        diagnostics[br.scenario.scenario_id] = br.diagnostics
+        final_worlds[br.scenario.scenario_id] = br.world
+        ledger.extend(br.ledger)
+        decisions.extend(br.decisions)
+        if br.failure:
+            branch_outcomes.append(_unresolved_outcome(br.scenario, br.failure))
+            summaries.append(_unresolved_summary(br.scenario, br.failure))
+        else:
+            branch_outcomes.append(_branch_outcome(br.world, br.scenario))
+            summaries.append(_summary(br.world, br.scenario))
 
     return RunResult(
         branch_outcomes=tuple(branch_outcomes),

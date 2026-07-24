@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Protocol
 
+from .errors import WorldIntegrityError
 from .evidence import EvidenceStore
 from .models import RequiredRealityFact, UncertaintySpec
 from .world import WorldFact
@@ -76,7 +77,12 @@ def assemble_bundle(store: EvidenceStore, data: dict[str, Any]) -> ResearchBundl
     as_of = _dt(reality.get("as_of"))
     default_time = as_of or datetime.fromisoformat("1970-01-01T00:00:00+00:00")
     horizon = _dt(reality.get("horizon"))
-    assert horizon is not None, "corpus/live compilation must declare a horizon"
+    if horizon is None:
+        raise WorldIntegrityError(
+            "a compilation must declare the horizon it was compiled for; without it the "
+            "world has no end and the terminal cannot be evaluated",
+            details={"reality_keys": sorted(reality)},
+        )
 
     available_ids = {c.id for c in store.all()}
     spec = parse_world_spec(data["world_spec"])

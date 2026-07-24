@@ -829,6 +829,18 @@ def _normalize_compilation(
     data["target_outcome"] = _s(data.get("target_outcome")) or "the YES condition"
     data["as_of"] = as_of.isoformat()
     data["horizon"] = horizon.isoformat()
+    # A normalized compilation is complete on its own: every consumer reads the same
+    # `reality` block, so an alternative structure compiled through this function is
+    # assembled by exactly the same code as the primary one.
+    reality = dict(data.get("reality") or {})
+    reality.setdefault("as_of", data["as_of"])
+    reality.setdefault("horizon", data["horizon"])
+    reality.setdefault("subject_entity", data["subject_entity"])
+    reality.setdefault("resolution_units", data["resolution_units"])
+    reality.setdefault("target_outcome", data["target_outcome"])
+    if data.get("expected_participants") is not None:
+        reality.setdefault("expected_participants", data["expected_participants"])
+    data["reality"] = reality
     return data
 
 
