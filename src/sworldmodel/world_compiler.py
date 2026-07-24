@@ -148,7 +148,10 @@ def compile_world(
     grounding_report = assess_actor_grounding(profiles)
     enforce_actor_grounding(grounding_report)
 
-    # Gate 3 — evidence-to-world coverage against the exact compiled WorldSpec.
+    # Gate 3 — the outcome must be produced by what actors do, not supplied to them.
+    enforce_outcome_is_produced(spec, uncertainties)
+
+    # Gate 4 — evidence-to-world coverage against the exact compiled WorldSpec.
     view, signal_claim_ids = world_spec_view(spec, base_world, uncertainties, world_facts)
     inventory = build_candidate_inventory(
         evidence,
@@ -519,6 +522,96 @@ def _effect_fields(eff: Any) -> set[str]:
         if isinstance(sub, dict):
             out.update(str(k) for k in sub)
     return out
+
+
+def _expr_collections(expr: Any) -> set[str]:
+    """Record collections a declarative expression reads (``count``/``sum``/``values``)."""
+
+    from .worldspec import Expr
+
+    if not isinstance(expr, Expr):
+        return set()
+    out: set[str] = set()
+    if expr.op in ("count", "sum", "values", "exists") and expr.args:
+        first = expr.args[0]
+        if isinstance(first, str):
+            out.add(first)
+        elif isinstance(first, Expr) and first.op == "const" and first.args:
+            out.add(str(first.args[0]))
+    for a in expr.args:
+        out |= _expr_collections(a)
+    return out
+
+
+def _action_writes(spec: WorldSpec) -> tuple[set[str], set[str]]:
+    """What the compiled actions can actually change: (fields, record collections)."""
+
+    fields: set[str] = set()
+    collections: set[str] = set()
+    for action in spec.actions:
+        for eff in action.effects:
+            fields |= _effect_fields(eff)
+            if eff.op == "append_record":
+                coll = eff.params_dict.get("collection")
+                if isinstance(coll, str):
+                    collections.add(coll)
+    return fields, collections
+
+
+def enforce_outcome_is_produced(
+    spec: WorldSpec, uncertainties: tuple[UncertaintySpec, ...]
+) -> None:
+    """Refuse a world whose answer nobody has to do anything to produce.
+
+    This is the gate that catches a forecast dressed as a simulation. If the terminal
+    reads only things that compiled *actions* never write — typically because the
+    compiler encoded the decision itself as an uncertain input field — then the branch
+    weights are the forecast and the actors are scenery. Every trajectory "resolves"
+    without anyone acting, and the reported probability is the model's prior on that
+    field wearing the label ``weighted_simulated_trajectories``.
+
+    The world must be one in which the outcome is *produced*: at least one compiled
+    action must be able to move at least one term the terminal reads.
+    """
+
+    terminal_fields = _expr_fields(spec.terminal.yes_when)
+    terminal_colls = _expr_collections(spec.terminal.yes_when)
+    if not spec.actions:
+        raise WorldIntegrityError(
+            "the compiled world has no actions — nobody can do anything, so the outcome "
+            "cannot be produced by what anyone decides",
+            details={"recompilable": True},
+        )
+    if not spec.process.nodes and not spec.external_processes:
+        # A world may legitimately be driven entirely by external processes and wake
+        # rules rather than a procedural graph. What it may not be is a world in which
+        # nothing is scheduled to happen at all.
+        raise WorldIntegrityError(
+            "the compiled world has no process and no external processes — nothing is "
+            "scheduled to happen, so no actor will ever be in a position to act",
+            details={"recompilable": True},
+        )
+
+    written_fields, written_colls = _action_writes(spec)
+    if (terminal_fields & written_fields) or (terminal_colls & written_colls):
+        return
+
+    uncertain = {u.variable for u in uncertainties} | {
+        name for u in uncertainties for o in u.outcomes for name, _ in o.field_effects
+    }
+    raise WorldIntegrityError(
+        "the outcome is an input, not a result: no compiled action can move any term "
+        "the terminal reads, so every branch resolves without anyone acting and the "
+        "answer would be the branch weights rather than the simulation",
+        details={
+            "recompilable": True,
+            "terminal reads fields": sorted(terminal_fields),
+            "terminal reads collections": sorted(terminal_colls),
+            "fields any action can write": sorted(written_fields),
+            "collections any action can write": sorted(written_colls),
+            "terminal terms supplied by uncertainty instead": sorted(terminal_fields & uncertain),
+        },
+    )
 
 
 def _external_process_objects(spec: WorldSpec) -> list[tuple[str, str, tuple[str, ...]]]:

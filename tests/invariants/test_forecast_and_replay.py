@@ -178,6 +178,57 @@ def test_unresolved_mass_is_reported_not_filled() -> None:
     assert total == pytest.approx(1.0)
 
 
+def test_a_world_whose_outcome_is_an_input_is_refused() -> None:
+    """The failure this gate exists for, reproduced from a real live run.
+
+    A live Banxico pastcast compiled a world with no actions and no process, whose
+    terminal read two fields that only the uncertainty's branch conditions ever set. It
+    "resolved" with **zero actor invocations**: the reported probability was the model's
+    branch weights on a field encoding the answer, labeled as trajectories. That world
+    must not be simulatable.
+    """
+
+    from sworldmodel.errors import WorldIntegrityError
+
+    data = _split_world()
+    # The decision itself becomes an uncertain input, and nothing can act on it.
+    data["world_spec"]["actions"] = []
+    data["world_spec"]["fields"].append(
+        {"field_id": "rate_decision", "value_type": "string", "initial": None}
+    )
+    data["world_spec"]["terminal"]["yes_when"] = {
+        "op": "equals",
+        "args": [{"op": "field", "args": ["rate_decision"]}, "hold"],
+    }
+    data["uncertainties"] = [
+        {
+            "variable": "rate_decision",
+            "why_unknown": "the board has not met",
+            "reversal_capable": True,
+            "outcomes": [
+                {
+                    "value": "hold",
+                    "weight": 0.6,
+                    "provenance": "symmetric_ignorance_assumption",
+                    "field_effects": [["rate_decision", "hold"]],
+                },
+                {
+                    "value": "change",
+                    "weight": 0.4,
+                    "provenance": "symmetric_ignorance_assumption",
+                    "field_effects": [["rate_decision", "change"]],
+                },
+            ],
+        }
+    ]
+
+    gw = _gateway(_signal_sensitive)
+    with pytest.raises(WorldIntegrityError) as exc:
+        _compile(data, gw)
+    assert "outcome" in str(exc.value).lower()
+    assert exc.value.details.get("recompilable") is True
+
+
 def test_every_branch_can_be_reconstructed_from_its_own_record() -> None:
     gw = _gateway(_signal_sensitive)
     contract, compiled = _compile(_split_world(), gw)

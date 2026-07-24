@@ -367,7 +367,10 @@ def test_three_messages_at_three_times_produce_three_invocations() -> None:
             ],
         }
     ]
-    data["world_spec"]["process"]["nodes"] = []  # nothing but the messages
+    # The process node stays (a world must have something scheduled) but gives nobody
+    # an opportunity: every invocation below is caused by an arriving message.
+    data["world_spec"]["process"]["nodes"][0]["participants"] = []
+    data["world_spec"]["process"]["nodes"][0]["effects"] = []
 
     times: list[str] = []
 
@@ -712,22 +715,25 @@ def test_every_invocation_records_the_full_causal_context() -> None:
 
 
 def test_removing_the_event_removes_the_wake_up_it_caused() -> None:
-    """Delete the cause, lose the invocation. This is what makes the trajectory real."""
+    """Delete the cause, lose the invocation. This is what makes the trajectory real.
 
-    def run_with(nodes_filter) -> int:
+    The world keeps its process node either way — only the thing that *reaches* the
+    actor is removed, so what is being tested is causation and not the absence of a
+    world.
+    """
+
+    def run_with(*, deliver: bool) -> int:
         data = single_response_world()
-        data["world_spec"]["process"]["nodes"] = nodes_filter(
-            data["world_spec"]["process"]["nodes"]
-        )
+        node = data["world_spec"]["process"]["nodes"][0]
+        if not deliver:
+            node["effects"] = []
+            node["participants"] = []
         gw = _gateway(lambda ctx: act("send_reply", {"answer": "yes"}))
         compiled = _compile(data, gw)
-        result = run(compiled, gw, seed=0)
-        return len(result.actor_decisions)
+        return len(run(compiled, gw, seed=0).actor_decisions)
 
-    with_event = run_with(lambda ns: ns)
-    without_event = run_with(lambda ns: [])
-    assert with_event > 0
-    assert without_event == 0, "actors were invoked with nothing to invoke them"
+    assert run_with(deliver=True) > 0
+    assert run_with(deliver=False) == 0, "actors were invoked with nothing to invoke them"
 
 
 @pytest.mark.parametrize("world", [scheduled_multiparty_world, single_response_world])
