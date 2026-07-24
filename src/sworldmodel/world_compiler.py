@@ -214,6 +214,11 @@ def actor_grounding_profile(
         previous_action=None,  # history lives in the seeds and is sorted by its wording
         memory_seeds=tuple(seeds),
         inclination=inclination or None,
+        # The compiled reasoning is an inference *from this entity's cited evidence*, so
+        # it carries those citations and is marked SUPPORTED_INFERENCE. An entity with
+        # no citations has no grounded inclination either, and the actor is told nothing
+        # rather than told a guess.
+        inclination_claim_ids=tuple(entity.evidence_claim_ids),
         reaction_rules=reactions,
         valid_time=contract.as_of.isoformat(),
     )
@@ -392,6 +397,20 @@ def world_spec_view(
             )
         )
 
+    # -- external (non-agent) processes -----------------------------------------
+    for pid, description, claim_ids in _external_process_objects(spec):
+        accessible.update(claim_ids)
+        objects.append(
+            WorldObject(
+                object_id=f"external:{pid}",
+                kind="scheduled_event",
+                name=description[:64],
+                claim_ids=claim_ids,
+                wired=True,
+                uses=("external_process",),
+            )
+        )
+
     # -- verified world facts every actor can read ------------------------------
     for wf in world_facts:
         accessible.update(wf.evidence_claim_ids)
@@ -500,6 +519,17 @@ def _effect_fields(eff: Any) -> set[str]:
         if isinstance(sub, dict):
             out.update(str(k) for k in sub)
     return out
+
+
+def _external_process_objects(spec: WorldSpec) -> list[tuple[str, str, tuple[str, ...]]]:
+    """External (non-agent) processes are part of the compiled world and must be
+    visible to the coverage gate, or a verified scheduled release could be represented
+    and still be reported as missing."""
+
+    return [
+        (p.process_id, p.description or p.process_id, p.evidence_claim_ids)
+        for p in spec.external_processes
+    ]
 
 
 def _touched_objects(spec: WorldSpec) -> set[str]:
@@ -720,7 +750,7 @@ def parse_required_facts(items: Any) -> tuple[RequiredRealityFact, ...]:
 # ---------------------------------------------------------------------------
 
 
-def _render_evidence(view: EvidenceView, *, limit: int = 160) -> str:
+def render_evidence(view: EvidenceView, *, limit: int = 160) -> str:
     claims = sorted(view.available(), key=lambda c: (-int(c.authority_level), c.id))[:limit]
     return "\n".join(
         f"{c.id} | {c.proposition} = {c.normalized_value} "
@@ -730,7 +760,14 @@ def _render_evidence(view: EvidenceView, *, limit: int = 160) -> str:
 
 
 def compile_world_spec_live(
-    gateway: ModelGateway, question: str, as_of: datetime, horizon: datetime, view: EvidenceView
+    gateway: ModelGateway,
+    question: str,
+    as_of: datetime,
+    horizon: datetime,
+    view: EvidenceView,
+    *,
+    extra_instruction: str = "",
+    structure_id: str = "primary",
 ) -> tuple[dict[str, Any], Any]:
     """Ask the model to compile the whole causal world for an arbitrary question, then
     normalize and citation-check it. Returns ``(compilation_dict, gateway_response)``
@@ -741,22 +778,30 @@ def compile_world_spec_live(
         "question": question,
         "as_of": as_of.isoformat(),
         "horizon": horizon.isoformat(),
-        "evidence": _render_evidence(view),
+        "evidence": render_evidence(view),
         # The deterministic inventory of what verified reality actually contains. The
         # model is handed this explicitly so it cannot silently forget a verified item
         # while compiling; the coverage gate then checks the compiled world against it.
         "checklist": evidence_checklist(view, as_of=as_of, horizon=horizon),
+        # Set only when compiling a structural alternative: the same evidence, a
+        # different causal structure the evidence also leaves open.
+        "extra_instruction": extra_instruction,
     }
     resp = gateway.generate(
         GatewayRequest(
             task_kind="compile_world_spec",
             prompt=render_world_compile_prompt(ctx),
-            context={"question": question},
-            seed=int(prompt_hash("world" + question)[:8], 16),
+            context={"question": question, "structure_id": structure_id},
+            seed=int(prompt_hash("world" + question + structure_id)[:8], 16),
             expected_keys=("world_spec",),
         )
     )
-    return _normalize_compilation(resp.data, view, as_of, horizon), resp
+    data = _normalize_compilation(resp.data, view, as_of, horizon), resp
+    compiled_dict = data[0]
+    spec_dict = compiled_dict.get("world_spec")
+    if isinstance(spec_dict, dict):
+        spec_dict.setdefault("structure_id", structure_id)
+    return compiled_dict, resp
 
 
 def _normalize_compilation(

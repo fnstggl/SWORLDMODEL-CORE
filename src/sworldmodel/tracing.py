@@ -32,6 +32,11 @@ class TraceContext:
     run_result: RunResult
     forecast: ForecastResult
     model_id: str
+    # What the compiler concluded about whether it compiled the *right* world, and the
+    # provider response that said so. Carried in the trace because a reader must be able
+    # to see which structures were simulated and which could not be represented.
+    structure_assessment: Any = None
+    structure_response: Any = None
     _calls_override: list[Any] = field(default_factory=list)
 
     # -- serializable payloads --------------------------------------------------
@@ -288,6 +293,12 @@ class TraceContext:
         (out_dir / "actor_grounding.json").write_text(
             canonical_json(self.actor_grounding_manifest()) + "\n"
         )
+        (out_dir / "structural_uncertainty.json").write_text(
+            canonical_json(self.structure_manifest()) + "\n"
+        )
+        (out_dir / "branch_schedule.json").write_text(
+            canonical_json(self.schedule_manifest()) + "\n"
+        )
         (out_dir / "event_ledger.jsonl").write_text("\n".join(self.event_ledger_lines()) + "\n")
         (out_dir / "llm_calls.jsonl").write_text("\n".join(self.llm_call_lines()) + "\n")
         (out_dir / "actor_decisions.jsonl").write_text(
@@ -295,6 +306,35 @@ class TraceContext:
         )
         (out_dir / report_name).write_text(self.render_report(forecast_hash))
         return forecast_hash
+
+    def structure_manifest(self) -> dict[str, Any]:
+        """Whether the compiled causal structure was treated as settled, which
+        alternatives were simulated, and which could not be represented."""
+
+        a = self.structure_assessment
+        as_dict = getattr(a, "as_dict", None)
+        return (
+            as_dict()
+            if callable(as_dict)
+            else {"is_material": False, "reason": "not assessed", "alternatives": []}
+        )
+
+    def schedule_manifest(self) -> dict[str, Any]:
+        """The branch calendars: what ran, what stopped them, and what was still
+        scheduled when the question's window closed. This is what a replay or a
+        visualization reads to reconstruct time without re-running anything."""
+
+        return {
+            branch: {
+                "batches": d.batches,
+                "events": d.events,
+                "stop_reason": d.stop_reason,
+                "actor_invocations": dict(d.actor_call_counts),
+                "unfired_in_horizon": d.unfired_in_horizon,
+                "pending_beyond_horizon": d.pending_beyond_horizon,
+            }
+            for branch, d in sorted(self.run_result.diagnostics.items())
+        }
 
     # -- report -----------------------------------------------------------------
 

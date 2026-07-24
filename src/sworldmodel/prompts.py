@@ -211,11 +211,15 @@ def render_world_compile_prompt(context: dict[str, Any]) -> str:
             f"as_of: {context.get('as_of')}   horizon: {context.get('horizon')}",
             _block("EVIDENCE (id | proposition = value [meta])", context.get("evidence")),
             _block(
-                "MATERIAL ITEMS FOUND IN VERIFIED EVIDENCE — represent EVERY one of these "
-                "in the compiled world (as an entity, action, field, document, resource, "
-                "process node, external process or terminal term), or the run will be refused",
+                "WHAT VERIFIED EVIDENCE CONTAINS. Every item here that is causally "
+                "relevant to the outcome must appear in the compiled world — as an "
+                "entity, action, field, document, resource, process node, external "
+                "process or terminal term — or the run is refused. Items that are "
+                "genuinely incidental to this question may be left out; the gate asks "
+                "for a stated reason, not for everything",
                 context.get("checklist", ""),
             ),
+            str(context.get("extra_instruction") or ""),
             _COMPILE_RULES,
             _block("SCHEMA (fill this shape)", _WORLD_SCHEMA),
         ]

@@ -27,6 +27,9 @@ class ForecastConfig:
     seed: int = 0
     trace_dir: Path | None = None
     max_branches: int = 8
+    # How many *causal structures* may be simulated when the evidence leaves the
+    # structure genuinely open. 1 means the compiled structure is taken as given.
+    max_structures: int = 3
     run_label: str = "run"
     budget: RunBudget = field(default_factory=RunBudget)
 
@@ -37,6 +40,7 @@ class ForecastConfig:
         seed: int = 0,
         trace_dir: Path | None = None,
         max_branches: int = 8,
+        max_structures: int = 3,
         research_budget: object | None = None,
         transport: object | None = None,
         now: datetime | None = None,
@@ -63,6 +67,7 @@ class ForecastConfig:
             seed=seed,
             trace_dir=trace_dir,
             max_branches=max_branches,
+            max_structures=max_structures,
             budget=budget or RunBudget(),
         )
 

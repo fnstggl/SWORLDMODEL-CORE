@@ -37,16 +37,21 @@ DEFAULT_TEMPERATURES: dict[str, float] = {
     "actor_decision": 0.7,
     "reflect": 0.5,
 }
+# Output budgets per stage. These must cover the model's *reasoning* tokens as well
+# as its content: this provider counts both against `max_tokens`, so a budget sized
+# only for the expected JSON silently returns an empty or truncated body.
 DEFAULT_MAX_TOKENS: dict[str, int] = {
-    "extract_claims": 3000,
-    # The world-compile stage emits large nested JSON (entities, actions, a process
-    # graph, uncertainties and a terminal expression). Too small a budget truncates
-    # the JSON mid-object, and since every repair retry re-truncates at the same cap
-    # it can never recover — so it gets a generous, explicit budget.
-    "compile_world_spec": 8000,
-    "interpret_novel": 1500,
-    "exclusion_challenge": 600,
-    "actor_decision": 1500,
+    "extract_claims": 4000,
+    # The world-compile stage emits large nested JSON: entities, actors with grounded
+    # plans, actions with timing and effects, a dated process graph, external
+    # processes, wake rules, uncertainties and a terminal expression.
+    "compile_world_spec": 16000,
+    "interpret_novel": 2000,
+    "exclusion_challenge": 800,
+    # An actor returns its plan disposition, plan update, intention, information needs,
+    # commitments and revisit conditions — considerably more than a bare action.
+    "actor_decision": 3000,
+    "reflect": 2000,
 }
 
 
@@ -63,7 +68,8 @@ class DeepSeekGateway(ModelGateway):
         max_retries: int = 4,
         timeout: float = 90.0,
         temperatures: dict[str, float] | None = None,
-        default_max_tokens: int = 2500,
+        default_max_tokens: int = 3000,
+        max_output_tokens: int = 32000,
         backoff_base: float = 0.5,
     ) -> None:
         super().__init__()
@@ -77,6 +83,7 @@ class DeepSeekGateway(ModelGateway):
         self.timeout = timeout
         self.temperatures = {**DEFAULT_TEMPERATURES, **(temperatures or {})}
         self.default_max_tokens = default_max_tokens
+        self.max_output_tokens = max_output_tokens
         self.backoff_base = backoff_base
         if not self.api_key:
             raise GatewayError("DEEPSEEK_API_KEY is not set; cannot run a live forecast")
@@ -149,12 +156,24 @@ class DeepSeekGateway(ModelGateway):
 
             data, tokens_in, tokens_out, content = self._parse(resp.text)
             if data is None or not self._schema_ok(data, request.expected_keys):
-                failure = f"malformed/missing-keys on attempt {attempt}"
+                truncated = self._looks_truncated(resp.text, content)
+                failure = (
+                    f"{'truncated' if truncated else 'malformed/missing-keys'} on attempt {attempt}"
+                )
                 validation_failures.append(failure)
                 last_error = failure
                 retries += 1
                 if attempt < self.max_retries:
-                    # Deterministic repair: same decision context, stricter instruction.
+                    if truncated:
+                        # Retrying a truncated response at the same cap re-truncates at
+                        # exactly the same point, forever. Give it more room instead.
+                        body["max_tokens"] = min(
+                            int(body["max_tokens"] * 2), self.max_output_tokens
+                        )
+                        continue
+                    # Otherwise: deterministic repair. Same decision context, stricter
+                    # instruction. This corrects malformed JSON; it never supplies
+                    # content the model did not produce.
                     body["messages"] = messages + [
                         {"role": "assistant", "content": content[:2000]},
                         {
@@ -187,6 +206,23 @@ class DeepSeekGateway(ModelGateway):
         raise GatewayError(
             f"DeepSeek call for {request.task_kind!r} failed after {retries} retries: {last_error}"
         )
+
+    @staticmethod
+    def _looks_truncated(envelope_text: str, content: str) -> bool:
+        """Whether the provider stopped mid-object rather than producing bad JSON.
+
+        The two failures need opposite responses — more room versus a correction — so
+        they are distinguished rather than both retried the same way.
+        """
+
+        try:
+            envelope = json.loads(envelope_text)
+            if envelope["choices"][0].get("finish_reason") == "length":
+                return True
+        except (json.JSONDecodeError, KeyError, IndexError, TypeError):
+            pass
+        stripped = content.strip()
+        return bool(stripped) and not stripped.endswith(("}", "]"))
 
     def _sleep(self, attempt: int) -> None:
         time.sleep(min(self.backoff_base * (2**attempt), 8.0))
