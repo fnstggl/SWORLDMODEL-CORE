@@ -13,6 +13,7 @@ used on this path.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Any
 
@@ -27,6 +28,7 @@ from .research import ResearchBundle, assemble_bundle
 from .research_planner import ResearchPlan
 
 _VALID_PROVENANCE = {p.value for p in WeightProvenance}
+_WORD = re.compile(r"[a-z0-9]+")
 
 
 def _candidate_persons(view: EvidenceView) -> list[str]:
@@ -259,6 +261,7 @@ def build_live_bundle(
         reality["members"] = roster
     frame = compile_frame(gateway, question, view, reality)
     reality["_options_hint"] = frame.get("options")
+    _reconcile_target_option(reality, frame)
     data = {
         "reality": {**reality, "as_of": as_of.isoformat(), "horizon": horizon.isoformat()},
         "frame": frame,
@@ -272,6 +275,41 @@ def build_live_bundle(
 # ---------------------------------------------------------------------------
 # Deterministic validation / normalization
 # ---------------------------------------------------------------------------
+
+
+def _reconcile_target_option(reality: dict[str, Any], frame: dict[str, Any]) -> None:
+    """The per-actor ballot options (frame) and the YES target option (reality/terminal)
+    are produced by separate LLM calls and can disagree on wording — e.g. actors vote
+    "hold" while the terminal's target is "hold policy interest rate unchanged". The
+    terminal matches votes by exact option string, so a mismatch makes a genuinely
+    unanimous vote read as failing. Snap the target option to the closest actual ballot
+    option so the terminal can recognize the matching votes."""
+
+    options = [str(o) for o in (frame.get("options") or [])]
+    if not options:
+        return
+    terminal = reality.get("terminal") or {}
+    for key_holder, key in ((reality, "target_option"), (terminal, "target_option")):
+        current = str(key_holder.get(key) or "")
+        if current and current not in options:
+            match = _closest_option_str(current, options)
+            if match:
+                key_holder[key] = match
+    reality["terminal"] = terminal
+
+
+def _closest_option_str(raw: str, options: list[str]) -> str | None:
+    low = raw.lower()
+    for o in options:
+        if o.lower() == low:
+            return o
+    contained = [o for o in options if low and (low in o.lower() or o.lower() in low)]
+    if contained:
+        return min(contained, key=len)
+    raw_tokens = set(_WORD.findall(low))
+    scored = [(len(raw_tokens & set(_WORD.findall(o.lower()))), o) for o in options]
+    best_overlap, best = max(scored, key=lambda p: p[0])
+    return best if best_overlap > 0 else None
 
 
 def _available_ids(view: EvidenceView) -> set[str]:

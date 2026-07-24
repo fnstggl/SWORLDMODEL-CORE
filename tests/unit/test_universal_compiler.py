@@ -5,7 +5,11 @@ from __future__ import annotations
 from datetime import datetime
 
 from sworldmodel.evidence import EvidenceStore
-from sworldmodel.universal_compiler import _normalize_frame, _normalize_reality
+from sworldmodel.universal_compiler import (
+    _normalize_frame,
+    _normalize_reality,
+    _reconcile_target_option,
+)
 
 AS_OF = datetime.fromisoformat("2026-01-01T00:00:00+00:00")
 HORIZON = datetime.fromisoformat("2026-02-01T00:00:00+00:00")
@@ -44,6 +48,25 @@ def test_null_heavy_reality_is_coerced_to_valid_structure() -> None:
     rule = out["decision_rule"]
     assert isinstance(rule["kind"], str) and isinstance(rule["total_seats"], int)
     assert isinstance(out["terminal"]["mechanism"], str)
+
+
+def test_reconcile_snaps_verbose_target_to_a_ballot_option() -> None:
+    # A terminal target compiled verbosely must snap to the actual per-actor ballot
+    # option so a unanimous vote for "hold" is recognized by the terminal.
+    reality = {
+        "target_option": "hold policy interest rate unchanged",
+        "terminal": {"target_option": "hold policy interest rate unchanged"},
+    }
+    frame = {"options": ["cut", "hold", "hike"]}
+    _reconcile_target_option(reality, frame)
+    assert reality["target_option"] == "hold"
+    assert reality["terminal"]["target_option"] == "hold"
+
+
+def test_reconcile_leaves_matching_target_untouched() -> None:
+    reality = {"target_option": "hold", "terminal": {"target_option": "hold"}}
+    _reconcile_target_option(reality, {"options": ["cut", "hold"]})
+    assert reality["target_option"] == "hold"
 
 
 def test_frame_normalization_drops_bad_uncertainty_and_normalizes_weights() -> None:
