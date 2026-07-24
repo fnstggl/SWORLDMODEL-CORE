@@ -241,8 +241,20 @@ class LiveResearchBackend:
         store: EvidenceStore,
         trace: ResearchTrace,
     ) -> int:
+        # For a pastcast, a source published after the cutoff can only yield claims that
+        # are then excluded — so it must not consume the (bounded) extract budget. This
+        # concentrates the budget on usable pre-cutoff sources, which is what makes
+        # roster/vote verification reliable rather than variance-dependent.
+        fresh: list[FetchedSource] = []
+        for s in sources:
+            if s.published_at is not None and s.published_at > as_of:
+                trace.rejected.append(
+                    {"url": s.final_url, "reason": f"published after cutoff ({s.published_at.date()})"}
+                )
+            elif s.content_hash not in seen_hashes:
+                fresh.append(s)
         budget_left = self.budget.max_extract_calls - trace.extract_calls
-        sources = [s for s in sources if s.content_hash not in seen_hashes][: max(0, budget_left)]
+        sources = fresh[: max(0, budget_left)]
         for s in sources:
             seen_hashes.add(s.content_hash)
         if not sources:

@@ -12,6 +12,7 @@ import re
 import urllib.parse
 from dataclasses import dataclass
 from datetime import datetime
+from email.utils import parsedate_to_datetime
 
 from .http import HttpError, HttpTransport
 from .ids import sha256_hex
@@ -69,6 +70,11 @@ def fetch_source(
         text = extract_text(resp.text) if _looks_textual(resp.text) else ""
         title = extract_title(resp.text)
         published = extract_published(resp.text)
+    # Fall back to the server's Last-Modified header when the body carries no date, so a
+    # stable, undated reference page (an official roster page) can still be dated and
+    # used, rather than being treated as "now" and excluded from a pastcast.
+    if published is None:
+        published = _header_date(resp.headers.get("last-modified", ""))
     return FetchedSource(
         url=url,
         final_url=resp.final_url,
@@ -128,6 +134,17 @@ def _parse_dt(value: str) -> datetime | None:
         except ValueError:
             continue
     return None
+
+
+def _header_date(value: str) -> datetime | None:
+    """Parse an HTTP-date header (RFC 7231, e.g. 'Wed, 21 Oct 2026 07:28:00 GMT')."""
+
+    if not value.strip():
+        return None
+    try:
+        return parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _looks_textual(text: str) -> bool:
