@@ -361,6 +361,9 @@ class ActorDefinition:
     stable_identity: tuple[tuple[str, str], ...] = ()  # (key, value) pairs
     memory_seeds: tuple[MemorySeed, ...] = ()
     evidence_claim_ids: tuple[str, ...] = ()
+    # The actor's grounded profile (grounding.ActorGroundingProfile). Typed as object to
+    # keep models.py free of a grounding import cycle; always set by the compiler.
+    grounding: object | None = None
 
 
 @dataclass(frozen=True)

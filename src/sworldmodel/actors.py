@@ -207,11 +207,17 @@ class ActorRuntime:
 
         # 3. plan/react: ask the model for a typed intention.
         cb = actor.definition.conditional_behavior
+        profile = actor.definition.grounding
         context = {
             "actor_id": actor.actor_id,
             "name": actor.definition.name,
+            "canonical_identity": getattr(profile, "canonical_identity", actor.definition.name),
             "role": actor.definition.role,
             "authority": list(actor.definition.authority),
+            # This actor's own grounded history/statements/inclination, each carrying an
+            # explicit epistemic mark. Rendered as its own prompt section.
+            "actor_grounding": _render_grounding(profile),
+            "actor_evidence_claim_ids": list(getattr(profile, "evidence_claim_ids", ())),
             "stage": view.stage,
             "options": list(view.options),
             "current_inclination": cb.current_inclination,
@@ -232,15 +238,20 @@ class ActorRuntime:
             "public_facts": list(view.public_facts),
             "feasible_actions": list(view.feasible_actions),
         }
+        # The rendered prompt is built once and both SENT and RECORDED, so the audit
+        # trail is byte-identical to what the provider actually received.
+        rendered_prompt = render_decision_prompt(context)
         dresp = self.gateway.generate(
             GatewayRequest(
                 task_kind="actor_decision",
-                prompt=render_decision_prompt(context),
+                prompt=rendered_prompt,
                 context=context,
                 seed=seed,
             )
         )
         responses.append(dresp)
+        context["rendered_prompt"] = rendered_prompt
+        context["provider_response"] = dict(dresp.data)
         intent = self._to_intent(actor.actor_id, dresp.data, view)
 
         # 5. update persistent state (still no external mutation).
@@ -366,6 +377,13 @@ def _closest_option(raw: str, options: tuple[str, ...]) -> str | None:
     scored = [(len(raw_tokens & set(_WORD.findall(o.lower()))), o) for o in options]
     best_overlap, best = max(scored, key=lambda p: p[0])
     return best if best_overlap > 0 else None
+
+
+def _render_grounding(profile: object) -> str:
+    """Render an actor's grounding profile block, if the actor has one."""
+
+    render = getattr(profile, "render_grounding", None)
+    return str(render()) if callable(render) else ""
 
 
 def _as_dict(value: object) -> dict[str, object]:

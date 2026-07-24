@@ -40,17 +40,41 @@ def render_compile_prompt(context: dict[str, Any]) -> str:
 
 
 def render_decision_prompt(context: dict[str, Any]) -> str:
+    """Render this actor's decision prompt.
+
+    The prompt is split into two clearly separated sections so the model can never
+    confuse what everyone knows with what *this specific person* knows:
+
+    * ACTOR-SPECIFIC GROUNDING — this actor's identity, own previous actions, own
+      statements, own commitments and inferred inclination, each carrying an explicit
+      epistemic mark (verified / inferred / hypothesis / unknown).
+    * SHARED WORLD CONTEXT — the stage, options, proposal and public facts that every
+      participant may validly hold.
+    """
+
+    identity = context.get("canonical_identity") or context.get("name") or context["actor_id"]
+    grounding = str(context.get("actor_grounding") or "").strip()
+    if not grounding:  # no compiled profile: fall back to the raw identity fields
+        grounding = (
+            f"You are {identity}.\nRole: {context.get('role', '')}\n"
+            f"Authority: {', '.join(context.get('authority') or []) or '(none recorded)'}"
+        )
     lines = [
-        f"You are {context.get('name', context['actor_id'])}, role {context.get('role', '')}.",
+        f"You are {identity}. Act as this specific person, not as a generic role.",
         "You act inside a persistent world. Emit ONE typed intention. You may only",
         "state intentions (send a message, make a statement, request information,",
         "introduce/revise/support/oppose a proposal, make a commitment, act, cast a",
         "vote, or wait). You may NOT assert any consequence (that someone was",
         "persuaded, that a proposal passed, that a vote succeeded).",
-        _block("YOUR AUTHORITY", context.get("authority")),
+        "=" * 70 + "\n## ACTOR-SPECIFIC GROUNDING (yours alone)\n" + "=" * 70,
+        grounding,
+        "Items marked VERIFIED_OBSERVATION are established fact. Items marked",
+        "SUPPORTED_INFERENCE are reasoned expectations, not facts — you may act against",
+        "them if your own record and the current situation warrant. Items marked UNKNOWN",
+        "are genuinely not known: do not invent them.",
+        "=" * 70 + "\n## SHARED WORLD CONTEXT (available to participants)\n" + "=" * 70,
         _block("STAGE", context.get("stage")),
-        _block("YOUR CURRENT INCLINATION", context.get("current_inclination")),
-        _block("YOUR REACTION RULES", context.get("reaction_rules")),
+        _block("OPTIONS", context.get("options")),
         _block("ACTIVE PROPOSAL", context.get("active_proposal")),
         _block("RETRIEVED MEMORIES", context.get("retrieved_memories")),
         _block("NEW OBSERVATIONS (only what you actually received)", context.get("observations")),
@@ -61,8 +85,9 @@ def render_decision_prompt(context: dict[str, Any]) -> str:
         " one of: send_message, make_statement, request_information,"
         " introduce_proposal, revise_proposal, support_proposal, oppose_proposal,"
         " make_commitment, operational_action, cast_vote, wait. To vote use"
-        ' kind="cast_vote" and set vote_option to exactly one option. Qualitative'
-        " reasoning only — never numbers.",
+        ' kind="cast_vote" and set vote_option to EXACTLY one of the OPTIONS strings'
+        " above, copied verbatim — do not paraphrase it. Qualitative reasoning only —"
+        " never numbers.",
     ]
     return "\n\n".join(lines)
 

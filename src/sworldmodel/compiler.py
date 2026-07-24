@@ -25,6 +25,13 @@ from .coverage import (
 )
 from .evidence import EvidenceView
 from .gateway import GatewayRequest, GatewayResponse, ModelGateway
+from .grounding import (
+    ActorGroundingProfile,
+    ActorGroundingReport,
+    assess_actor_grounding,
+    enforce_actor_grounding,
+    profile_from_member,
+)
 from .models import (
     ActorDefinition,
     BranchWeight,
@@ -63,6 +70,7 @@ class CompiledWorld:
     briefing_text: str
     compile_responses: tuple[GatewayResponse, ...]
     coverage_report: CompilationCoverageReport
+    actor_grounding: ActorGroundingReport
 
 
 def _rule_to_dict(r: ReactionRule) -> dict[str, object]:
@@ -168,6 +176,7 @@ def compile_world(
     # 2. Deterministic validation into typed ActorDefinitions.
     actor_states: dict[str, ActorState] = {}
     entities: list[Entity] = []
+    profiles: list[ActorGroundingProfile] = []
     for m in bundle.members:
         gen = compiled_actors.get(m.actor_id)
         if gen is None:
@@ -193,6 +202,21 @@ def compile_world(
             acceptance_tolerance=frame.acceptance_tolerance,
             evidence_claim_ids=tuple(gen.get("evidence_claim_ids", m.evidence_claim_ids)),
         )
+        # Ground the actor as a specific person: the VERIFIED previous action is kept as
+        # its own field and is never overwritten by the inferred current inclination.
+        profile = profile_from_member(
+            actor_id=m.actor_id,
+            name=m.name,
+            role=m.role,
+            authority=m.authority,
+            previous_action=m.prior_action,
+            previous_action_claim_ids=m.evidence_claim_ids,
+            memory_seeds=tuple((s.content, s.evidence_claim_ids) for s in m.memory_seeds),
+            inclination=cb.current_inclination,
+            inclination_claim_ids=cb.evidence_claim_ids,
+            reaction_rules=tuple((r.trigger_signal, r.moves_to_option) for r in cb.reaction_rules),
+            valid_time=contract.as_of.date().isoformat(),
+        )
         definition = ActorDefinition(
             actor_id=m.actor_id,
             name=m.name,
@@ -204,7 +228,9 @@ def compile_world(
             stable_identity=m.stable_identity,
             memory_seeds=m.memory_seeds,
             evidence_claim_ids=m.evidence_claim_ids,
+            grounding=profile,
         )
+        profiles.append(profile)
         actor_states[m.actor_id] = ActorState.from_definition(
             definition, default_time=contract.as_of
         )
@@ -237,6 +263,11 @@ def compile_world(
 
     # 3. Reality-integrity gate — raises if the world is not faithful.
     manifest = verify_reality(contract, evidence, actor_states, institution)
+
+    # 3b. Actor-grounding gate — refuse to simulate named people as generic role
+    #     templates, or to let one actor carry another's personal history.
+    grounding_report = assess_actor_grounding(tuple(profiles))
+    enforce_actor_grounding(grounding_report)
 
     # 4. Assemble protocol, scenarios, uncertainty and causal graph.
     chair = _choose_chair(bundle)
@@ -311,6 +342,7 @@ def compile_world(
         briefing_text=briefing_text,
         compile_responses=(resp,),
         coverage_report=coverage_report,
+        actor_grounding=grounding_report,
     )
 
 
