@@ -186,23 +186,43 @@ class TraceContext:
         return lines
 
     def actor_decision_lines(self) -> list[str]:
-        return [
-            canonical_json(
-                {
-                    "branch_id": d.branch_id,
-                    "actor_id": d.actor_id,
-                    "stage": d.stage,
-                    "retrieved_memory_ids": d.retrieved_memory_ids,
-                    "local_view": d.decision_context,
-                    "intent": d.intent,
-                    "validation": d.validation,
-                    "applied_event_ids": d.event_ids,
-                    "prompt_hash": d.prompt_hash,
-                    "model": d.model,
-                }
+        """One record per actor decision, carrying the BYTE-EXACT prompt that was sent
+        to the provider (not a reconstruction) plus the provider's parsed response, so
+        the trace can prove what each specific actor actually received."""
+
+        out = []
+        for d in self.run_result.actor_decisions:
+            ctx = dict(d.decision_context)
+            prompt = ctx.pop("rendered_prompt", "")
+            response = ctx.pop("provider_response", None)
+            out.append(
+                canonical_json(
+                    {
+                        "branch_id": d.branch_id,
+                        "actor_id": d.actor_id,
+                        "canonical_identity": ctx.get("canonical_identity"),
+                        "stage": d.stage,
+                        "actor_evidence_claim_ids": ctx.get("actor_evidence_claim_ids", []),
+                        "retrieved_memory_ids": d.retrieved_memory_ids,
+                        "observed_event_ids": _observed_ids(ctx.get("observations")),
+                        "feasible_actions": ctx.get("feasible_actions", []),
+                        "local_view": ctx,
+                        "exact_prompt": prompt,
+                        "provider_response": response,
+                        "intent": d.intent,
+                        "validation": d.validation,
+                        "applied_event_ids": d.event_ids,
+                        "prompt_hash": d.prompt_hash,
+                        "model": d.model,
+                    }
+                )
             )
-            for d in self.run_result.actor_decisions
-        ]
+        return out
+
+    def actor_grounding_manifest(self) -> dict[str, Any]:
+        """Each actor's grounding profile with provenance for every element."""
+
+        return self.compiled.actor_grounding.as_dict()
 
     def _gateway_calls(self) -> list[Any]:
         return list(self._calls_override)
@@ -227,6 +247,9 @@ class TraceContext:
         (out_dir / "world_manifest.json").write_text(canonical_json(self.world_manifest()) + "\n")
         (out_dir / "coverage_report.json").write_text(
             canonical_json(self.coverage_manifest()) + "\n"
+        )
+        (out_dir / "actor_grounding.json").write_text(
+            canonical_json(self.actor_grounding_manifest()) + "\n"
         )
         (out_dir / "event_ledger.jsonl").write_text("\n".join(self.event_ledger_lines()) + "\n")
         (out_dir / "llm_calls.jsonl").write_text("\n".join(self.llm_call_lines()) + "\n")
@@ -371,3 +394,11 @@ def _explanation(ctx: TraceContext) -> str:
         f"weighted share of branches whose actual simulated votes met the predicate — not a "
         f"prior and not a separate institution model."
     )
+
+
+def _observed_ids(observations: object) -> list[str]:
+    """Event ids the actor actually perceived, from its recorded local view."""
+
+    if not isinstance(observations, list):
+        return []
+    return [str(o.get("obs_id")) for o in observations if isinstance(o, dict)]
