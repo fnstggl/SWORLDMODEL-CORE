@@ -43,9 +43,22 @@ def verify_reality(
     # 1. If the world claims a specific participant count, it must match the roster
     #    exactly (no silent compression of a larger body into fewer modeled units).
     if expected is not None and represented != expected:
+        shortfall = expected - represented
+        details: dict[str, object] = {**details_base, "difference": shortfall}
+        if shortfall > 0:
+            # A shortfall is repairable by research: name it in the same label shape the
+            # coverage gate uses, so the existing targeted-research repair loop can go
+            # looking for the participants the compiled world is missing. This never
+            # invents a participant — if research cannot find them, the gate refuses again.
+            named = ", ".join(sorted(a.entity.name for a in actors.values()))
+            details["missing_material_candidates"] = [
+                f"[person] the remaining {shortfall} of {expected} participants in "
+                f"{contract.subject_entity or 'the deciding body'} — "
+                f"only {represented} verified so far ({named})"
+            ]
         raise WorldIntegrityError(
             "participant roster does not match verified reality — simulation refused",
-            details={**details_base, "difference": (expected - represented)},
+            details=details,
         )
 
     # 2. No duplicated participant (same underlying person occupying two slots).
