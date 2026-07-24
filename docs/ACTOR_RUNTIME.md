@@ -1,77 +1,68 @@
-# Actor runtime
+# The actor runtime
 
-Actors are persistent and live inside an explicit external world. They do **not**
-generate both their decision and the reality resulting from it in one response: they
-emit a typed *intention*, and the environment produces the *consequence*.
+An actor is a persistent being, not a function the runtime calls at protocol stages.
 
-## The cognitive loop
+## What an actor carries between invocations
 
-Adapted conceptually from Generative Agents (perceive → retrieve → plan/react →
-reflect → execute), with no grid, movement, filesystem, or Smallville prompt code.
+| state | why it exists |
+| --- | --- |
+| `plan` | a goal, sparse dated steps, a status, a revision count, and a `basis` saying which verified schedule, role obligation or existing commitment makes it admissible |
+| `current_action` | what it is doing now, with a start time and an expected completion |
+| `commitments` | undertakings with due times, each a real future cause |
+| `pending_needs` | what it asked for and has not received, with an optional deadline |
+| `revisit_conditions` | conditions it named itself for coming back |
+| `memory` | episodic and semantic, with the evidence claim ids behind each |
+| `beliefs`, `goals`, `relationships`, `unresolved_questions` | its own view, which nothing else may write |
 
-`ActorRuntime.step(actor_state, local_view)`:
+A plan keeps its identity through revision and interruption, so the trace shows one plan
+changing rather than a new plan appearing.
 
-1. **Perceive.** Turn newly delivered/visible events from the local view into
-   observations and durable episodic memories. A sent message is not automatically
-   noticed — only a delivered one is visible.
-2. **Retrieve.** Pull relevant memories from the actor's own `MemoryStream`, scored by
-   `w_recency·decay^rank + w_relevance·lexical + w_importance·poignancy` (each
-   min-max normalized). Retrieval refreshes recency. The retrieved ids are recorded.
-   No heuristic encodes a social outcome (there is no "consensus pull").
-3. **Plan / react.** Ask the gateway for a typed intention, given the actor's
-   conditional behavior, the active proposal, observations, retrieved memories, and
-   feasible actions. The actor may wait — but waiting records a pending information
-   need, which the protocol can later satisfy.
-4. **Reflect** (when accumulated importance crosses a threshold). Updates beliefs and
-   durable memories only; it never changes external reality.
-5. **Emit intent.** The gateway output is validated into a typed `Intent`; free-form
-   prose is never accepted as the state transition. The natural-language reasoning and
-   message content are preserved in the trace.
+## Why an actor is invoked
 
-The actor holds `ActorState` (memory, beliefs, plan, pending questions, last-observed
-ids) and is cloned per branch so memories stay isolated. It never touches
-`WorldState`.
+Only with a stated cause. The complete set:
 
-## The local view
+| reason | meaning |
+| --- | --- |
+| `process_opportunity` | a compiled process node opened actions for it |
+| `directed_information` | something was addressed to it personally |
+| `compiled_wake_rule` | a rule compiled *for this world* says this matters to it |
+| `own_revisit_condition` | a condition it set itself came true |
+| `pending_need_answered` | an answer arrived from whom it asked |
+| `pending_need_unanswered_at_deadline` | the answer definitively did not come |
+| `commitment_due` | something it undertook fell due |
+| `own_action_resolved` | its own attempt failed or was refused |
+| `own_plan_step_due` | its own planned step's moment arrived |
+| `deadline_reached` | a real deadline in the process |
 
-`world.view_for(actor_id, trigger)` derives a read-only `LocalView` from a single
-authoritative world: role, authority, stage, options, visible proposals, public
-facts, and the delivered/visible observations this actor could have received by the
-branch time. It cannot expose another actor's private state, undelivered messages,
-future events, post-cutoff publications, the eventual outcome, or the aggregate
-forecast. The view sent to the model is exactly the view recorded in the trace.
+Anything else it notices enters memory and costs no model call. An actor busy with its
+own unfinished action is not interrupted by a mere opportunity — that is what makes a
+plan persist. Simultaneous reasons merge into one invocation carrying all of them,
+because a person facing two things at once has one moment of attention.
 
-## Intent vs. consequence
+## What one invocation looks like
 
-`Intent` can only carry one of the allowed kinds (send message, make statement,
-request information, introduce/revise/support/oppose a proposal, make a commitment,
-act, cast a vote, wait, preserve plan). There is deliberately **no** kind for
-asserting a consequence — an actor has no vocabulary to say "another member was
-persuaded", "a coalition formed", or "the vote passed". A gateway that returns such a
-kind is rejected (`test_actor_output_cannot_mark_another_actor_persuaded`).
+```
+perceive   newly noticed observations enter episodic memory
+retrieve   ranked by the actor's actual situation: its plan, its current action,
+           what it is waiting for, what just reached it
+decide     one call covering BOTH what happens to the plan and what to do
+reflect    only when the actor's own response says its understanding changed
+```
 
-The `Environment` validates authority/feasibility/timing/availability and then
-executes the intent into events. Statements keep their substantive content — a
-communication is never flattened to "actor emitted statement" — and are delivered to
-other members as observable content they can react to
-(`test_recipient_can_react_to_a_statement_and_removing_it_changes_the_vote`).
+The actor is told *why it is being asked now* and *what it was already doing*. It is not
+asked to reconsider the world from scratch.
 
-## Institution processes
+There is no reflection threshold, no attention bandwidth, no importance score that
+decides whether it acts, and no retrieval weight triple. Those numbers existed in both
+donor implementations and in this one; they are gone. A number that decides when a
+person changes their mind is an assertion about people that nothing in the evidence
+supports.
 
-Coordination emerges from events and reactions, not numeric smoothing. There is no
-scalar support convergence, no movement toward a weighted mean, no consensus pull,
-leader floor, coalition-discipline constant, or visible-tally multiplier. A
-`ProtocolGraph` of generic primitives (distribute briefing, introduce proposal,
-request statements, deliver them, open decision, cast votes, tally, publish) is
-compiled per scenario; the runtime interprets it, delivering colleague statements to
-members before asking them to react.
+## What an actor cannot do
 
-## The gateway boundary
+It has no reference to `WorldState`. It cannot mutate reality, see another actor's
+private state, or assert that its action succeeded. It emits an intention; the
+environment decides the consequence.
 
-The kernel talks to a reasoning model only through `ModelGateway`. Offline runs use a
-transparent `DeterministicGateway` that reasons purely over the *structure* of its
-typed input (no scenario facts), which makes runs reproducible and tests
-deterministic; it is honestly labeled as a calibrated-behavior model wherever its
-output feeds a branch weight. A live provider gateway implements the same interface.
-The gateway is never used to count votes, apply thresholds, invent authoritative
-facts, change the contract, or write terminal outcomes — those are code.
+If its response cannot be read, that is a provider failure and the branch's mass stays
+unresolved. It never becomes a decision to wait.

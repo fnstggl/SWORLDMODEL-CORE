@@ -18,11 +18,15 @@ sworldmodel forecast \
 ```
 
 No corpus, roster, decision rule, protocol, thresholds, uncertainties, weights,
-memory seeds, or source URLs are supplied. The system runs **live research** (real web
-retrieval + verification), a **live DeepSeek** world compiler and actors, simulates,
-and aggregates. See `docs/LIVE_PRODUCT.md`. The deterministic reasoner and prepared
-corpora are confined to tests and the historical-evaluation fixture; the live command
-refuses to run "live" without a live gateway + live research.
+memory seeds, or source URLs are supplied — because none may be *needed*. The system
+runs **live research** (real web retrieval, archived at the cutoff for a pastcast,
+verified against the fetched page), a **live DeepSeek** world compiler and actors,
+simulates, and aggregates.
+
+There is no `--corpus` flag, no offline mode and no deterministic gateway in the
+shipped package. Test stand-ins live under `tests/`, where the product cannot reach
+them. If the live path cannot answer a question faithfully, that is a fact about the
+system and it is reported — not routed around.
 
 This is **one universal world simulator**, not a committee engine or a router between
 scenario types. For every arbitrary question the LLM compiles the *actual causal world*
@@ -45,8 +49,11 @@ forecast(question, as_of, horizon, config)
                       process graph, uncertainties, declarative terminal)
    → contract        (immutable question definition; locks the declarative terminal)
    → integrity gate  (refuse a structurally false world)
+   → structures      (is this even the right world? competing causal structures, each
+                      compiled from the same evidence and simulated)
    → uncertainty     (genuine, weighted, provenance-tagged branches)
-   → event runtime   (one universal loop: perceive → plan → intend → environment executes)
+   → event runtime   (a real branch calendar: the next scheduled thing happens, is
+                      delivered, is noticed, and wakes only the actors it affects)
    → terminal eval   (deterministic declarative predicate over world state; code, not an LLM)
    → aggregation     (weighted frequency of YES trajectories)
    → report          (fully auditable; probability reconstructable by hand)
@@ -64,26 +71,29 @@ safe effects) before the world decides their consequence.
 ## Install & run
 
 ```bash
-make install          # editable install (stdlib-only runtime; no network needed)
-make test             # pytest — acceptance + invariant + unit + integration tests
+make install          # editable install (stdlib-only runtime)
+make test             # pytest — invariants + unit
 make lint             # ruff check + format
 make typecheck        # mypy --strict
-make banxico          # run the Banxico pastcast; write SEALED pre-outcome artifacts
-make banxico-eval     # compare the sealed forecast to the known result
-make synthetic        # cross-domain proofs (committee, response, negotiation, population, geopolitical)
+make check            # all three
 ```
 
-The kernel has **zero runtime dependencies** and runs offline and deterministically
-via a transparent `DeterministicGateway` (a calibrated-behavior stand-in for a live
-LLM). A live provider gateway implements the same interface.
+Inspect a written run — what woke each actor, what it was sent, what it returned:
+
+```bash
+sworldmodel inspect artifacts/<run> --summary        # invocations per actor, and why
+sworldmodel inspect artifacts/<run> --actor <id> --prompts
+```
+
+The kernel has **zero runtime dependencies**. Producing a forecast requires a
+`DEEPSEEK_API_KEY` and network access, by design.
 
 ## Repository layout
 
 ```
-src/sworldmodel/      the canonical kernel (see docs/ARCHITECTURE.md)
-tests/                unit / invariants / integration / fixtures
-evaluation/           Banxico + synthetic corpora (scenario data, never in core)
-docs/                 architecture and semantics
+src/sworldmodel/      the canonical kernel — every file is on the live path
+tests/                invariants + unit, plus the test-only fakes and worlds
+docs/                 audit, port manifest, architecture and semantics
 artifacts/            generated run artifacts (git-ignored)
 ```
 
@@ -92,8 +102,14 @@ artifacts/            generated run artifacts (git-ignored)
 - The forecast is `weighted_simulated_trajectories` — never a prior or a separate model.
 - The production runtime contains **no** routing on a question family (committee /
   negotiation / election / population / geopolitical / response).
-- A claimed participant count can never exceed the verified roster (a nine-participant
-  body can never become five modeled units).
+- The expected participant roster is derived from **evidence**, not from the compiler's
+  own claim about itself, and a person the evidence names as decision-relevant cannot be
+  missing from the simulated world.
+- An actor is invoked because something reached it. Invocation counts differ between
+  actors and between branches; nothing is called on a schedule.
+- Noticing something is not acting on it: an actor with an unfinished action is not
+  interrupted by a mere opportunity, and its plan persists.
+- Nothing uncited is ever shown to an actor as an established fact.
 - Every materially relevant verified evidence item is represented and causally wired
   into the compiled WorldSpec that is actually simulated, or explicitly excluded with a
   recorded reason — nothing important is silently dropped between research and
@@ -102,12 +118,23 @@ artifacts/            generated run artifacts (git-ignored)
 - A compiled action's behavior is its effects — renaming it changes nothing.
 - A novel action never auto-succeeds; if it cannot be represented safely it is rejected,
   never coerced into the nearest known action.
+- An invalid intention is refused with its reason and the reason goes back to the actor.
+  Nothing is rewritten into a different action, downgraded to waiting, or completed with
+  a parameter the runtime chose on the actor's behalf.
+- Acting is not succeeding: an action started in a world that has since moved fails
+  visibly rather than landing in a world its actor never saw.
 - No fact available after `as_of` can affect a pastcast (mechanically enforced).
 - Deleting the actor calls changes/kills the forecast; the full run replays from the ledger.
 
-The mandatory acceptance tests live in `tests/acceptance/test_universal.py`. See
-`docs/ARCHITECTURE.md` for the responsibility table, the production dependency graph
-and the deletion list; `docs/REBUILT_UNIVERSAL_MERGE.md` for how the live-research and
-universal-simulator lines were merged; and `docs/` for the reality-integrity gate,
-evidence-to-world coverage integrity, the evidence/cutoff model, the actor runtime,
-forecast semantics, and the Banxico evaluation.
+The load-bearing tests are `tests/invariants/`: `test_scheduling.py` (actor calls are
+caused, never scheduled), `test_no_coercion.py` (the environment decides what is
+possible, the actor decides what it wants, and neither does the other's job),
+`test_universality.py` (no question-family routing, proven over the AST) and
+`test_forecast_and_replay.py` (the number is the trajectories, and the trajectories
+replay).
+
+`docs/CONSOLIDATION_AUDIT.md` records what each of the three repositories actually did
+and the KEEP / PORT / REWRITE / DELETE decision for every capability;
+`docs/PORT_MANIFEST.md` records each adapted semantic and every behavioral constant
+removed; `docs/GENERATIVE_AGENTS_EXTRACTION.md` records what was taken from the
+reference implementation and what was rejected.

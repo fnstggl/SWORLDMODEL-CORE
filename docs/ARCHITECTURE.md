@@ -5,7 +5,13 @@ LLM compiles the *actual causal world* required to answer it — the entities an
 their roles/authority/capabilities, the objects/documents/resources/channels, the real
 process that can produce the outcome, the scenario-specific actions each actor may take,
 the genuine uncertainties, and the exact declarative condition that makes the answer YES.
-One runtime then executes that compiled program and reads the outcome from world state.
+One runtime then executes that compiled program on a real calendar and reads the
+outcome from world state.
+
+For the audit that produced this architecture, the capability-by-capability decisions,
+and the record of what was adapted from where, see `CONSOLIDATION_AUDIT.md` and
+`PORT_MANIFEST.md`. For the actor's persistent state and the complete set of reasons it
+can be invoked, see `ACTOR_RUNTIME.md`.
 
 It is **not** a committee simulator, a router between predefined scenario types, or a
 collection of hardcoded action families. A committee vote, an individual response, a

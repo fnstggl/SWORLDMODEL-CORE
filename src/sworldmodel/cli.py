@@ -168,6 +168,7 @@ def cmd_forecast(args: argparse.Namespace) -> int:
     config = ForecastConfig.live(
         seed=args.seed,
         max_branches=args.max_branches,
+        max_structures=args.max_structures,
         research_budget=ResearchBudget(
             max_rounds=args.research_rounds,
             max_queries=args.max_queries,
@@ -283,6 +284,13 @@ def build_parser() -> argparse.ArgumentParser:
     fc.add_argument("--horizon", required=True, help="ISO datetime resolution horizon")
     fc.add_argument("--model", default=None, help="override model id")
     fc.add_argument("--max-branches", type=int, default=6)
+    fc.add_argument(
+        "--max-structures",
+        type=int,
+        default=3,
+        help="how many competing causal structures to simulate when the evidence "
+        "leaves the structure open (1 takes the compiled structure as given)",
+    )
     fc.add_argument("--max-queries", type=int, default=14)
     fc.add_argument("--research-rounds", type=int, default=3)
     fc.add_argument("--research-seconds", type=float, default=300.0)
