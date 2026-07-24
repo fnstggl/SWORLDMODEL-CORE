@@ -144,6 +144,17 @@ def render_world_compile_prompt(context: dict[str, Any]) -> str:
                 "process node or terminal term), or the run will be refused",
                 context.get("checklist", ""),
             ),
+            "The world MUST contain at least one actor whose decisions actually produce"
+            " the outcome, and every entity that decides must appear in both `entities`"
+            " (is_actor true) and `actors`. If the outcome is produced by an"
+            " organization acting as a unit, compile that organization as the actor.",
+            "GROUND EVERY ACTOR AS A SPECIFIC ENTITY. Each actor MUST carry at least one",
+            "memory_seed stating, in the first person, something that entity itself"
+            " verifiably did or said (its own prior action, vote, statement or"
+            " commitment), citing the claim ids that support it. An actor with only a"
+            " name and a role is rejected and the run is refused. If the evidence"
+            " genuinely records nothing about an actor, say so in that seed rather than"
+            " inventing a fact — and do not give one actor another actor's history.",
             _block("SCHEMA (fill this shape)", _WORLD_SCHEMA),
         ]
     )
