@@ -225,8 +225,64 @@ def test_a_world_whose_outcome_is_an_input_is_refused() -> None:
     gw = _gateway(_signal_sensitive)
     with pytest.raises(WorldIntegrityError) as exc:
         _compile(data, gw)
-    assert "outcome" in str(exc.value).lower()
+    assert "no actions" in str(exc.value)
     assert exc.value.details.get("recompilable") is True
+
+
+def test_a_world_full_of_actions_that_cannot_reach_the_outcome_is_refused() -> None:
+    """The subtler and more dangerous shape of the same defect.
+
+    Here the world looks entirely healthy — actors, actions, a process, a schedule — but
+    every action writes somewhere the terminal never reads, and the terminal's own terms
+    come from an uncertainty. The actors would be invoked, deliberate, act, and appear
+    all through the trace, while the answer was fixed by the branch weights before any
+    of them opened their mouth. That is harder to spot than an empty world and worse.
+    """
+
+    from sworldmodel.errors import WorldIntegrityError
+
+    data = _split_world()
+    # Actions exist and are wired into the process, but they only touch `positions`.
+    data["world_spec"]["fields"].append(
+        {"field_id": "rate_decision", "value_type": "string", "initial": None}
+    )
+    data["world_spec"]["terminal"]["yes_when"] = {
+        "op": "equals",
+        "args": [{"op": "field", "args": ["rate_decision"]}, "hold"],
+    }
+    data["world_spec"]["terminal"]["unresolved_when"] = {"op": "const", "args": [False]}
+    data["uncertainties"] = [
+        {
+            "variable": "rate_decision",
+            "why_unknown": "the board has not met",
+            "reversal_capable": True,
+            "outcomes": [
+                {
+                    "value": "hold",
+                    "weight": 0.6,
+                    "provenance": "symmetric_ignorance_assumption",
+                    "field_effects": [["rate_decision", "hold"]],
+                },
+                {
+                    "value": "change",
+                    "weight": 0.4,
+                    "provenance": "symmetric_ignorance_assumption",
+                    "field_effects": [["rate_decision", "change"]],
+                },
+            ],
+        }
+    ]
+
+    gw = _gateway(_signal_sensitive)
+    with pytest.raises(WorldIntegrityError) as exc:
+        _compile(data, gw)
+    assert "the outcome is an input" in str(exc.value)
+    details = exc.value.details
+    assert details["terminal reads fields"] == ["rate_decision"]
+    assert "rate_decision" not in details["fields any action can write"]
+    # The refusal names exactly which terms were supplied instead of produced.
+    assert details["terminal terms supplied by uncertainty instead"] == ["rate_decision"]
+    assert details.get("recompilable") is True
 
 
 def test_every_branch_can_be_reconstructed_from_its_own_record() -> None:
