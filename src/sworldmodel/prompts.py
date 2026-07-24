@@ -61,7 +61,7 @@ def render_decision_prompt(context: dict[str, Any]) -> str:
         " one of: send_message, make_statement, request_information,"
         " introduce_proposal, revise_proposal, support_proposal, oppose_proposal,"
         " make_commitment, operational_action, cast_vote, wait. To vote use"
-        " kind=\"cast_vote\" and set vote_option to exactly one option. Qualitative"
+        ' kind="cast_vote" and set vote_option to exactly one option. Qualitative'
         " reasoning only — never numbers.",
     ]
     return "\n\n".join(lines)

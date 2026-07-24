@@ -248,6 +248,7 @@ class CompilationCoverageReport:
 # Keyword lexicons for deterministic extraction (broad, not scenario-specific)
 # ---------------------------------------------------------------------------
 
+
 def _lex(words: str) -> frozenset[str]:
     return frozenset(words.split())
 
@@ -963,9 +964,7 @@ def _exclusion_reason(cand: EvidenceCandidate) -> str:
     return f"no outcome-relevant signal for this {cand.kind.value} in the evidence"
 
 
-def _report(
-    candidates: tuple[EvidenceCandidate, ...], a: _Assessment
-) -> CompilationCoverageReport:
+def _report(candidates: tuple[EvidenceCandidate, ...], a: _Assessment) -> CompilationCoverageReport:
     def count(d: Disposition) -> int:
         return sum(1 for x in a.dispositions if x.disposition is d)
 

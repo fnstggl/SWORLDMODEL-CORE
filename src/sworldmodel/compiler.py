@@ -275,9 +275,7 @@ def compile_world(
     spec_view, signal_claim_ids = _world_spec_view(
         contract, bundle, actor_states, institution, frame, wired_actor_ids
     )
-    inventory = build_candidate_inventory(
-        evidence, contract, signal_claim_ids=signal_claim_ids
-    )
+    inventory = build_candidate_inventory(evidence, contract, signal_claim_ids=signal_claim_ids)
     coverage_report = assess_coverage(
         inventory, spec_view, exclusion_reviewer=_exclusion_reviewer(gateway)
     )

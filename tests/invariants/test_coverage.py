@@ -47,7 +47,9 @@ def _claim(cid: str, prop: str, value: str, entities: list[str], **kw: Any) -> d
     }
 
 
-def _source(claims: list[dict[str, Any]], *, sid: str = "src", lineage: str = "ev") -> dict[str, Any]:
+def _source(
+    claims: list[dict[str, Any]], *, sid: str = "src", lineage: str = "ev"
+) -> dict[str, Any]:
     return {
         "source_id": sid,
         "url": f"https://example.org/{sid}",
@@ -125,7 +127,8 @@ def named_committee(
     n = len(represented)
     threshold = n if rule_kind == "unanimous" else n // 2 + 1
     members = [
-        _member(p, f"r_{p.lower().replace(' ', '_')}", chair=(i == 0)) for i, p in enumerate(represented)
+        _member(p, f"r_{p.lower().replace(' ', '_')}", chair=(i == 0))
+        for i, p in enumerate(represented)
     ]
     required = [
         {
@@ -156,7 +159,9 @@ def named_committee(
             "target_option": "hold",
             "terminal": {
                 "mechanism": "committee_vote",
-                "yes_condition": "unanimous_for_option" if rule_kind == "unanimous" else "majority_for_option",
+                "yes_condition": "unanimous_for_option"
+                if rule_kind == "unanimous"
+                else "majority_for_option",
                 "target_option": "hold",
             },
             "authoritative_sources": ["roster"],
@@ -445,8 +450,20 @@ def test_case8_conflicting_evidence_is_not_silently_resolved() -> None:
     corpus["sources"].append(
         _source(
             [
-                _claim("hawk", "Kim Vale favors a rate hike.", "hike", ["Kim Vale"], claim_key="vale_stance"),
-                _claim("dove", "Kim Vale favors a rate cut.", "cut", ["Kim Vale"], claim_key="vale_stance"),
+                _claim(
+                    "hawk",
+                    "Kim Vale favors a rate hike.",
+                    "hike",
+                    ["Kim Vale"],
+                    claim_key="vale_stance",
+                ),
+                _claim(
+                    "dove",
+                    "Kim Vale favors a rate cut.",
+                    "cut",
+                    ["Kim Vale"],
+                    claim_key="vale_stance",
+                ),
             ],
             sid="conflict",
             lineage="ev_conf",
@@ -547,7 +564,9 @@ def test_repair_loop_recovers_via_targeted_research() -> None:
     incomplete = named_committee(people, represented=people[:2])
     full = named_committee(people, represented=people)
     backend = _RepairBackend(incomplete, full)
-    config = ForecastConfig(gateway=DeterministicGateway(), research_backend=backend, max_branches=4)
+    config = ForecastConfig(
+        gateway=DeterministicGateway(), research_backend=backend, max_branches=4
+    )
     result, ctx = run_forecast("q", _dt(AS_OF), _dt(HORIZON), config)
     # The gate forced a targeted follow-up, and the recompiled world is complete.
     assert backend.augmented_with is not None
@@ -563,7 +582,9 @@ def test_repair_loop_blocks_when_augmentation_cannot_help() -> None:
     people = ["Vera Nolan", "Jon Alder", "Gala Reyes"]
     incomplete = named_committee(people, represented=people[:1])
     backend = _RepairBackend(incomplete, incomplete)  # augment returns the same gap
-    config = ForecastConfig(gateway=DeterministicGateway(), research_backend=backend, max_branches=4)
+    config = ForecastConfig(
+        gateway=DeterministicGateway(), research_backend=backend, max_branches=4
+    )
     with pytest.raises(WorldIntegrityError):
         run_forecast("q", _dt(AS_OF), _dt(HORIZON), config)
 
