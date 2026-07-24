@@ -98,15 +98,64 @@ def _compile_with_repair(
             )
             return bundle, compiled
         except WorldIntegrityError as exc:
+            if attempt == max_attempts - 1:
+                raise
+            # A compilation that contradicts itself — declaring one roster size and
+            # emitting another — is a defect in that compilation, not a fact about the
+            # world. Recompiling is the honest response; accepting it or filling the
+            # gap would not be. Nothing about the evidence or the question changes.
+            if exc.details.get("recompilable"):
+                recompiled = _recompile(question, as_of, horizon, bundle, config)
+                if recompiled is None:
+                    raise
+                bundle = recompiled
+                continue
             missing = exc.details.get("missing_material_candidates")
             augment = getattr(backend, "augment_for_coverage", None)
-            if not isinstance(missing, list) or augment is None or attempt == max_attempts - 1:
+            if not isinstance(missing, list) or augment is None:
                 raise
             augmented = augment(question, as_of, horizon, [str(m) for m in missing], bundle)
             if augmented is None:
                 raise
             bundle = augmented
     raise AssertionError("unreachable")  # pragma: no cover
+
+
+def _recompile(
+    question: str,
+    as_of: datetime,
+    horizon: datetime,
+    bundle: ResearchBundle,
+    config: ForecastConfig,
+) -> ResearchBundle | None:
+    """Compile the world again from the same verified evidence.
+
+    Used only when a compilation is internally inconsistent. The evidence store is
+    unchanged, so this is a second reading of the same facts — not a second search for
+    facts that fit.
+    """
+
+    if not getattr(config.gateway, "is_live", False):
+        return None
+    try:
+        data, _ = compile_world_spec_live(
+            config.gateway,
+            question,
+            as_of,
+            horizon,
+            bundle.evidence_store.view(as_of),
+            extra_instruction=(
+                "A previous compilation of this question was internally inconsistent: "
+                "the participant count it declared did not match the actors it emitted. "
+                "State expected_participants as exactly the number of entries in "
+                "`actors`, and include every decision-relevant participant the evidence "
+                "names."
+            ),
+            structure_id="primary",
+        )
+    except (GatewayError, WorldIntegrityError, ValueError, KeyError):
+        return None
+    return assemble_bundle(bundle.evidence_store, data)
 
 
 def _limitations(config: ForecastConfig, run_result: RunResult) -> tuple[str, ...]:

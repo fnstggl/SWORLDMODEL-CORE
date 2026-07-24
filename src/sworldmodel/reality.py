@@ -77,6 +77,9 @@ def verify_reality(
     #    itself; this catches that, and nothing more — it is not evidence.
     declared = contract.expected_participants
     if declared is not None and represented != declared:
+        # This is the compiler contradicting itself, not evidence contradicting the
+        # compiler. It is a defect in one compilation, and the caller may recompile;
+        # the detail says so, so a bounded retry can act on it.
         raise WorldIntegrityError(
             "participant roster does not match the count the compiled world declares "
             "for itself — simulation refused",
@@ -84,6 +87,7 @@ def verify_reality(
                 "declared by the compiled world": declared,
                 "verified and represented participants": represented,
                 "difference": (declared - represented),
+                "recompilable": True,
             },
         )
 

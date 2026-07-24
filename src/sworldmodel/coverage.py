@@ -141,6 +141,9 @@ class EvidenceCandidate:
     materiality: Materiality = Materiality.UNKNOWN
     is_inference: bool = False
     inferred_from: tuple[str, ...] = ()
+    # The evidence speaks about this name in role or authority terms, rather than
+    # merely mentioning it near the subject. Only this supports demanding a seat.
+    role_attested: bool = False
 
     @property
     def is_material(self) -> bool:
@@ -533,6 +536,7 @@ class _EntityGroup:
     claims: dict[str, EvidenceClaim] = field(default_factory=dict)
     lineage: set[str] = field(default_factory=set)
     role: bool = False
+    role_attested: bool = False
 
 
 def _entity_candidates(
@@ -561,7 +565,13 @@ def _entity_candidates(
             group.lineage.add(c.lineage_event_id)
             # A person is a decision-maker (material) when spoken about with a role or
             # vote verb, or when they co-occur in a claim naming the decision body.
-            if _has_words(prop, _ROLE_WORDS) or ctx.mentions_focal(prop):
+            if _has_words(prop, _ROLE_WORDS):
+                group.role = True
+                # Attested in role or authority terms — a much stronger signal than
+                # merely appearing beside the subject, and the only one strong enough
+                # to demand a seat at the table.
+                group.role_attested = True
+            elif ctx.mentions_focal(prop):
                 group.role = True
 
     out: list[EvidenceCandidate] = []
@@ -578,6 +588,7 @@ def _entity_candidates(
                 claim_ids=claim_ids,
                 lineage_ids=tuple(sorted(group.lineage)),
                 materiality=materiality,
+                role_attested=group.role_attested,
             )
         )
     return out
@@ -854,10 +865,71 @@ def evidence_named_participants(
             {
                 c.canonical_identity
                 for c in inventory
-                if c.kind is CandidateKind.PERSON and c.is_material
+                if c.kind is CandidateKind.PERSON
+                and c.is_material
+                and _speaks_of_a_role(c)
+                and not _is_calendar_shaped(c.canonical_identity)
             }
         )
     )
+
+
+def _speaks_of_a_role(candidate: EvidenceCandidate) -> bool:
+    """Whether the evidence describes this name in role or authority terms.
+
+    Materiality is a low bar on purpose — a name mentioned alongside the subject is
+    worth showing the compiler. Demanding a *seat* for that name is a far stronger
+    claim, and mere co-occurrence does not support it: a claim about a production
+    decision that also mentions a country and a quarter does not make either one a
+    decision-maker.
+    """
+
+    return candidate.role_attested
+
+
+# Calendar vocabulary. A capitalized two-token name can be a date ("July 2026", "Q1
+# 2026"), and reading one as a person makes the reality gate demand a seat for a month.
+# This is a property of how dates are written, not knowledge about any domain.
+_MONTHS = frozenset(
+    [
+        "january",
+        "february",
+        "march",
+        "april",
+        "may",
+        "june",
+        "july",
+        "august",
+        "september",
+        "october",
+        "november",
+        "december",
+        "jan",
+        "feb",
+        "mar",
+        "apr",
+        "jun",
+        "jul",
+        "aug",
+        "sep",
+        "sept",
+        "oct",
+        "nov",
+        "dec",
+    ]
+)
+_QUARTER = re.compile(r"^(q[1-4]|h[12]|fy)$", re.IGNORECASE)
+
+
+def _is_calendar_shaped(identity: str) -> bool:
+    tokens = identity.split()
+    if not tokens:
+        return True
+    for token in tokens:
+        bare = token.strip(",.").lower()
+        if bare in _MONTHS or _QUARTER.match(bare) or bare.isdigit():
+            return True
+    return False
 
 
 def participants_absent_from(
