@@ -18,7 +18,7 @@ from .errors import GatewayError
 from .gateway import ModelGateway
 from .ids import content_id
 from .intents import Environment
-from .mechanisms import evaluate_terminal
+from .mechanisms import evaluate_action_terminal, evaluate_terminal
 from .models import (
     BranchOutcome,
     BranchWeight,
@@ -180,28 +180,13 @@ def _run_protocol(
             world = world.with_stage("decision")
             for aid in step.get("members", ()):
                 world = _actor_act(world, aid, env, actor_runtime, seed, decisions, ledger)
-        elif kind == StepKind.TALLY:
-            evaluation = evaluate_terminal(
-                world.votes_dict(),
-                world.vote_powers(),
-                contract.expected_voting_seats or len(world.voting_actor_ids()),
-                contract.decision_rule,
-                contract.terminal_predicate,
-            )
-            world = world.set_terminal(evaluation)
-            ev = env.environment_event(
-                world,
-                kind=EventKind.TALLY_COMPUTED,
-                payload={
-                    "tally": dict(evaluation.tally),
-                    "carried": evaluation.carried or "none",
-                    "outcome": evaluation.outcome or "unresolved",
-                    "reason": evaluation.reason,
-                },
-                time=world.time,
-            )
-            world = world.apply([ev])
-            ledger.append(_last(world))
+        elif kind == StepKind.ACTOR_TURN:
+            world = world.with_stage(str(step.get("stage", "act")))
+            aid = step.get("actor")
+            if aid in world.actors:
+                world = _actor_act(world, str(aid), env, actor_runtime, seed, decisions, ledger)
+        elif kind in (StepKind.TALLY, StepKind.EVALUATE):
+            world = _evaluate_and_record(world, env, ledger)
         elif kind == StepKind.PUBLISH:
             outcome = world.terminal_state.outcome if world.terminal_state else "unresolved"
             ev = env.environment_event(
@@ -212,6 +197,38 @@ def _run_protocol(
             )
             world = world.apply([ev])
             ledger.append(_last(world))
+    return world
+
+
+def _evaluate_and_record(world: WorldState, env: Environment, ledger: list[Event]) -> WorldState:
+    """Dispatch the terminal predicate: committee tally or actor-action, by mechanism."""
+
+    contract = world.contract
+    spec = contract.terminal_predicate
+    if spec.mechanism == "actor_action":
+        evaluation = evaluate_action_terminal(world.event_history, spec)
+    else:
+        evaluation = evaluate_terminal(
+            world.votes_dict(),
+            world.vote_powers(),
+            contract.expected_voting_seats or len(world.voting_actor_ids()),
+            contract.decision_rule,
+            spec,
+        )
+    world = world.set_terminal(evaluation)
+    ev = env.environment_event(
+        world,
+        kind=EventKind.TALLY_COMPUTED,
+        payload={
+            "tally": dict(evaluation.tally),
+            "carried": evaluation.carried or "none",
+            "outcome": evaluation.outcome or "unresolved",
+            "reason": evaluation.reason,
+        },
+        time=world.time,
+    )
+    world = world.apply([ev])
+    ledger.append(_last(world))
     return world
 
 

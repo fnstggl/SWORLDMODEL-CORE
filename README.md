@@ -7,6 +7,23 @@ completion is secondary; reality fidelity is primary.
 The governing question is not *"how do we make every generated world run to
 completion?"* It is *"is this actually the right world?"*
 
+## The product: question only, live
+
+```bash
+export DEEPSEEK_API_KEY=...        # provider credentials (never committed)
+sworldmodel forecast \
+  --question "Will [social/institutional event] happen by [date]?" \
+  --as-of  "2026-05-14T23:59:59-04:00" \
+  --horizon "2026-06-25T23:59:59-04:00"
+```
+
+No corpus, roster, decision rule, protocol, thresholds, uncertainties, weights,
+memory seeds, or source URLs are supplied. The system runs **live research** (real web
+retrieval + verification), a **live DeepSeek** world compiler and actors, simulates,
+and aggregates. See `docs/LIVE_PRODUCT.md`. The deterministic reasoner and prepared
+corpora are confined to tests and the historical-evaluation fixture; the live command
+refuses to run "live" without a live gateway + live research.
+
 ## The one canonical path
 
 ```

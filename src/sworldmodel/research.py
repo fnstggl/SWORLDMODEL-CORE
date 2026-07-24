@@ -79,6 +79,7 @@ class ResearchBundle:
     as_of: datetime | None = None  # cutoff declared by the corpus, if any
     reference_class: dict[str, str] | None = None  # labeled diagnostic only
     outcome: dict[str, Any] | None = None  # post-cutoff; never used by the forecast
+    live_trace: dict[str, Any] | None = None  # live-research audit (queries, sources, ...)
 
 
 class ResearchBackend(Protocol):
@@ -147,6 +148,15 @@ def build_bundle_from_dict(data: dict[str, Any]) -> ResearchBundle:
             )
 
     _apply_contradictions(store, data.get("contradictions", []), claim_keys)
+    return assemble_bundle(store, data)
+
+
+def assemble_bundle(store: EvidenceStore, data: dict[str, Any]) -> ResearchBundle:
+    """Assemble a :class:`ResearchBundle` from a prebuilt store + reality/frame dict.
+
+    Used by the live path: the evidence store is already materialized from fetched
+    sources, and ``data`` carries only the LLM-compiled reality/frame (no ``sources``).
+    """
 
     frame = _build_frame(data["frame"])
     reality = data["reality"]
@@ -162,8 +172,10 @@ def build_bundle_from_dict(data: dict[str, Any]) -> ResearchBundle:
     terminal_spec = TerminalSpec(
         mechanism=terminal["mechanism"],
         yes_condition=terminal["yes_condition"],
-        target_option=terminal["target_option"],
+        target_option=terminal.get("target_option", ""),
         k=terminal.get("k"),
+        target_actor=terminal.get("target_actor"),
+        target_action=terminal.get("target_action"),
         evidence_claim_ids=tuple(terminal.get("evidence_claim_ids", [])),
     )
     world_facts = tuple(

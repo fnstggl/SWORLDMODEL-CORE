@@ -31,7 +31,7 @@ from .models import (
     WeightProvenance,
 )
 from .prompts import render_compile_prompt
-from .protocols import ProtocolGraph, committee_protocol
+from .protocols import ProtocolGraph, committee_protocol, general_protocol
 from .reality import verify_reality
 from .research import ResearchBundle
 from .uncertainty import ScenarioSet, enumerate_scenarios
@@ -65,12 +65,19 @@ def _rule_to_dict(r: ReactionRule) -> dict[str, object]:
     }
 
 
+def _as_float(value: object, default: float) -> float:
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+
+
 def _rule_from_dict(d: dict[str, object]) -> ReactionRule:
     return ReactionRule(
-        trigger_signal=str(d["trigger_signal"]),
-        direction=str(d["direction"]),
-        threshold=float(d["threshold"]),  # type: ignore[arg-type]
-        moves_to_option=str(d["moves_to_option"]),
+        trigger_signal=str(d.get("trigger_signal", "")),
+        direction=str(d.get("direction", "above")),
+        threshold=_as_float(d.get("threshold"), 0.5),
+        moves_to_option=str(d.get("moves_to_option", "")),
         rationale=str(d.get("rationale", "")),
         evidence_claim_ids=tuple(d.get("evidence_claim_ids", [])),  # type: ignore[arg-type]
     )
@@ -162,9 +169,15 @@ def compile_world(
                 "reasoning": "fallback: compiler omitted this member",
             }
         cb = ConditionalBehavior(
-            current_inclination=str(gen["current_inclination"]),
-            reaction_rules=tuple(_rule_from_dict(d) for d in gen.get("reaction_rules", [])),
-            dissent_threshold=float(gen.get("dissent_threshold", 0.5)),
+            current_inclination=str(
+                gen.get("current_inclination")
+                or frame.guidance_option
+                or (m.prior_action or frame.options[0])
+            ),
+            # Reaction structure is authoritative from the evidence-grounded frame, not
+            # re-parsed from per-actor LLM output (which varies in shape).
+            reaction_rules=frame.reaction_rules,
+            dissent_threshold=_as_float(gen.get("dissent_threshold"), 0.5),
             reasoning=str(gen.get("reasoning", "")),
             acceptance_tolerance=frame.acceptance_tolerance,
             evidence_claim_ids=tuple(gen.get("evidence_claim_ids", m.evidence_claim_ids)),
@@ -220,16 +233,22 @@ def compile_world(
         frame.guidance_option or contract.terminal_predicate.target_option or frame.options[0]
     )
     proposal_text = frame.guidance_text or f"Maintain the current stance ({proposal_option})."
-    briefing_text = f"Staff briefing for the {bundle.decision_body} decision."
+    briefing_text = f"Context briefing for the {bundle.decision_body} decision."
     voting_ids = tuple(m.actor_id for m in bundle.members if m.is_voting_seat)
-    protocol = committee_protocol(
-        chair_actor_id=chair,
-        proposal_option=proposal_option,
-        proposal_text=proposal_text,
-        briefing_text=briefing_text,
-        voting_actor_ids=voting_ids,
-        allow_revision=True,
-    )
+    if contract.terminal_predicate.mechanism == "actor_action":
+        # A non-committee question: the outcome is an actor taking (or not taking) an
+        # action. Actors act in sequence; the terminal is read from the event history.
+        turn_order = tuple(m.actor_id for m in bundle.members)
+        protocol = general_protocol(turn_order=turn_order, briefing_text=briefing_text)
+    else:
+        protocol = committee_protocol(
+            chair_actor_id=chair,
+            proposal_option=proposal_option,
+            proposal_text=proposal_text,
+            briefing_text=briefing_text,
+            voting_actor_ids=voting_ids,
+            allow_revision=True,
+        )
     scenario_set = enumerate_scenarios(frame, max_branches=max_branches)
     uncertainty_variables = _uncertainty_variables(frame)
     causal_graph = _causal_graph(frame, voting_ids)

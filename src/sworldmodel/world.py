@@ -250,6 +250,15 @@ def _feasible_actions(stage: str, is_voting_seat: bool) -> tuple[str, ...]:
         return ("cast_vote",) if is_voting_seat else ("wait",)
     if stage == "positions":
         return ("make_statement", "wait")
+    if stage == "act":
+        return (
+            "make_statement",
+            "send_message",
+            "make_commitment",
+            "operational_action",
+            "request_information",
+            "wait",
+        )
     return ("wait", "request_information")
 
 

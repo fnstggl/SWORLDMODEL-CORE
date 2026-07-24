@@ -186,10 +186,12 @@ class TerminalSpec:
     ``target_option`` parameterize it generically (e.g. unanimous-for-"hold").
     """
 
-    mechanism: str  # e.g. "committee_vote"
-    yes_condition: str  # "unanimous_for_option" | "at_least_k_for_option" | "majority_for_option"
+    mechanism: str  # "committee_vote" | "actor_action"
+    yes_condition: str  # "unanimous_for_option" | "at_least_k_for_option" | "majority_for_option" | "action_taken"
     target_option: str  # the option that constitutes YES (e.g. "hold")
     k: int | None = None  # threshold for at_least_k_for_option
+    target_actor: str | None = None  # for actor_action: whose action resolves it
+    target_action: str | None = None  # for actor_action: which action constitutes YES
     evidence_claim_ids: tuple[str, ...] = ()
 
 

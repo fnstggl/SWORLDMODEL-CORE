@@ -23,6 +23,7 @@ facts, change the contract, or write terminal outcomes — those are code.
 from __future__ import annotations
 
 import abc
+import threading
 from dataclasses import dataclass
 from typing import Any
 
@@ -54,15 +55,30 @@ class GatewayResponse:
     tokens_out: int
     retries: int = 0
     validation_failures: tuple[str, ...] = ()
+    latency_ms: int = 0
 
 
 class ModelGateway(abc.ABC):
-    """Base gateway with call/token accounting shared by all implementations."""
+    """Base gateway with thread-safe call/token/latency accounting.
+
+    ``is_live`` distinguishes real provider gateways (that make network calls) from
+    the deterministic/scripted gateways used only in tests. The production CLI
+    refuses to label a run "live" unless the gateway is live.
+    """
+
+    is_live: bool = False
 
     def __init__(self) -> None:
         self.call_count: int = 0
         self.total_tokens: int = 0
+        self.total_tokens_in: int = 0
+        self.total_tokens_out: int = 0
+        self.retries: int = 0
+        self.failed_calls: int = 0
         self.calls: list[GatewayResponse] = []
+        self.stage_calls: dict[str, int] = {}
+        self.latencies_ms: list[int] = []
+        self._lock = threading.Lock()
 
     @property
     @abc.abstractmethod
@@ -73,10 +89,24 @@ class ModelGateway(abc.ABC):
 
     def generate(self, request: GatewayRequest) -> GatewayResponse:
         response = self._generate(request)
-        self.call_count += 1
-        self.total_tokens += response.tokens_in + response.tokens_out
-        self.calls.append(response)
+        with self._lock:
+            self.call_count += 1
+            self.total_tokens += response.tokens_in + response.tokens_out
+            self.total_tokens_in += response.tokens_in
+            self.total_tokens_out += response.tokens_out
+            self.retries += response.retries
+            self.calls.append(response)
+            self.stage_calls[response.task_kind] = self.stage_calls.get(response.task_kind, 0) + 1
+            if response.latency_ms:
+                self.latencies_ms.append(response.latency_ms)
         return response
+
+    def note_failure(self) -> None:
+        with self._lock:
+            self.failed_calls += 1
+
+    def stage_call_counts(self) -> dict[str, int]:
+        return dict(self.stage_calls)
 
 
 def _estimate_tokens(text: str) -> int:
@@ -250,6 +280,31 @@ class DeterministicGateway(ModelGateway):
                 "pending_need": "await_proposal_and_positions",
                 "referenced_memory_ids": [],
                 "referenced_observation_ids": [],
+            }
+
+        # ---- stage: act (non-committee) -> take the resolving action or wait ------
+        if stage == "act":
+            # options[0] is the "no action" baseline; any other preferred option is a
+            # substantive action (respond / commit). This maps a response/negotiation
+            # question onto the same evidence-grounded reaction machinery.
+            if preferred != options[0]:
+                return {
+                    "kind": IntentKind.MAKE_COMMITMENT,
+                    "vote_option": "",
+                    "text": _statement_text(ctx["actor_id"], preferred, triggered, committed),
+                    "rationale": f"I take the action: {preferred}.",
+                    "expected_effect": f"Perform action {preferred!r}.",
+                    "referenced_memory_ids": list(used_memory_ids),
+                    "referenced_observation_ids": sorted(set(reacted_obs)),
+                }
+            return {
+                "kind": IntentKind.WAIT,
+                "vote_option": "",
+                "rationale": "No trigger to act; I take no action for now.",
+                "expected_effect": "No action taken.",
+                "pending_need": "await_trigger",
+                "referenced_memory_ids": [],
+                "referenced_observation_ids": sorted(set(reacted_obs)),
             }
 
         # ---- stage: positions -> the actor states a substantive position ---------

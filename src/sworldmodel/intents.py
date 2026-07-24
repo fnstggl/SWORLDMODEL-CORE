@@ -154,7 +154,45 @@ class Environment:
                     world,
                     kind=EventKind.COMMITMENT_MADE,
                     actor_id=intent.actor_id,
-                    payload={"text": intent.rationale},
+                    payload={"text": data.get("text", intent.rationale)},
+                    visibility=Visibility.PUBLIC,
+                    time=t,
+                )
+            ]
+
+        if intent.kind == IntentKind.SEND_MESSAGE:
+            targets = tuple(str(x) for x in data.get("targets", ()) if str(x) in world.actors)
+            text = str(data.get("text", ""))
+            sent = self._event(
+                world,
+                kind=EventKind.MESSAGE_SENT,
+                actor_id=intent.actor_id,
+                payload={"text": text, "targets": list(targets)},
+                visibility=Visibility.PRIVATE,
+                audience=targets,
+                time=t,
+            )
+            delivered = self._event(
+                world,
+                kind=EventKind.MESSAGE_DELIVERED,
+                actor_id=intent.actor_id,
+                payload={"text": text},
+                visibility=Visibility.PRIVATE,
+                audience=targets,
+                time=t,
+            )
+            return [sent, delivered]
+
+        if intent.kind == IntentKind.OPERATIONAL_ACTION:
+            return [
+                self._event(
+                    world,
+                    kind=EventKind.OPERATIONAL_ACTION,
+                    actor_id=intent.actor_id,
+                    payload={
+                        "action": data.get("action", ""),
+                        "text": data.get("text", intent.rationale),
+                    },
                     visibility=Visibility.PUBLIC,
                     time=t,
                 )

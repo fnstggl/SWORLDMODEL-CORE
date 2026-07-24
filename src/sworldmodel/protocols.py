@@ -27,6 +27,9 @@ class StepKind:
     CAST_VOTES = "cast_votes"
     TALLY = "tally"
     PUBLISH = "publish"
+    # Generic (non-committee) primitives.
+    ACTOR_TURN = "actor_turn"  # one actor perceives, decides, and acts
+    EVALUATE = "evaluate"  # dispatch the terminal predicate (committee or actor_action)
 
 
 @dataclass(frozen=True)
@@ -87,4 +90,24 @@ def committee_protocol(
             _step(StepKind.PUBLISH),
         ]
     )
+    return ProtocolGraph(steps=tuple(steps))
+
+
+def general_protocol(
+    *, turn_order: tuple[str, ...], briefing_text: str, rounds: int = 1
+) -> ProtocolGraph:
+    """A generic sequential-action procedure for non-committee questions.
+
+    The context is delivered, then each actor (in the given order, over ``rounds``)
+    perceives and acts; the terminal predicate is evaluated from the resulting event
+    history. Covers individual-response, negotiation, and organizational-action
+    questions through the one runtime.
+    """
+
+    steps: list[ProtocolStep] = [_step(StepKind.DISTRIBUTE_BRIEFING, text=briefing_text)]
+    for _ in range(max(1, rounds)):
+        for aid in turn_order:
+            steps.append(_step(StepKind.ACTOR_TURN, actor=aid, stage="act"))
+    steps.append(_step(StepKind.EVALUATE))
+    steps.append(_step(StepKind.PUBLISH))
     return ProtocolGraph(steps=tuple(steps))

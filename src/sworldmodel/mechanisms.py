@@ -9,9 +9,10 @@ No LLM ever runs in this module. These functions are pure and total.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 
-from .models import DecisionRule, TerminalSpec
+from .models import DecisionRule, Event, TerminalSpec
 
 
 def tally_votes(votes: dict[str, str], vote_powers: dict[str, int]) -> dict[str, int]:
@@ -49,6 +50,60 @@ class TerminalEvaluation:
     reason: str
     tally: tuple[tuple[str, int], ...]
     carried: str | None
+
+
+# Which event kinds count as a substantive "action" by an actor, keyed by the
+# semantic action label a terminal may ask about.
+_ACTION_EVENT_KINDS: dict[str, frozenset[str]] = {
+    "respond": frozenset(
+        {
+            "message_sent",
+            "message_delivered",
+            "statement_made",
+            "commitment_made",
+            "operational_action",
+        }
+    ),
+    "send_message": frozenset({"message_sent", "message_delivered"}),
+    "reply": frozenset({"message_sent", "message_delivered", "statement_made"}),
+    "commit": frozenset({"commitment_made"}),
+    "agree": frozenset({"commitment_made"}),
+    "sign": frozenset({"commitment_made"}),
+    "act": frozenset({"operational_action", "commitment_made"}),
+    "execute": frozenset({"operational_action"}),
+}
+_ANY_ACTION = frozenset(
+    {"message_sent", "message_delivered", "statement_made", "commitment_made", "operational_action"}
+)
+
+
+def evaluate_action_terminal(events: Iterable[Event], spec: TerminalSpec) -> TerminalEvaluation:
+    """Did the target actor take the target action? Evaluated from the event history.
+
+    This resolves individual-response, negotiation, and organizational-action
+    questions. It reads only applied events; no LLM decides the outcome. The runtime
+    calls this only after the relevant actor turns, so absence of the action means NO
+    (not unresolved); provider failures leave the branch unresolved upstream.
+    """
+
+    kinds = _ACTION_EVENT_KINDS.get(spec.target_action or "respond", _ANY_ACTION)
+    for ev in events:
+        actor_ok = spec.target_actor is None or ev.actor_id == spec.target_actor
+        if actor_ok and ev.kind in kinds:
+            return TerminalEvaluation(
+                resolved=True,
+                outcome="YES",
+                reason=f"{ev.actor_id} took action {ev.kind!r} ({spec.target_action})",
+                tally=(),
+                carried=ev.kind,
+            )
+    return TerminalEvaluation(
+        resolved=True,
+        outcome="NO",
+        reason=f"{spec.target_actor} did not take {spec.target_action!r} by the horizon",
+        tally=(),
+        carried=None,
+    )
 
 
 def evaluate_terminal(
@@ -99,6 +154,10 @@ def evaluate_terminal(
     elif spec.yes_condition == "majority_for_option":
         outcome = "YES" if carried == target else "NO"
         reason = f"body carried {carried!r}"
+    elif spec.yes_condition == "weighted_majority_for_option":
+        # Weight-aware majority (e.g. population strata): >50% of total vote weight.
+        outcome = "YES" if target_power * 2 > total_power else "NO"
+        reason = f"{target_power}/{total_power} weighted mass chose {target!r}"
     else:  # pragma: no cover - guarded by contract construction
         raise ValueError(f"Unknown yes_condition {spec.yes_condition!r}")
 

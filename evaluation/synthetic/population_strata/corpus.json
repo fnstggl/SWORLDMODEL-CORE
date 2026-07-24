@@ -1,0 +1,48 @@
+{
+  "question_key": "synthetic_population_strata",
+  "reality": {
+    "as_of": "2027-09-01T00:00:00+00:00",
+    "horizon": "2027-11-03T23:59:59+00:00",
+    "decision_body": "Municipal electorate (weighted strata)",
+    "subject_entity": "Ballot Measure Z",
+    "resolution_units": "share of the weighted electorate voting to approve",
+    "institution_id": "electorate",
+    "institution_name": "Municipal electorate",
+    "decision_rule": {"kind": "majority", "total_seats": 3, "threshold": 2, "evidence_claim_ids": ["pop_poll"]},
+    "expected_voting_seats": 3,
+    "target_option": "approve",
+    "terminal": {"mechanism": "committee_vote", "yes_condition": "weighted_majority_for_option", "target_option": "approve", "evidence_claim_ids": ["pop_poll"]},
+    "members": [
+      {"actor_id": "stratum_core_support", "name": "Core supporters (weight 40)", "role": "Voting bloc", "is_voting_seat": true, "vote_power": 40, "prior_action": "approve", "authority": ["vote"], "evidence_claim_ids": ["pop_poll"], "memory_seeds": [{"content": "Our bloc has favored the measure in polling.", "kind": "semantic", "importance": 0.6, "valid_time": "2027-08-01T00:00:00+00:00", "evidence_claim_ids": ["pop_poll"]}]},
+      {"actor_id": "stratum_leaners", "name": "Soft supporters (weight 35)", "role": "Voting bloc", "is_voting_seat": true, "vote_power": 35, "prior_action": "approve", "authority": ["vote"], "evidence_claim_ids": ["pop_poll"], "memory_seeds": [{"content": "Our bloc leans yes but is persuadable.", "kind": "semantic", "importance": 0.6, "valid_time": "2027-08-01T00:00:00+00:00", "evidence_claim_ids": ["pop_poll"]}]},
+      {"actor_id": "stratum_opposed", "name": "Opposed bloc (weight 25)", "role": "Voting bloc", "is_voting_seat": true, "vote_power": 25, "prior_action": "reject", "authority": ["vote"], "evidence_claim_ids": ["pop_poll"], "memory_seeds": [{"content": "Our bloc opposes the measure.", "kind": "semantic", "importance": 0.6, "valid_time": "2027-08-01T00:00:00+00:00", "evidence_claim_ids": ["pop_poll"]}]}
+    ]
+  },
+  "frame": {
+    "options": ["reject", "approve"],
+    "signals": [{"name": "backlash", "baseline": 0.0, "description": "severity of a late opposition campaign", "evidence_claim_ids": ["pop_poll"]}],
+    "reaction_rules": [{"trigger_signal": "backlash", "direction": "above", "threshold": 0.5, "moves_to_option": "reject", "rationale": "a strong late opposition campaign flips soft supporters", "evidence_claim_ids": ["pop_poll"]}],
+    "guidance_option": null,
+    "guidance_text": "Polling shows a lead for approval, with a persuadable middle.",
+    "guidance_evidence_ids": ["pop_poll"],
+    "acceptance_tolerance": 0.0,
+    "uncertainty": [
+      {"signal": "backlash", "why_unknown": "whether a late opposition campaign materializes is unknown", "reversal_capable": true, "constraining_evidence_ids": ["pop_poll"], "outcomes": [
+        {"value": "quiet", "weight": 0.7, "provenance": "market_or_survey_distribution", "source_detail": "polling holds", "signal_effects": [["backlash", 0.0]], "description": "no decisive late campaign"},
+        {"value": "campaign", "weight": 0.3, "provenance": "explicit_model_distribution", "source_detail": "a strong late opposition campaign", "signal_effects": [["backlash", 0.6]], "description": "opposition campaign flips soft supporters"}
+      ]}
+    ]
+  },
+  "world_facts": [
+    {"text": "Pre-election polling shows a lead for approval with a persuadable middle.", "evidence_claim_ids": ["pop_poll"], "available_at": "2027-08-01T00:00:00+00:00", "epistemic_type": "observation"}
+  ],
+  "required_reality_facts": [
+    {"key": "strata", "description": "the weighted voting blocs", "evidence_claim_ids": ["pop_poll"]}
+  ],
+  "sources": [
+    {"source_id": "poll", "url": "https://example.org/poll", "title": "Municipal poll", "source_type": "specialist_analysis", "authority_level": 3, "published_at": "2027-08-01T00:00:00+00:00", "available_at": "2027-08-01T00:00:00+00:00", "lineage_event_id": "poll_2027", "claims": [
+      {"id": "pop_poll", "proposition": "context: polling on Measure Z shows a lead for approval with a persuadable middle", "normalized_value": "approve_lead", "entities": ["Ballot Measure Z"], "epistemic_type": "observation", "confidence": 0.8}
+    ]}
+  ],
+  "outcome": null
+}

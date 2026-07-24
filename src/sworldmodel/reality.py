@@ -55,41 +55,59 @@ def verify_reality(
     voting = [a for a in actors.values() if a.definition.is_voting_seat]
     represented = len(voting)
     expected = contract.expected_voting_seats
+    is_committee = contract.terminal_predicate.mechanism == "committee_vote"
 
     details_base: dict[str, object] = {
         "expected voting seats": expected,
         "verified and represented seats": represented,
     }
 
-    # 1. Seat count must match the verified roster exactly.
-    if expected is not None and represented != expected:
-        missing = expected - represented
+    # The seat/threshold/power checks (1-4) apply only to committee-vote worlds. A
+    # single-actor response or an action question has no roster to compress; its
+    # actors are still verified (checks 5-7 below).
+    if is_committee:
+        if not actors:
+            raise WorldIntegrityError(
+                "no actors were verified from evidence — simulation refused",
+                details=details_base,
+            )
+        # 0. A committee must have at least one verified voting seat.
+        if represented == 0:
+            raise WorldIntegrityError(
+                "no voting seats were verified from evidence — simulation refused",
+                details=details_base,
+            )
+        # 1. Seat count must match the verified roster exactly.
+        if expected is not None and represented != expected:
+            missing = expected - represented
+            raise WorldIntegrityError(
+                "roster does not match verified reality — simulation refused",
+                details={**details_base, "missing seats": missing},
+            )
+        # 2. The decision rule's total_seats must match the roster.
+        if rule.total_seats != represented:
+            raise WorldIntegrityError(
+                "decision rule total_seats disagrees with represented roster — refused",
+                details={"rule.total_seats": rule.total_seats, "represented seats": represented},
+            )
+        # 3. The threshold must be consistent with the verified rule (no rescaling).
+        if not _threshold_consistent(rule):
+            raise WorldIntegrityError(
+                "threshold is inconsistent with the verified decision rule — refused",
+                details={
+                    "rule.kind": rule.kind,
+                    "rule.threshold": rule.threshold,
+                    "rule.total_seats": rule.total_seats,
+                    "expected_majority": expected_majority_threshold(rule.total_seats),
+                },
+            )
+    elif not actors:
         raise WorldIntegrityError(
-            "roster does not match verified reality — simulation refused",
-            details={**details_base, "missing seats": missing},
-        )
-
-    # 2. The decision rule's total_seats must match the roster.
-    if rule.total_seats != represented:
-        raise WorldIntegrityError(
-            "decision rule total_seats disagrees with represented roster — refused",
-            details={"rule.total_seats": rule.total_seats, "represented seats": represented},
-        )
-
-    # 3. The threshold must be consistent with the verified rule (no rescaling).
-    if not _threshold_consistent(rule):
-        raise WorldIntegrityError(
-            "threshold is inconsistent with the verified decision rule — refused",
-            details={
-                "rule.kind": rule.kind,
-                "rule.threshold": rule.threshold,
-                "rule.total_seats": rule.total_seats,
-                "expected_majority": expected_majority_threshold(rule.total_seats),
-            },
+            "no actors were verified from evidence — simulation refused", details=details_base
         )
 
     # 4. Seat vote powers must match the institution's verified powers.
-    if institution is not None:
+    if is_committee and institution is not None:
         declared = dict(institution.seat_vote_powers)
         for a in voting:
             expected_power = declared.get(a.actor_id)

@@ -67,6 +67,20 @@ api.forecast / api.run_forecast
 | `tracing.py` | replayable ledger, manifests, under-the-hood report |
 | `api.py` | the single `forecast()` entry point |
 | `cli.py` | the *evaluation harness* (Banxico/synthetic constants live here, not in core) |
+| `deepseek_gateway.py` | live DeepSeek `ModelGateway` (real HTTP, retries, real tokens) |
+| `http.py` | HTTP transport (real `UrllibTransport` + `FakeTransport` for tests) |
+| `search.py`, `rss.py` | discovery: DuckDuckGo real URLs; Google News RSS signal |
+| `source_fetch.py`, `source_extract.py` | fetch + verify pages; LLM claim extraction |
+| `research_planner.py` | LLM research plan (backward from the outcome) |
+| `live_research.py` | `LiveResearchBackend`: iterative research → `ResearchBundle` |
+| `universal_compiler.py` | LLM reality + uncertainty compilation from live evidence |
+
+The **live** path (`live_research` + `deepseek_gateway`) and the **corpus** path
+(`CorpusResearchBackend` + `DeterministicGateway`, tests only) are two front-ends that
+feed the *same* `compile_world` → `runtime.run` → `outcomes.aggregate`. The terminal is
+dispatched by mechanism (`committee_vote` incl. weighted strata, or `actor_action`), so
+one runtime handles committees, populations, and single-actor/negotiation questions.
+See `docs/LIVE_PRODUCT.md`.
 
 ## Import direction (acyclic)
 

@@ -258,6 +258,14 @@ class ActorRuntime:
             payload["statement_text"] = str(data.get("statement_text", ""))
             payload["favored_option"] = str(data.get("favored_option", ""))
             payload["info_signals"] = _as_dict(data.get("info_signals"))
+        if kind == IntentKind.SEND_MESSAGE:
+            payload["text"] = str(data.get("text", data.get("message", "")))
+            payload["targets"] = _as_str_tuple(data.get("targets"))
+        if kind == IntentKind.OPERATIONAL_ACTION:
+            payload["action"] = str(data.get("action", ""))
+            payload["text"] = str(data.get("text", ""))
+        if kind == IntentKind.MAKE_COMMITMENT:
+            payload["text"] = str(data.get("text", data.get("statement_text", "")))
         return Intent(
             actor_id=actor_id,
             kind=kind,

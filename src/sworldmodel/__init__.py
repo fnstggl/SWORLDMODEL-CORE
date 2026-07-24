@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from .api import forecast, run_forecast
 from .config import ForecastConfig
+from .deepseek_gateway import DeepSeekGateway
 from .errors import (
     ContractMutationError,
     CutoffViolationError,
@@ -20,6 +21,8 @@ from .errors import (
     WorldIntegrityError,
 )
 from .gateway import DeterministicGateway, ModelGateway, ScriptedGateway
+from .http import FakeTransport, UrllibTransport
+from .live_research import LiveResearchBackend, ResearchBudget
 from .models import ForecastResult, ForecastStatus, ResolutionContract
 from .research import (
     CorpusResearchBackend,
@@ -38,6 +41,11 @@ __all__ = [
     "DeterministicGateway",
     "ScriptedGateway",
     "ModelGateway",
+    "DeepSeekGateway",
+    "LiveResearchBackend",
+    "ResearchBudget",
+    "UrllibTransport",
+    "FakeTransport",
     "CorpusResearchBackend",
     "MockResearchBackend",
     "ResearchBundle",

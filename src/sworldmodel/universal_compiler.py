@@ -1,0 +1,293 @@
+"""LLM-driven universal world + uncertainty compilation from live evidence.
+
+Given a verified evidence store, the LLM compiles the structured reality (decision
+body, roster, rule, terminal predicate, actors, required facts) and the causal /
+uncertainty frame (options, signals, conditional reaction rules, guidance, genuine
+outcome-sensitive uncertainties with provenance). Deterministic validation then
+normalizes and citation-checks the output before the reality-integrity gate runs.
+
+Nothing here is scenario-specific: it produces a general :class:`ResearchBundle` that
+the existing compiler + runtime consume. The manually authored corpus frame is not
+used on this path.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Any
+
+from .evidence import EvidenceStore, EvidenceView
+from .gateway import GatewayRequest, ModelGateway
+from .ids import prompt_hash
+from .models import WeightProvenance
+from .reality import expected_majority_threshold
+from .research import ResearchBundle, assemble_bundle
+from .research_planner import ResearchPlan
+
+_VALID_PROVENANCE = {p.value for p in WeightProvenance}
+
+
+def _render_evidence(view: EvidenceView, *, limit: int = 140) -> str:
+    claims = sorted(view.available(), key=lambda c: (-int(c.authority_level), c.id))[:limit]
+    return "\n".join(
+        f"{c.id} | {c.proposition} = {c.normalized_value} "
+        f"[auth {int(c.authority_level)}, {c.source_type.value}, {c.published_at.date()}]"
+        for c in claims
+    )
+
+
+def compile_reality(
+    gateway: ModelGateway, question: str, as_of: datetime, horizon: datetime, view: EvidenceView
+) -> dict[str, Any]:
+    evidence = _render_evidence(view)
+    prompt = f"""Compile the VERIFIED reality for this forecasting question from the
+evidence below. Cite ONLY claim ids that appear in the evidence list. Do not invent
+members, offices, rules, or citations.
+
+QUESTION: {question}
+as_of: {as_of.isoformat()}   horizon: {horizon.isoformat()}
+
+EVIDENCE (id | proposition = value [meta]):
+{evidence}
+
+Return JSON with keys:
+- decision_body, subject_entity, resolution_units (strings)
+- institution_id (slug), institution_name
+- decision_rule: {{"kind":"majority"|"unanimous"|"supermajority"|"plurality","total_seats":<int>,"evidence_claim_ids":[...]}}
+- expected_voting_seats: the TRUE size of the deciding body per the evidence (an int);
+  report the real size even if you cannot name every seat.
+- target_option: the option that constitutes YES.
+- terminal: {{"mechanism":"committee_vote","yes_condition":"unanimous_for_option"|"at_least_k_for_option"|"majority_for_option","target_option":"...","k":<int or null>,"evidence_claim_ids":[...]}}
+- members: [ {{"actor_id":"snake_case","name":"...","role":"...","is_voting_seat":true,"vote_power":1,"prior_action":"<their most recent relevant choice or null>","authority":["vote"...],"evidence_claim_ids":[...],"memory_seeds":[{{"content":"evidence-grounded prior fact in first person","kind":"episodic","importance":0.8,"evidence_claim_ids":[...]}}]}} ]
+- world_facts: [ {{"text":"...","evidence_claim_ids":[...],"epistemic_type":"observation"}} ]
+- required_reality_facts: [ {{"key":"roster"|"decision_rule"|"prior_votes"|"current_state"|"guidance"|"terminal_date","description":"...","evidence_claim_ids":[...]}} ]
+
+Give the chair/leader authority ["vote","introduce_proposal","chair"]."""
+    resp = gateway.generate(
+        GatewayRequest(
+            task_kind="compile_reality",
+            prompt=prompt,
+            context={"question": question},
+            seed=int(prompt_hash("reality" + question)[:8], 16),
+            expected_keys=("members", "decision_rule", "terminal", "expected_voting_seats"),
+        )
+    )
+    return _normalize_reality(resp.data, view, as_of, horizon)
+
+
+def compile_roster(
+    gateway: ModelGateway, question: str, view: EvidenceView, reality: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """A focused call that enumerates every decision-maker named in the evidence.
+
+    Kept separate from the structural compile because a single mega-prompt tends to
+    under-enumerate the roster; a dedicated prompt reliably lists all named actors.
+    """
+
+    evidence = _render_evidence(view)
+    prompt = f"""From the evidence below, ENUMERATE EVERY individual decision-maker
+(board/committee member, voting seat, or the focal actor) NAMED in the evidence and
+relevant to the question. List ALL of them — do not summarize or omit any. Cite only
+claim ids that appear in the evidence.
+
+QUESTION: {question}
+DECISION BODY: {reality.get("decision_body")}
+The body has approximately {reality.get("expected_voting_seats")} decision-makers.
+
+EVIDENCE (id | proposition = value):
+{evidence}
+
+Return JSON {{"members": [ {{"actor_id":"snake_case","name":"Full Name","role":"...",
+"is_voting_seat":true,"vote_power":1,"prior_action":"<most recent relevant choice or
+null>","authority":["vote"],"evidence_claim_ids":[...],"memory_seeds":[{{"content":
+"evidence-grounded prior fact in the first person","kind":"episodic","importance":0.8,
+"evidence_claim_ids":[...]}}]}} ]}}. Give the chair/leader/governor authority
+["vote","introduce_proposal","chair"]. If the evidence names no individuals, return
+{{"members": []}}."""
+    resp = gateway.generate(
+        GatewayRequest(
+            task_kind="compile_roster",
+            prompt=prompt,
+            context={"question": question},
+            seed=int(prompt_hash("roster" + question)[:8], 16),
+            expected_keys=("members",),
+        )
+    )
+    members = resp.data.get("members") or []
+    available = _available_ids(view)
+    for m in members:
+        m["evidence_claim_ids"] = _filter_ids(m.get("evidence_claim_ids"), available)
+        m.setdefault("is_voting_seat", True)
+        m.setdefault("vote_power", 1)
+        m.setdefault("authority", ["vote"])
+        for s in m.get("memory_seeds", []):
+            s["evidence_claim_ids"] = _filter_ids(s.get("evidence_claim_ids"), available)
+    return members
+
+
+def compile_frame(
+    gateway: ModelGateway, question: str, view: EvidenceView, reality: dict[str, Any]
+) -> dict[str, Any]:
+    evidence = _render_evidence(view)
+    options = reality.get("_options_hint") or ["cut", "hold", "hike"]
+    prompt = f"""Compile the causal/uncertainty frame for this question. Use only
+conditional structure — never encode the final answer. Weights are evidence-conditioned
+estimates or clearly labeled ignorance; do NOT fabricate precision from one example.
+
+QUESTION: {question}
+DECISION BODY: {reality.get("decision_body")}
+TARGET OPTION (YES): {reality.get("target_option")}
+EVIDENCE (id | proposition = value):
+{evidence}
+
+Return JSON with keys:
+- options: the full set of mutually exclusive choices the deciders pick among.
+- signals: [ {{"name":"snake_case","baseline":0.0,"description":"...","evidence_claim_ids":[...]}} ]
+- reaction_rules: [ {{"trigger_signal":"<a signal name>","direction":"above"|"below","threshold":<float>,"moves_to_option":"<an option>","rationale":"...","evidence_claim_ids":[...]}} ]
+- guidance_option: the newly-established common position (an option) or null.
+- guidance_text: the guidance in words. guidance_evidence_ids: [...]
+- acceptance_tolerance: a float 0..1.
+- uncertainty: [ {{"signal":"<a signal>","why_unknown":"...","reversal_capable":true,"constraining_evidence_ids":[...],"outcomes":[ {{"value":"...","weight":<float>,"provenance":"symmetric_ignorance_assumption"|"explicit_model_distribution"|"calibrated_behavior_model"|"market_or_survey_distribution","source_detail":"...","signal_effects":[["<signal>",<float>]],"description":"..."}} ]}} ]
+
+Only include an uncertainty if changing it could flip an actor's option. The base case
+(no threshold-crossing surprise) should carry most weight over a short horizon."""
+    resp = gateway.generate(
+        GatewayRequest(
+            task_kind="compile_uncertainty",
+            prompt=prompt,
+            context={"question": question, "options": options},
+            seed=int(prompt_hash("frame" + question)[:8], 16),
+            expected_keys=("options", "uncertainty"),
+        )
+    )
+    return _normalize_frame(resp.data, view)
+
+
+def build_live_bundle(
+    gateway: ModelGateway,
+    question: str,
+    as_of: datetime,
+    horizon: datetime,
+    store: EvidenceStore,
+    plan: ResearchPlan,
+) -> ResearchBundle:
+    view = store.view(as_of)
+    reality = compile_reality(gateway, question, as_of, horizon, view)
+    # A dedicated roster call enumerates the named decision-makers reliably; use it
+    # when it names at least as many actors as the structural compile did.
+    roster = compile_roster(gateway, question, view, reality)
+    if len(roster) >= len(reality.get("members") or []):
+        reality["members"] = roster
+    frame = compile_frame(gateway, question, view, reality)
+    reality["_options_hint"] = frame.get("options")
+    data = {
+        "reality": {**reality, "as_of": as_of.isoformat(), "horizon": horizon.isoformat()},
+        "frame": frame,
+        "world_facts": reality.pop("world_facts", []),
+        "required_reality_facts": reality.pop("required_reality_facts", []),
+        "outcome": None,
+    }
+    return assemble_bundle(store, data)
+
+
+# ---------------------------------------------------------------------------
+# Deterministic validation / normalization
+# ---------------------------------------------------------------------------
+
+
+def _available_ids(view: EvidenceView) -> set[str]:
+    return {c.id for c in view.available()}
+
+
+def _filter_ids(ids: object, available: set[str]) -> list[str]:
+    if not isinstance(ids, list):
+        return []
+    return [str(i) for i in ids if str(i) in available]
+
+
+def _normalize_reality(
+    data: dict[str, Any], view: EvidenceView, as_of: datetime, horizon: datetime
+) -> dict[str, Any]:
+    available = _available_ids(view)
+    expected = int(data.get("expected_voting_seats") or 0)
+    members = data.get("members") or []
+    for m in members:
+        m["evidence_claim_ids"] = _filter_ids(m.get("evidence_claim_ids"), available)
+        m.setdefault("is_voting_seat", True)
+        m.setdefault("vote_power", 1)
+        m.setdefault("authority", ["vote"])
+        for s in m.get("memory_seeds", []):
+            s["evidence_claim_ids"] = _filter_ids(s.get("evidence_claim_ids"), available)
+            s.setdefault("valid_time", as_of.isoformat())
+    if expected <= 0:
+        expected = len(members)
+
+    rule = data.get("decision_rule") or {}
+    kind = rule.get("kind") or "majority"
+    total = expected
+    if kind == "unanimous":
+        threshold = total
+    elif kind == "majority":
+        threshold = expected_majority_threshold(total)
+    else:
+        threshold = int(rule.get("threshold") or expected_majority_threshold(total))
+    data["decision_rule"] = {
+        "kind": kind,
+        "total_seats": total,
+        "threshold": threshold,
+        "evidence_claim_ids": _filter_ids(rule.get("evidence_claim_ids"), available),
+    }
+    data["expected_voting_seats"] = expected
+
+    terminal = data.get("terminal") or {}
+    terminal.setdefault("mechanism", "committee_vote")
+    terminal.setdefault("yes_condition", "unanimous_for_option")
+    terminal["target_option"] = terminal.get("target_option") or data.get("target_option")
+    terminal["evidence_claim_ids"] = _filter_ids(terminal.get("evidence_claim_ids"), available)
+    data["terminal"] = terminal
+    data["target_option"] = data.get("target_option") or terminal.get("target_option")
+
+    for wf in data.get("world_facts", []):
+        wf["evidence_claim_ids"] = _filter_ids(wf.get("evidence_claim_ids"), available)
+        wf.setdefault("available_at", as_of.isoformat())
+        wf.setdefault("epistemic_type", "observation")
+    for rf in data.get("required_reality_facts", []):
+        rf["evidence_claim_ids"] = _filter_ids(rf.get("evidence_claim_ids"), available)
+
+    data.setdefault("institution_id", "deciding_body")
+    data.setdefault("institution_name", data.get("decision_body", "Deciding Body"))
+    data.setdefault("subject_entity", data.get("decision_body", ""))
+    data.setdefault("resolution_units", "the decision")
+    data.setdefault("authoritative_sources", [])
+    return data
+
+
+def _normalize_frame(data: dict[str, Any], view: EvidenceView) -> dict[str, Any]:
+    available = _available_ids(view)
+    for s in data.get("signals", []):
+        s["evidence_claim_ids"] = _filter_ids(s.get("evidence_claim_ids"), available)
+        s.setdefault("baseline", 0.0)
+    for r in data.get("reaction_rules", []):
+        r["evidence_claim_ids"] = _filter_ids(r.get("evidence_claim_ids"), available)
+    data["guidance_evidence_ids"] = _filter_ids(data.get("guidance_evidence_ids"), available)
+    data.setdefault("acceptance_tolerance", 0.5)
+
+    normalized_unc = []
+    for u in data.get("uncertainty", []):
+        outcomes = u.get("outcomes") or []
+        total = sum(float(o.get("weight", 0)) for o in outcomes)
+        if total <= 0 or len(outcomes) < 1:
+            continue
+        for o in outcomes:
+            o["weight"] = float(o.get("weight", 0)) / total  # per-variable conservation
+            prov = o.get("provenance")
+            if prov not in _VALID_PROVENANCE:
+                o["provenance"] = WeightProvenance.EXPLICIT_MODEL.value
+            o.setdefault("signal_effects", [[u.get("signal"), 0.0]])
+        u["constraining_evidence_ids"] = _filter_ids(u.get("constraining_evidence_ids"), available)
+        normalized_unc.append(u)
+    data["uncertainty"] = normalized_unc
+    data.setdefault("options", ["yes", "no"])
+    data.setdefault("signals", [])
+    data.setdefault("reaction_rules", [])
+    return data
