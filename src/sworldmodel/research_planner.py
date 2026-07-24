@@ -17,7 +17,7 @@ from .ids import prompt_hash
 
 @dataclass(frozen=True)
 class ResearchPlan:
-    process_type: str
+    process_summary: str
     resolution_event: str
     deadline: str
     authoritative_sources: tuple[str, ...]
@@ -32,7 +32,7 @@ class ResearchPlan:
 
 
 _PLAN_KEYS = (
-    "process_type",
+    "process_summary",
     "resolution_event",
     "deadline",
     "authoritative_sources",
@@ -58,10 +58,10 @@ QUESTION: {question}
 INFORMATION CUTOFF (as_of): {as_of.isoformat()}
 HORIZON (resolution deadline is on/before this): {horizon.isoformat()}
 
-Return a JSON object with these keys (all arrays are arrays of short strings):
-- process_type: one of "committee_vote", "individual_response", "individual_decision",
-  "multiparty", "negotiation", "organizational", "geopolitical", "population",
-  "deadline_event", "quantitative", "other" — your best classification.
+Do NOT force the question into any predefined category. Return a JSON object with these
+keys (all arrays are arrays of short strings):
+- process_summary: a one-line, free-text description of the REAL process that actually
+  resolves this question (whatever it genuinely is), discovered from the question itself.
 - resolution_event: the exact event that resolves the question.
 - deadline: ISO date/datetime the outcome is determined by.
 - authoritative_sources: the official sources that would confirm the outcome.
@@ -84,7 +84,7 @@ Return a JSON object with these keys (all arrays are arrays of short strings):
     )
     d = resp.data
     return ResearchPlan(
-        process_type=str(d.get("process_type", "other")),
+        process_summary=str(d.get("process_summary", "")),
         resolution_event=str(d.get("resolution_event", "")),
         deadline=str(d.get("deadline", horizon.isoformat())),
         authoritative_sources=_strs(d.get("authoritative_sources")),

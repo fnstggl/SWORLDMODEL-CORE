@@ -1,16 +1,14 @@
-"""Core typed domain models.
+"""Core typed domain models — the cross-cutting primitives shared by every module.
 
-These are pure, mostly-immutable data records. They depend only on the standard
-library (plus ``ids``/``errors``); nothing here imports the evidence store, the
-world, or the runtime, which keeps the import graph acyclic. Evidence is always
-referenced by *claim id* (a string), never by importing ``EvidenceClaim`` here.
+These are pure, mostly-immutable records depending only on the standard library
+(plus ``ids``/``errors``/``worldspec``). Nothing here imports the evidence store, the
+world, or the runtime, which keeps the import graph acyclic.
 
-Design rules enforced structurally:
-* The ``ResolutionContract`` is frozen; its load-bearing fields cannot be rewritten.
-* An ``Intent`` can only carry one of the allowed intent *kinds* — an actor has no
-  vocabulary with which to assert a consequence ("persuaded", "passed", ...).
-* ``BranchWeight`` always carries its provenance, so no weight can hide where it
-  came from.
+This module contains **only universal** types: evidence/source enums, the event and
+weight primitives, the genuine-uncertainty types, the immutable resolution contract,
+the reality manifest, and the forecast outputs. It contains no committee, vote,
+proposal, institution, or fixed-action-vocabulary type — those concepts, when a
+question needs them, are *compiled data* in :mod:`worldspec`, never types here.
 """
 
 from __future__ import annotations
@@ -22,6 +20,7 @@ from typing import Any
 
 from .errors import ContractMutationError
 from .ids import content_id
+from .worldspec import TerminalExpression
 
 # ---------------------------------------------------------------------------
 # Enumerations
@@ -92,64 +91,8 @@ class EventStatus(StrEnum):
     REJECTED = "rejected"
 
 
-# Generic institutional / social primitives. Not a closed ontology: scenario code
-# may introduce further string kinds and register validators/executors for them.
-class EventKind:
-    BRIEFING_DISTRIBUTED = "briefing_distributed"
-    EXTERNAL_DATA_RELEASED = "external_data_released"
-    PROPOSAL_INTRODUCED = "proposal_introduced"
-    PROPOSAL_REVISED = "proposal_revised"
-    STATEMENT_MADE = "statement_made"
-    MESSAGE_SENT = "message_sent"
-    MESSAGE_DELIVERED = "message_delivered"
-    INFORMATION_REQUESTED = "information_requested"
-    INFORMATION_PROVIDED = "information_provided"
-    DECISION_OPENED = "decision_opened"
-    VOTE_CAST = "vote_cast"
-    COMMITMENT_MADE = "commitment_made"
-    OPERATIONAL_ACTION = "operational_action"
-    WAIT_RECORDED = "wait_recorded"
-    TALLY_COMPUTED = "tally_computed"
-    RESULT_PUBLISHED = "result_published"
-
-
-class IntentKind:
-    """The complete vocabulary an actor may emit. There is deliberately no kind for
-    asserting a consequence (persuaded / coalition formed / proposal passed / …)."""
-
-    SEND_MESSAGE = "send_message"
-    MAKE_STATEMENT = "make_statement"
-    REQUEST_INFORMATION = "request_information"
-    INTRODUCE_PROPOSAL = "introduce_proposal"
-    REVISE_PROPOSAL = "revise_proposal"
-    SUPPORT_PROPOSAL = "support_proposal"
-    OPPOSE_PROPOSAL = "oppose_proposal"
-    MAKE_COMMITMENT = "make_commitment"
-    OPERATIONAL_ACTION = "operational_action"
-    CAST_VOTE = "cast_vote"
-    WAIT = "wait"
-    PRESERVE_PLAN = "preserve_plan"
-
-    ALL: frozenset[str] = frozenset(
-        {
-            SEND_MESSAGE,
-            MAKE_STATEMENT,
-            REQUEST_INFORMATION,
-            INTRODUCE_PROPOSAL,
-            REVISE_PROPOSAL,
-            SUPPORT_PROPOSAL,
-            OPPOSE_PROPOSAL,
-            MAKE_COMMITMENT,
-            OPERATIONAL_ACTION,
-            CAST_VOTE,
-            WAIT,
-            PRESERVE_PLAN,
-        }
-    )
-
-
 # ---------------------------------------------------------------------------
-# Resolution contract
+# Reality manifest inputs
 # ---------------------------------------------------------------------------
 
 
@@ -167,52 +110,42 @@ class RequiredRealityFact:
 
 
 @dataclass(frozen=True)
-class DecisionRule:
-    """How an institution mechanically produces a decision (distinct from the
-    question predicate). ``total_seats`` and ``threshold`` are verified reality and
-    must never be rescaled to fit a smaller modeled roster."""
+class MemorySeed:
+    """An initial durable memory an actor carries into the simulation."""
 
-    kind: str  # "majority" | "supermajority" | "plurality" | "unanimous"
-    total_seats: int
-    threshold: int  # number of seat-votes required to carry the decision
+    content: str
+    kind: str  # "episodic" | "semantic"
+    importance: float  # 0..1
+    valid_time: datetime | None
     evidence_claim_ids: tuple[str, ...] = ()
+    tags: tuple[str, ...] = ()
 
 
-@dataclass(frozen=True)
-class TerminalSpec:
-    """Maps a completed institutional decision to the question's YES/NO predicate.
-
-    ``mechanism`` names the deterministic evaluator to use. ``yes_condition`` and
-    ``target_option`` parameterize it generically (e.g. unanimous-for-"hold").
-    """
-
-    mechanism: str  # "committee_vote" | "actor_action"
-    yes_condition: str  # "unanimous_for_option" | "at_least_k_for_option" | "majority_for_option" | "action_taken"
-    target_option: str  # the option that constitutes YES (e.g. "hold")
-    k: int | None = None  # threshold for at_least_k_for_option
-    target_actor: str | None = None  # for actor_action: whose action resolves it
-    target_action: str | None = None  # for actor_action: which action constitutes YES
-    evidence_claim_ids: tuple[str, ...] = ()
+# ---------------------------------------------------------------------------
+# Resolution contract
+# ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class ResolutionContract:
     """The immutable question definition. Created *before* actors; once verified its
-    load-bearing fields may not be silently rewritten by any downstream component."""
+    load-bearing fields may not be silently rewritten by any downstream component.
+
+    The terminal is a compiled declarative :class:`TerminalExpression` — never a
+    fixed mechanism or family. ``expected_participants`` records the true number of
+    actors the compiled world claims must exist (a generic reality check that a nine-
+    seat body cannot become five modeled units); it is not committee-specific."""
 
     question: str
     as_of: datetime
     horizon: datetime
-    outcome_space: tuple[str, ...]
-    target_outcome: str
     subject_entity: str
-    decision_body: str
     resolution_units: str
-    terminal_predicate: TerminalSpec
-    decision_rule: DecisionRule
+    terminal: TerminalExpression
+    target_outcome: str = ""  # human label of the YES condition, for reporting
     authoritative_resolution_sources: tuple[str, ...] = ()
     required_reality_facts: tuple[RequiredRealityFact, ...] = ()
-    expected_voting_seats: int | None = None
+    expected_participants: int | None = None
 
     @property
     def contract_id(self) -> str:
@@ -222,37 +155,24 @@ class ResolutionContract:
             self.as_of.isoformat(),
             self.horizon.isoformat(),
             self.target_outcome,
-            self.decision_body,
+            self.subject_entity,
         )
 
-    # The set of fields that are load-bearing and may never change after verification.
     _LOCKED_FIELDS = (
         "question",
         "as_of",
         "horizon",
-        "outcome_space",
-        "target_outcome",
         "subject_entity",
-        "decision_body",
         "resolution_units",
-        "terminal_predicate",
-        "decision_rule",
-        "expected_voting_seats",
+        "terminal",
+        "target_outcome",
+        "expected_participants",
     )
 
     def with_satisfied_facts(self, facts: tuple[RequiredRealityFact, ...]) -> ResolutionContract:
-        """Return a copy with *only* ``required_reality_facts`` updated.
-
-        This is the sole permitted mutation of a contract: recording which reality
-        facts were satisfied by evidence. Any attempt to change a locked field via
-        :meth:`checked_replace` raises ``ContractMutationError``.
-        """
-
         return replace(self, required_reality_facts=facts)
 
     def checked_replace(self, **changes: Any) -> ResolutionContract:
-        """Guarded replace that refuses to touch a locked field."""
-
         for name in changes:
             if name in self._LOCKED_FIELDS:
                 raise ContractMutationError(
@@ -268,21 +188,23 @@ class ResolutionContract:
 
 @dataclass(frozen=True)
 class RealityManifest:
-    """The determination of whether the world is faithful enough to simulate."""
+    """The determination of whether the world is faithful enough to simulate.
+
+    Fields are generic: entities/roles/authorities/rules verified from evidence, plus
+    an ``expected_participants`` vs ``represented_participants`` count that applies to
+    any world (a decision body, a negotiation table, a set of strata, a set of orgs)."""
 
     verified_entities: tuple[str, ...]
-    verified_roles: tuple[tuple[str, str], ...]  # (actor_id, role)
-    verified_institutions: tuple[str, ...]
-    verified_memberships: tuple[tuple[str, tuple[str, ...]], ...]  # (inst, members)
-    verified_authorities: tuple[tuple[str, tuple[str, ...]], ...]  # (actor, permissions)
+    verified_roles: tuple[tuple[str, str], ...]  # (entity_id, role)
+    verified_authorities: tuple[tuple[str, tuple[str, ...]], ...]  # (entity, capabilities)
     verified_rules: tuple[str, ...]
     verified_previous_actions: tuple[str, ...]
     unresolved_conflicts: tuple[str, ...]
     missing_required_facts: tuple[str, ...]
     evidence_coverage: float
     integrity_verdict: IntegrityVerdict
-    expected_voting_seats: int | None = None
-    represented_voting_seats: int | None = None
+    expected_participants: int | None = None
+    represented_participants: int | None = None
     notes: tuple[str, ...] = ()
 
     @property
@@ -291,166 +213,7 @@ class RealityManifest:
 
 
 # ---------------------------------------------------------------------------
-# Compiled world building-blocks (produced by the compiler, validated by reality)
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class Entity:
-    entity_id: str
-    name: str
-    kind: str
-    evidence_claim_ids: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True)
-class ReactionRule:
-    """A conditional behavioral rule: *if* a signal crosses a threshold, the actor
-    would move to a different option. This is causal structure, not a personality
-    label."""
-
-    trigger_signal: str  # name of an external signal, e.g. "inflation_surprise"
-    direction: str  # "above" | "below"
-    threshold: float
-    moves_to_option: str
-    rationale: str
-    evidence_claim_ids: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True)
-class ConditionalBehavior:
-    """How an actor currently leans and what would change it.
-
-    ``current_inclination`` is derived from evidence (prior vote + guidance +
-    active proposal), never from an assigned trait. ``reaction_rules`` say what
-    observable signal would move the actor, and by how much.
-    """
-
-    current_inclination: str
-    reaction_rules: tuple[ReactionRule, ...]
-    dissent_threshold: float  # 0..1, willingness to hold a lone position
-    reasoning: str
-    acceptance_tolerance: float = 0.5  # 0..1, readiness to accept a focal proposal
-    evidence_claim_ids: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True)
-class MemorySeed:
-    """An initial durable memory an actor carries into the simulation."""
-
-    content: str
-    kind: str  # "episodic" | "semantic"
-    importance: float  # 0..1
-    valid_time: datetime | None
-    evidence_claim_ids: tuple[str, ...] = ()
-    tags: tuple[str, ...] = ()  # e.g. "commitment:hold"
-
-
-@dataclass(frozen=True)
-class ActorDefinition:
-    """The compiled, static definition of an actor. The runtime :class:`ActorState`
-    is initialized from this and then evolves; the definition itself is immutable."""
-
-    actor_id: str
-    name: str
-    role: str
-    authority: tuple[str, ...]
-    is_voting_seat: bool
-    vote_power: int
-    conditional_behavior: ConditionalBehavior
-    stable_identity: tuple[tuple[str, str], ...] = ()  # (key, value) pairs
-    memory_seeds: tuple[MemorySeed, ...] = ()
-    evidence_claim_ids: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True)
-class InstitutionSpec:
-    institution_id: str
-    name: str
-    member_actor_ids: tuple[str, ...]
-    decision_rule: DecisionRule
-    seat_vote_powers: tuple[tuple[str, int], ...]  # (actor_id, power)
-    evidence_claim_ids: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True)
-class Proposal:
-    proposal_id: str
-    option: str
-    text: str
-    introduced_by: str
-    introduced_at: datetime
-    revision_of: str | None = None
-    evidence_claim_ids: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True)
-class SignalDef:
-    """A named external signal (e.g. an inflation surprise) with a baseline level.
-
-    Signals are the observable levers that can move an actor's preferred option.
-    They are evidence-grounded and delivered to actors as observations, never read
-    directly by the mechanism.
-    """
-
-    name: str
-    baseline: float
-    description: str
-    evidence_claim_ids: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True)
-class UncertaintySpec:
-    """Declares that a signal's *future* value is genuinely unknown, and how its
-    branches are weighted (with provenance). This is the joint-uncertainty input the
-    branch runtime samples — not a Cartesian explosion of decorative variants."""
-
-    signal: str
-    why_unknown: str
-    reversal_capable: bool
-    outcomes: tuple[UncertaintyOutcome, ...]
-    constraining_evidence_ids: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True)
-class ScenarioFrame:
-    """Evidence-grounded scaffolding that constrains world compilation.
-
-    In live operation an LLM generates this from evidence and it is validated
-    identically; in the deterministic offline path it is provided by the research
-    corpus. Either way, every element cites available evidence and is checked for
-    consistency with verified reality before it is used. The frame carries only
-    *conditional* structure — it never encodes the terminal answer.
-    """
-
-    options: tuple[str, ...]
-    signals: tuple[SignalDef, ...]
-    reaction_rules: tuple[ReactionRule, ...]
-    guidance_option: str | None
-    guidance_text: str
-    acceptance_tolerance: float  # 0..1 — how readily a seat accepts a focal proposal
-    uncertainty: tuple[UncertaintySpec, ...]
-    guidance_evidence_ids: tuple[str, ...] = ()
-
-    def reaction_rules_to_option(self, option: str) -> tuple[ReactionRule, ...]:
-        return tuple(r for r in self.reaction_rules if r.moves_to_option == option)
-
-
-@dataclass(frozen=True)
-class CausalEdge:
-    cause: str
-    effect: str
-    mechanism: str
-
-
-@dataclass(frozen=True)
-class CausalGraph:
-    nodes: tuple[str, ...]
-    edges: tuple[CausalEdge, ...]
-
-
-# ---------------------------------------------------------------------------
-# Uncertainty
+# Genuine uncertainty
 # ---------------------------------------------------------------------------
 
 
@@ -468,20 +231,33 @@ class BranchWeight:
 
 @dataclass(frozen=True)
 class UncertaintyOutcome:
-    """One resolution of an uncertainty variable, with an environment effect."""
+    """One resolution of an uncertainty variable, with its environment effect.
+
+    ``field_effects`` maps a world-field name to the numeric/typed level it takes when
+    this outcome is realized — delivered into the world as an observable data release.
+    (No notion of "signal" or "vote"; it is any typed field the compiler declared.)"""
 
     value: str
     weight: BranchWeight
-    # Effect applied to the world when this outcome is realized: a mapping of
-    # external-signal name -> numeric level, delivered as an observable data event.
-    signal_effects: tuple[tuple[str, float], ...] = ()
+    field_effects: tuple[tuple[str, Any], ...] = ()
     description: str = ""
 
 
 @dataclass(frozen=True)
+class UncertaintySpec:
+    """Declares that a world field's *future* value is genuinely unknown, and how its
+    branches are weighted (with provenance)."""
+
+    variable: str
+    why_unknown: str
+    reversal_capable: bool
+    outcomes: tuple[UncertaintyOutcome, ...]
+    constraining_evidence_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class UncertaintyVariable:
-    """A genuine unknown reality. Only decision-relevant, reversal-capable unknowns
-    should appear here — not decorative personality variants."""
+    """A genuine unknown reality that can move the outcome (for the report)."""
 
     variable_id: str
     description: str
@@ -497,12 +273,16 @@ class UncertaintyVariable:
 
 
 # ---------------------------------------------------------------------------
-# Events and intents
+# Events (the universal ledger entry)
 # ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class Event:
+    """One applied happening in a branch. ``kind`` is a free string — a universal
+    effect op (``set_field``, ``append_record``, ``deliver_information``, ...) or an
+    engine-structural kind. There is no closed committee ontology."""
+
     event_id: str
     branch_id: str
     time: datetime
@@ -530,24 +310,6 @@ def make_payload(data: dict[str, Any]) -> tuple[tuple[str, Any], ...]:
     return tuple(sorted(data.items(), key=lambda kv: kv[0]))
 
 
-@dataclass(frozen=True)
-class Intent:
-    """An actor's *intention*. The environment turns it into consequences; the actor
-    cannot. Only kinds in :data:`IntentKind.ALL` are representable."""
-
-    actor_id: str
-    kind: str
-    payload: tuple[tuple[str, Any], ...]
-    rationale: str
-    referenced_memory_ids: tuple[str, ...] = ()
-    referenced_observation_ids: tuple[str, ...] = ()
-    expected_effect: str = ""  # the actor's expectation, NOT the realized consequence
-
-    @property
-    def payload_dict(self) -> dict[str, Any]:
-        return dict(self.payload)
-
-
 # ---------------------------------------------------------------------------
 # Forecast outputs
 # ---------------------------------------------------------------------------
@@ -565,9 +327,8 @@ class BranchOutcome:
     unresolved_reason: str | None
     truncated: bool
     key_conditions: tuple[tuple[str, str], ...]
-    votes: tuple[tuple[str, str], ...]  # (actor_id, option)
-    final_tally: tuple[tuple[str, int], ...]  # (option, count)
-    event_count: int
+    records: tuple[tuple[str, str], ...] = ()  # highlighted (label, value) for the report
+    event_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -576,7 +337,7 @@ class TrajectorySummary:
     weight: float
     outcome: str | None
     narrative: str
-    votes: tuple[tuple[str, str], ...]
+    records: tuple[tuple[str, str], ...]
     key_conditions: tuple[tuple[str, str], ...]
 
 
@@ -599,8 +360,6 @@ class ForecastResult:
     limitations: tuple[str, ...]
     model_call_count: int = 0
     token_usage: int = 0
-    # Diagnostics may include a separately-labeled reference-class comparator.
-    # It is NEVER allowed to contribute to ``simulation_probability``.
     diagnostics: tuple[tuple[str, str], ...] = ()
     probability_source: str = PROBABILITY_SOURCE
 

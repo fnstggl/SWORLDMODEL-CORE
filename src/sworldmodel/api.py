@@ -4,24 +4,28 @@
 
 The full causal route is readable and direct:
 
-    research -> evidence -> contract -> integrity -> compile
-             -> initialize worlds -> event runtime -> terminal evaluator
-             -> trajectory aggregation -> report
+    research  -> evidence + compiled WorldSpec (actors, actions, process, terminal)
+              -> contract (immutable question definition, locks the declarative terminal)
+              -> compile  (verified base world + reality-integrity gate + uncertainty branches)
+              -> event runtime (one universal engine executes the compiled process graph)
+              -> terminal evaluator (deterministic declarative predicate over world state)
+              -> trajectory aggregation -> report
 
-There is exactly one normal path. No phase adapters, no profiles, no fallbacks.
+There is exactly one normal path, and it does not branch on the kind of question. No
+phase adapters, no profiles, no mechanism families, no fallbacks.
 """
 
 from __future__ import annotations
 
 from datetime import datetime
 
-from .compiler import compile_world
 from .config import ForecastConfig
+from .engine import run
 from .models import ForecastResult, ResolutionContract
 from .outcomes import aggregate
 from .research import ResearchBundle
-from .runtime import RunResult, run
 from .tracing import TraceContext
+from .world_compiler import compile_world
 
 
 def _build_contract(
@@ -31,27 +35,23 @@ def _build_contract(
         question=question,
         as_of=as_of,
         horizon=horizon,
-        outcome_space=bundle.frame.options,
-        target_outcome=f"{bundle.terminal_spec.yes_condition}:{bundle.target_option}",
         subject_entity=bundle.subject_entity,
-        decision_body=bundle.decision_body,
         resolution_units=bundle.resolution_units,
-        terminal_predicate=bundle.terminal_spec,
-        decision_rule=bundle.decision_rule,
+        terminal=bundle.spec.terminal,
+        target_outcome=bundle.target_outcome or bundle.spec.terminal.description,
         authoritative_resolution_sources=bundle.authoritative_sources,
         required_reality_facts=bundle.required_reality_facts,
-        expected_voting_seats=bundle.expected_voting_seats,
+        expected_participants=bundle.expected_participants,
     )
 
 
-def _limitations(config: ForecastConfig, run_result: RunResult) -> tuple[str, ...]:
-    lims = [
+def _limitations(config: ForecastConfig) -> tuple[str, ...]:
+    return (
         f"actor behavior produced by gateway {config.gateway.model_id!r}; offline runs use a "
         "deterministic calibrated-behavior reasoner, not a frontier LLM.",
         "branch weights on uncertain future data are epistemic (symmetric-ignorance / "
         "explicit-model); the reported bounds expose that sensitivity.",
-    ]
-    return tuple(lims)
+    )
 
 
 def run_forecast(
@@ -66,10 +66,12 @@ def run_forecast(
     compiled = compile_world(
         contract,
         evidence_view,
-        bundle,
-        config.gateway,
+        bundle.spec,
+        bundle.uncertainties,
+        bundle.world_facts,
         seed=config.seed,
         max_branches=config.max_branches,
+        compile_responses=bundle.compile_responses,
     )
     run_result = run(compiled, config.gateway, seed=config.seed)
 
@@ -88,7 +90,7 @@ def run_forecast(
         trace_location=trace_location,
         model_call_count=config.gateway.call_count,
         token_usage=config.gateway.total_tokens,
-        limitations=_limitations(config, run_result),
+        limitations=_limitations(config),
         diagnostics=diagnostics,
     )
     ctx = TraceContext(

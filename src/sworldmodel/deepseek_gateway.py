@@ -31,16 +31,15 @@ DEFAULT_TEMPERATURES: dict[str, float] = {
     "followup_queries": 0.4,
     "extract_claims": 0.1,
     "contradiction": 0.1,
-    "compile_world": 0.3,
-    "compile_actors": 0.3,
-    "compile_uncertainty": 0.3,
+    "compile_world_spec": 0.3,
+    "interpret_novel": 0.2,
     "actor_decision": 0.7,
     "reflect": 0.5,
 }
 DEFAULT_MAX_TOKENS: dict[str, int] = {
     "extract_claims": 3000,
-    "compile_world": 4000,
-    "compile_actors": 4000,
+    "compile_world_spec": 8000,
+    "interpret_novel": 1500,
     "actor_decision": 1500,
 }
 

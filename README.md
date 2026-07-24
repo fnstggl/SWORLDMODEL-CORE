@@ -24,34 +24,53 @@ and aggregates. See `docs/LIVE_PRODUCT.md`. The deterministic reasoner and prepa
 corpora are confined to tests and the historical-evaluation fixture; the live command
 refuses to run "live" without a live gateway + live research.
 
+This is **one universal world simulator**, not a committee engine or a router between
+scenario types. For every arbitrary question the LLM compiles the *actual causal world*
+— entities, actors, capabilities, objects/resources, the real process, the
+scenario-specific actions, the genuine uncertainties, and the exact declarative
+condition that makes the answer YES — and one runtime executes it. A committee vote is
+only one world the compiler may produce; an individual response, negotiation, population
+behavior, or geopolitical process compiles an entirely different world with **no source
+change**.
+
+> Hardcode only the universal laws by which a world changes. Never hardcode what world,
+> process, or actions a question must contain.
+
 ## The one canonical path
 
 ```
 forecast(question, as_of, horizon, config)
-   → research        (cited evidence store + evidence-grounded scenario frame)
-   → contract        (immutable question definition)
+   → research        (cited evidence store, built live from the question)
+   → compile         (LLM compiles a WorldSpec: entities, actions→universal effects,
+                      process graph, uncertainties, declarative terminal)
+   → contract        (immutable question definition; locks the declarative terminal)
    → integrity gate  (refuse a structurally false world)
-   → compile         (actors with conditional behavior, institution, protocol, uncertainty)
-   → initialize      (one authoritative WorldState per branch)
-   → event runtime   (perceive → retrieve → plan/react → reflect → intent → environment)
-   → terminal eval   (deterministic vote tally; code, never an LLM)
+   → uncertainty     (genuine, weighted, provenance-tagged branches)
+   → event runtime   (one universal loop: perceive → plan → intend → environment executes)
+   → terminal eval   (deterministic declarative predicate over world state; code, not an LLM)
    → aggregation     (weighted frequency of YES trajectories)
    → report          (fully auditable; probability reconstructable by hand)
 ```
 
-There is exactly one runtime path. No profiles, no phase pipelines, no fallbacks,
-no prior/simulation combiner, no hidden institution model.
+There is exactly one runtime path and it does **not** branch on the kind of question.
+No profiles, no phase pipelines, no mechanism families, no fallbacks, no prior/simulation
+combiner, no hidden institution model. The runtime hardcodes only a small, fixed
+*effect language* (create event, deliver information, set field, append record, transfer
+resource, …) and universal *operators* (equals, count, sum, all, before, …); the LLM
+compiles the scenario-specific program from those primitives. Actors may also propose
+**novel actions** the compiler did not anticipate, validated (authority → feasibility →
+safe effects) before the world decides their consequence.
 
 ## Install & run
 
 ```bash
 make install          # editable install (stdlib-only runtime; no network needed)
-make test             # pytest — 60 invariant + unit + integration tests
+make test             # pytest — acceptance + invariant + unit + integration tests
 make lint             # ruff check + format
 make typecheck        # mypy --strict
 make banxico          # run the Banxico pastcast; write SEALED pre-outcome artifacts
 make banxico-eval     # compare the sealed forecast to the known result
-make synthetic        # generalization proofs (7-seat council, data-shock board)
+make synthetic        # cross-domain proofs (committee, response, negotiation, population, geopolitical)
 ```
 
 The kernel has **zero runtime dependencies** and runs offline and deterministically
@@ -71,11 +90,18 @@ artifacts/            generated run artifacts (git-ignored)
 ## Key invariants (each has a test)
 
 - The forecast is `weighted_simulated_trajectories` — never a prior or a separate model.
-- A nine-seat board can never become five modeled units; thresholds are never rescaled.
+- The production runtime contains **no** routing on a question family (committee /
+  negotiation / election / population / geopolitical / response).
+- A claimed participant count can never exceed the verified roster (a nine-participant
+  body can never become five modeled units).
 - Actors emit *intentions*; the environment produces *consequences*.
+- A compiled action's behavior is its effects — renaming it changes nothing.
+- A novel action never auto-succeeds; if it cannot be represented safely it is rejected,
+  never coerced into the nearest known action.
 - No fact available after `as_of` can affect a pastcast (mechanically enforced).
-- Deleting the actor calls changes/kills the forecast.
-- The full run replays from the event ledger.
+- Deleting the actor calls changes/kills the forecast; the full run replays from the ledger.
 
-See `docs/` for the reality-integrity gate, evidence/cutoff model, actor runtime,
-forecast semantics, the legacy-extraction record, and the Banxico evaluation.
+The 10 mandatory acceptance tests live in `tests/acceptance/test_universal.py`. See
+`docs/ARCHITECTURE.md` for the responsibility table, the production dependency graph,
+and the deletion list, plus `docs/` for the reality-integrity gate, evidence/cutoff
+model, actor runtime, forecast semantics, and the Banxico evaluation.

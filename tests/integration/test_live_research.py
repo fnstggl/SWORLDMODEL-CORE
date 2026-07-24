@@ -58,8 +58,10 @@ def test_live_path_does_not_read_a_prepared_corpus() -> None:
     assert all(c.method in {"GET", "POST"} for c in transport.calls)
 
 
-def test_verified_roster_and_rule_are_compiled_from_live_evidence() -> None:
+def test_verified_world_is_compiled_from_live_evidence() -> None:
     bundle, _ = _research()
-    assert bundle.expected_voting_seats == 3
-    assert len(bundle.members) == 3
-    assert bundle.decision_rule.total_seats == 3
+    assert bundle.expected_participants == 3
+    assert len(bundle.spec.actors) == 3
+    assert len(bundle.spec.entities) == 3
+    # the compiled terminal is a declarative predicate, not a fixed mechanism
+    assert bundle.spec.terminal.yes_when.op == "equals"

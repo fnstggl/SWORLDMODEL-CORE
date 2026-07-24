@@ -11,7 +11,7 @@ import json
 import re
 import urllib.parse
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 
 from .http import HttpError, HttpTransport
 from .ids import sha256_hex
@@ -114,9 +114,11 @@ def _parse_dt(value: str) -> datetime | None:
     value = value.strip()
     for candidate in (value, value.replace("Z", "+00:00")):
         try:
-            return datetime.fromisoformat(candidate)
+            dt = datetime.fromisoformat(candidate)
         except ValueError:
             continue
+        # Normalize to timezone-aware UTC so cutoff comparisons never mix naive/aware.
+        return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
     return None
 
 

@@ -68,14 +68,14 @@ def _print_summary(result: ForecastResult, forecast_hash: str, out_dir: Path | N
     )
     print(
         f"Integrity: {result.integrity_manifest.integrity_verdict.value} "
-        f"(seats expected {result.integrity_manifest.expected_voting_seats}, "
-        f"represented {result.integrity_manifest.represented_voting_seats})"
+        f"(participants expected {result.integrity_manifest.expected_participants}, "
+        f"represented {result.integrity_manifest.represented_participants})"
     )
     print(f"Branches: {len(result.branch_outcomes)}  |  model calls: {result.model_call_count}")
     for b in result.branch_outcomes:
-        votes = ", ".join(f"{a}={o}" for a, o in b.votes)
+        recs = ", ".join(f"{k}={v}" for k, v in b.records[:6])
         state = b.outcome if b.resolved else f"UNRESOLVED({b.unresolved_reason})"
-        print(f"  - {b.branch_id} w={b.weight:.4f} [{votes}] -> {state}")
+        print(f"  - {b.branch_id} w={b.weight:.4f} [{recs}] -> {state}")
     if out_dir is not None:
         print(f"Artifacts: {out_dir}")
         if forecast_hash:
@@ -218,7 +218,8 @@ def cmd_banxico_live(args: argparse.Namespace) -> int:
         "live_http_retrievals>0": audit["http_requests"] > 0,
         "official_sources_fetched>0": len((audit.get("research") or {}).get("sources_fetched", []))
         > 0,
-        "world_compiler_llm_calls>0": audit["model_calls_by_stage"].get("compile_reality", 0) > 0,
+        "world_compiler_llm_calls>0": audit["model_calls_by_stage"].get("compile_world_spec", 0)
+        > 0,
         "actor_llm_calls>0": audit["model_calls_by_stage"].get("actor_decision", 0) > 0,
         "forecast_source": result.probability_source,
     }

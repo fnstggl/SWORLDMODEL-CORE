@@ -1,11 +1,11 @@
 """Test doubles for the live path: mocked HTTP + a prompt-reading fake LLM.
 
-The fake LLM is NOT the DeterministicGateway (which is banned from production). It is
-a mocked *provider*: it reads its prompt — the same rendered context a real model
-sees — and returns realistic JSON, including citing the evidence claim ids that appear
-in the prompt. Combined with FakeTransport (canned RSS + pages), this exercises the
-entire production code path (research loop, verification, universal compile, runtime)
-with only the socket mocked.
+The fake LLM is NOT the DeterministicGateway (which is banned from production). It is a
+mocked *provider*: it reads its prompt — the same rendered context a real model sees —
+and returns realistic JSON, including citing the evidence claim ids that appear in the
+prompt, and compiling a full universal WorldSpec. Combined with FakeTransport (canned
+RSS + pages), this exercises the entire production code path (research loop,
+verification, universal world compilation, event engine) with only the socket mocked.
 """
 
 from __future__ import annotations
@@ -35,8 +35,7 @@ DECISION_PAGE = """[[DECISION]] Widget Board recommends adoption.
 <meta property="article:published_time" content="2027-01-10T00:00:00+00:00">
 On January 10 2027 the Widget Standards Board voted to recommend adoption of the new
 standard. Ada Lovelace supported adoption and Ben Carter supported adoption, while Cara
-Diaz preferred to defer. The Board signaled that adoption is the expected outcome at the
-next meeting.
+Diaz preferred to defer. The Board signaled that adoption is the expected outcome.
 """
 
 OUTCOME_PAGE = """[[OUTCOME]] Widget standard adopted unanimously.
@@ -91,11 +90,12 @@ class FakeLLM(ModelGateway):
             "research_plan": self._plan,
             "followup_queries": lambda p: {"queries": []},
             "extract_claims": self._extract,
-            "compile_reality": self._reality,
-            "compile_roster": self._roster,
-            "compile_uncertainty": self._frame,
-            "compile_world": self._actors,
+            "compile_world_spec": self._world_spec,
             "actor_decision": self._decision,
+            "interpret_novel": lambda p: {
+                "representable": False,
+                "reason": "no novel action needed",
+            },
             "reflect": lambda p: {"beliefs_update": [], "new_memories": [], "plan_note": ""},
         }[request.task_kind]
         data = handler(request.prompt)
@@ -115,7 +115,7 @@ class FakeLLM(ModelGateway):
 
     def _plan(self, prompt: str) -> dict:
         return {
-            "process_type": "committee_vote",
+            "process_summary": "the Widget Standards Board decides whether to adopt a standard",
             "resolution_event": "the board's next standard vote",
             "deadline": HORIZON.isoformat(),
             "authoritative_sources": ["Widget Standards Board"],
@@ -218,29 +218,162 @@ class FakeLLM(ModelGateway):
             }
         return {"claims": []}
 
-    def _reality(self, prompt: str) -> dict:
-        ids = _ID_RE.findall(prompt)  # cite the claim ids present in the prompt
+    def _world_spec(self, prompt: str) -> dict:
+        ids = _ID_RE.findall(prompt)
+        members = [
+            ("ada_lovelace", "Ada Lovelace", "Chair", "adopt"),
+            ("ben_carter", "Ben Carter", "Member", "adopt"),
+            ("cara_diaz", "Cara Diaz", "Member", "defer"),
+        ]
+        entities = [
+            {
+                "entity_id": aid,
+                "name": name,
+                "kind": "person",
+                "is_actor": True,
+                "role": role,
+                "authority": ["decide"],
+                "evidence_claim_ids": ids[:2],
+            }
+            for aid, name, role, _ in members
+        ]
+        actors = [
+            {
+                "entity_id": aid,
+                "reasoning": f"prior stance {prior}",
+                "memory_seeds": [
+                    {
+                        "content": f"My prior position was {prior}.",
+                        "kind": "episodic",
+                        "importance": 0.7,
+                        "evidence_claim_ids": ids[:1],
+                    }
+                ],
+                "policy": {
+                    "default_action_id": "record_position",
+                    "default_params": {"position": "adopt"},
+                    "rules": [
+                        {
+                            "when_field": "opposition",
+                            "op": "above",
+                            "value": 0.5,
+                            "action_id": "record_position",
+                            "params": {"position": "reject"},
+                        }
+                    ],
+                },
+            }
+            for aid, _, _, prior in members
+        ]
         return {
-            "process_type": "committee_vote",
-            "decision_body": "Widget Standards Board",
             "subject_entity": "Widget standard",
             "resolution_units": "unanimity of three seats",
-            "institution_id": "widget_board",
-            "institution_name": "Widget Standards Board",
-            "decision_rule": {"kind": "majority", "total_seats": 3, "evidence_claim_ids": ids[:1]},
-            "expected_voting_seats": 3,
-            "target_option": "adopt",
-            "terminal": {
-                "mechanism": "committee_vote",
-                "yes_condition": "unanimous_for_option",
-                "target_option": "adopt",
-                "k": None,
-                "evidence_claim_ids": ids[:1],
+            "target_outcome": "a unanimous 3-0 adoption at the next meeting",
+            "expected_participants": 3,
+            "world_spec": {
+                "title": "Widget Standards Board",
+                "subject_entity": "Widget standard",
+                "resolution_units": "unanimity of three seats",
+                "entities": entities,
+                "actors": actors,
+                "fields": [{"field_id": "opposition", "value_type": "number", "initial": 0.0}],
+                "actions": [
+                    {
+                        "action_id": "record_position",
+                        "meaning": "record the member's vote",
+                        "eligible_actors": ["*"],
+                        "required_authority": ["decide"],
+                        "stages": ["decision"],
+                        "visibility": "private",
+                        "parameters": [
+                            {
+                                "name": "position",
+                                "type": "option",
+                                "choices": ["reject", "defer", "adopt"],
+                            }
+                        ],
+                        "effects": [
+                            {
+                                "op": "append_record",
+                                "collection": "votes",
+                                "key": "$actor",
+                                "value": "$param.position",
+                                "visibility": "private",
+                            }
+                        ],
+                        "evidence_claim_ids": ids[:1],
+                    }
+                ],
+                "process": {
+                    "nodes": [
+                        {
+                            "node_id": "briefing",
+                            "stage": "brief",
+                            "advance_seconds": 60,
+                            "effects": [
+                                {
+                                    "op": "deliver_information",
+                                    "text": "The adoption decision is open.",
+                                    "visibility": "public",
+                                }
+                            ],
+                        },
+                        {
+                            "node_id": "decision",
+                            "stage": "decision",
+                            "participants": ["*"],
+                            "action_ids": ["record_position"],
+                            "rounds": 1,
+                        },
+                    ]
+                },
+                "terminal": {
+                    "yes_when": {
+                        "op": "equals",
+                        "args": [
+                            {
+                                "op": "count",
+                                "args": [
+                                    "votes",
+                                    {
+                                        "op": "equals",
+                                        "args": [{"op": "item", "args": ["value"]}, "adopt"],
+                                    },
+                                ],
+                            },
+                            3,
+                        ],
+                    },
+                    "unresolved_when": {
+                        "op": "less_than",
+                        "args": [{"op": "count", "args": ["votes"]}, 3],
+                    },
+                    "description": "YES iff all three recorded votes are adopt",
+                },
             },
-            "members": [
-                _m("ada_lovelace", "Ada Lovelace", "Chair", "adopt", ids, chair=True),
-                _m("ben_carter", "Ben Carter", "Member", "adopt", ids),
-                _m("cara_diaz", "Cara Diaz", "Member", "defer", ids),
+            "uncertainties": [
+                {
+                    "variable": "opposition",
+                    "why_unknown": "future public opposition is unknown",
+                    "reversal_capable": True,
+                    "constraining_evidence_ids": ids[:1],
+                    "outcomes": [
+                        {
+                            "value": "quiet",
+                            "weight": 0.75,
+                            "provenance": "symmetric_ignorance_assumption",
+                            "field_effects": [["opposition", 0.0]],
+                            "description": "no opposition",
+                        },
+                        {
+                            "value": "loud",
+                            "weight": 0.25,
+                            "provenance": "explicit_model_distribution",
+                            "field_effects": [["opposition", 0.6]],
+                            "description": "opposition mobilizes",
+                        },
+                    ],
+                }
             ],
             "world_facts": [
                 {
@@ -263,130 +396,23 @@ class FakeLLM(ModelGateway):
             ],
         }
 
-    def _roster(self, prompt: str) -> dict:
-        ids = _ID_RE.findall(prompt)
-        return {
-            "members": [
-                _m("ada_lovelace", "Ada Lovelace", "Chair", "adopt", ids, chair=True),
-                _m("ben_carter", "Ben Carter", "Member", "adopt", ids),
-                _m("cara_diaz", "Cara Diaz", "Member", "defer", ids),
-            ]
-        }
-
-    def _frame(self, prompt: str) -> dict:
-        ids = _ID_RE.findall(prompt)
-        return {
-            "options": ["reject", "defer", "adopt"],
-            "signals": [
-                {
-                    "name": "opposition",
-                    "baseline": 0.0,
-                    "description": "public opposition",
-                    "evidence_claim_ids": ids[:1],
-                }
-            ],
-            "reaction_rules": [
-                {
-                    "trigger_signal": "opposition",
-                    "direction": "above",
-                    "threshold": 0.5,
-                    "moves_to_option": "reject",
-                    "rationale": "strong opposition",
-                    "evidence_claim_ids": ids[:1],
-                }
-            ],
-            "guidance_option": "adopt",
-            "guidance_text": "adoption is the expected outcome",
-            "guidance_evidence_ids": ids[:1],
-            "acceptance_tolerance": 0.5,
-            "uncertainty": [
-                {
-                    "signal": "opposition",
-                    "why_unknown": "future opposition unknown",
-                    "reversal_capable": True,
-                    "constraining_evidence_ids": ids[:1],
-                    "outcomes": [
-                        {
-                            "value": "quiet",
-                            "weight": 0.75,
-                            "provenance": "symmetric_ignorance_assumption",
-                            "source_detail": "calm",
-                            "signal_effects": [["opposition", 0.0]],
-                            "description": "no opposition",
-                        },
-                        {
-                            "value": "loud",
-                            "weight": 0.25,
-                            "provenance": "explicit_model_distribution",
-                            "source_detail": "opposition",
-                            "signal_effects": [["opposition", 0.6]],
-                            "description": "opposition mobilizes",
-                        },
-                    ],
-                },
-            ],
-        }
-
-    def _actors(self, prompt: str) -> dict:
-        ids = re.findall(r'"actor_id":\s*"([a-z_]+)"', prompt)
-        return {
-            "actors": [
-                {
-                    "actor_id": a,
-                    "current_inclination": "adopt",
-                    "reaction_rules": [],
-                    "dissent_threshold": 0.5,
-                    "reasoning": "grounded",
-                }
-                for a in ids
-            ]
-        }
-
     def _decision(self, prompt: str) -> dict:
-        if (
-            '"decision"' in prompt
-            or "STAGE\ndecision" in prompt
-            or '"stage": "decision"' in prompt.lower()
-            or "decision" in _stage(prompt)
-        ):
-            return {
-                "kind": "cast_vote",
-                "vote_option": _proposal_option(prompt) or "adopt",
-                "rationale": "I support the recommended option.",
-                "expected_effect": "record vote",
-                "referenced_memory_ids": [],
-                "referenced_observation_ids": [],
-            }
-        if "positions" in _stage(prompt):
-            return {
-                "kind": "make_statement",
-                "favored_option": "adopt",
-                "statement_text": "I support adoption.",
-                "info_signals": {},
-                "rationale": "state position",
-                "expected_effect": "colleagues learn my view",
-                "referenced_memory_ids": [],
-                "referenced_observation_ids": [],
-            }
+        opposition = self._opposition(prompt)
+        position = "reject" if opposition > 0.5 else "adopt"
         return {
-            "kind": "wait",
-            "vote_option": "",
-            "rationale": "await the proposal",
-            "expected_effect": "wait",
-            "pending_need": "await_proposal",
+            "action_mode": "compiled_action",
+            "compiled_action_id": "record_position",
+            "params": {"position": position},
+            "target": "",
+            "reasoning": f"I record my position given opposition={opposition}.",
             "referenced_memory_ids": [],
             "referenced_observation_ids": [],
         }
 
-
-def _stage(prompt: str) -> str:
-    m = re.search(r"## STAGE\s*\n\s*\"?([a-z_]+)", prompt)
-    return m.group(1) if m else ""
-
-
-def _proposal_option(prompt: str) -> str:
-    m = re.search(r'"option":\s*"([a-z_]+)"', prompt)
-    return m.group(1) if m else ""
+    @staticmethod
+    def _opposition(prompt: str) -> float:
+        m = re.search(r'"opposition":\s*([0-9.]+)', prompt)
+        return float(m.group(1)) if m else 0.0
 
 
 def _c(prop: str, value: str, entities: list[str], excerpt: str, auth: int) -> dict:
@@ -397,28 +423,4 @@ def _c(prop: str, value: str, entities: list[str], excerpt: str, auth: int) -> d
         "epistemic_type": "observation",
         "supporting_excerpt": excerpt,
         "authority_hint": auth,
-    }
-
-
-def _m(
-    actor_id: str, name: str, role: str, prior: str, ids: list[str], *, chair: bool = False
-) -> dict:
-    auth = ["vote", "introduce_proposal", "chair"] if chair else ["vote"]
-    return {
-        "actor_id": actor_id,
-        "name": name,
-        "role": role,
-        "is_voting_seat": True,
-        "vote_power": 1,
-        "prior_action": prior,
-        "authority": auth,
-        "evidence_claim_ids": ids[:2],
-        "memory_seeds": [
-            {
-                "content": f"My prior position was {prior}.",
-                "kind": "episodic",
-                "importance": 0.7,
-                "evidence_claim_ids": ids[:1],
-            }
-        ],
     }

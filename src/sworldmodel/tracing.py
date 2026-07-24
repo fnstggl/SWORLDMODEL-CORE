@@ -2,9 +2,9 @@
 
 Writes the replayable event ledger, the LLM-call log, actor-decision records, the
 evidence and world manifests, and the human-readable report. The report shows enough
-to reconstruct the probability by hand: every branch, every vote, the deterministic
-tally, and the aggregate arithmetic. Serialization is deterministic so artifacts are
-hashable and comparable across runs.
+to reconstruct the probability by hand: every branch, the decisive world state, the
+deterministic terminal evaluation, and the aggregate arithmetic. Serialization is
+deterministic so artifacts are hashable and comparable across runs.
 """
 
 from __future__ import annotations
@@ -14,12 +14,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from .compiler import CompiledWorld
+from .compiled import CompiledWorld
+from .engine import RunResult
 from .evidence import EvidenceStore
 from .ids import canonical_json, sha256_hex
 from .models import ForecastResult, ResolutionContract
 from .research import ResearchBundle
-from .runtime import RunResult
 
 
 @dataclass
@@ -53,8 +53,8 @@ class TraceContext:
             "resolved_no_mass": f.resolved_no_mass,
             "unresolved_mass": f.unresolved_mass,
             "integrity_verdict": f.integrity_manifest.integrity_verdict.value,
-            "expected_voting_seats": f.integrity_manifest.expected_voting_seats,
-            "represented_voting_seats": f.integrity_manifest.represented_voting_seats,
+            "expected_participants": f.integrity_manifest.expected_participants,
+            "represented_participants": f.integrity_manifest.represented_participants,
             "model": self.model_id,
             "model_call_count": f.model_call_count,
             "token_usage": f.token_usage,
@@ -66,8 +66,7 @@ class TraceContext:
                     "outcome": b.outcome,
                     "unresolved_reason": b.unresolved_reason,
                     "conditions": dict(b.key_conditions),
-                    "votes": dict(b.votes),
-                    "tally": dict(b.final_tally),
+                    "world_state": dict(b.records),
                 }
                 for b in f.branch_outcomes
             ],
@@ -104,26 +103,41 @@ class TraceContext:
 
     def world_manifest(self) -> dict[str, Any]:
         m = self.compiled.manifest
+        spec = self.compiled.spec
         return {
             "integrity_verdict": m.integrity_verdict.value,
-            "expected_voting_seats": m.expected_voting_seats,
-            "represented_voting_seats": m.represented_voting_seats,
+            "expected_participants": m.expected_participants,
+            "represented_participants": m.represented_participants,
             "verified_roles": [list(x) for x in m.verified_roles],
             "verified_authorities": [[a, list(p)] for a, p in m.verified_authorities],
             "verified_rules": list(m.verified_rules),
-            "verified_previous_actions": list(m.verified_previous_actions),
-            "verified_memberships": [[i, list(ms)] for i, ms in m.verified_memberships],
             "missing_required_facts": list(m.missing_required_facts),
             "unresolved_conflicts": list(m.unresolved_conflicts),
             "evidence_coverage": m.evidence_coverage,
-            "causal_graph": {
-                "nodes": list(self.compiled.causal_graph.nodes),
-                "edges": [
-                    {"cause": e.cause, "effect": e.effect, "mechanism": e.mechanism}
-                    for e in self.compiled.causal_graph.edges
-                ],
+            "compiled_actions": [
+                {
+                    "action_id": a.action_id,
+                    "meaning": a.meaning,
+                    "required_authority": list(a.required_authority),
+                    "effects": [e.op for e in a.effects],
+                }
+                for a in spec.actions
+            ],
+            "process_graph": [
+                {
+                    "node_id": n.node_id,
+                    "stage": n.stage,
+                    "participants": list(n.participants),
+                    "action_ids": list(n.action_ids),
+                    "allow_novel": n.allow_novel,
+                }
+                for n in spec.process.nodes
+            ],
+            "terminal": {
+                "yes_when": _expr_repr(spec.terminal.yes_when),
+                "unresolved_when": _expr_repr(spec.terminal.unresolved_when),
+                "description": spec.terminal.description,
             },
-            "protocol": list(self.compiled.protocol.kinds()),
             "uncertainty": [
                 {
                     "variable": u.variable_id,
@@ -160,7 +174,6 @@ class TraceContext:
         ]
 
     def llm_call_lines(self) -> list[str]:
-        # We record real prompts/outputs only; no fabricated chain-of-thought.
         lines = []
         for r in self._gateway_calls():
             lines.append(
@@ -188,8 +201,9 @@ class TraceContext:
                     "stage": d.stage,
                     "retrieved_memory_ids": d.retrieved_memory_ids,
                     "local_view": d.decision_context,
-                    "intent": d.intent,
-                    "validation": d.validation,
+                    "choice": d.choice,
+                    "status": d.status,
+                    "reason": d.reason,
                     "applied_event_ids": d.event_ids,
                     "prompt_hash": d.prompt_hash,
                     "model": d.model,
@@ -232,6 +246,7 @@ class TraceContext:
     def render_report(self, forecast_hash: str) -> str:
         f = self.forecast
         m = self.compiled.manifest
+        spec = self.compiled.spec
         lines: list[str] = []
         add = lines.append
 
@@ -245,16 +260,11 @@ class TraceContext:
 
         add("## 1. Resolution contract")
         add(
-            f"- decision body: {f.contract.decision_body}\n"
             f"- subject entity: {f.contract.subject_entity}\n"
             f"- resolution units: {f.contract.resolution_units}\n"
-            f"- outcome space: {list(f.contract.outcome_space)}\n"
-            f"- target: {f.contract.target_outcome}\n"
-            f"- terminal predicate: {f.contract.terminal_predicate.yes_condition} "
-            f"for option {f.contract.terminal_predicate.target_option!r}\n"
-            f"- decision rule: {f.contract.decision_rule.kind} "
-            f"{f.contract.decision_rule.threshold}/{f.contract.decision_rule.total_seats}\n"
-            f"- expected voting seats: {f.contract.expected_voting_seats}\n"
+            f"- target (YES condition): {f.contract.target_outcome}\n"
+            f"- declarative terminal: {spec.terminal.description or _expr_repr(spec.terminal.yes_when)}\n"
+            f"- expected participants: {f.contract.expected_participants}\n"
         )
 
         add("## 2-4. Evidence, contradictions, lineage")
@@ -266,52 +276,52 @@ class TraceContext:
             f"- research plan (backward): {' '.join(self.bundle.research_plan)}\n"
         )
 
-        add("## 5. Verified roster and voting rule")
+        add("## 5. Verified entities, roles and capabilities")
         for aid, role in m.verified_roles:
-            voting = aid in self.compiled.base_world.voting_actor_ids()
-            add(f"- {aid} — {role}{' (voting seat)' if voting else ''}")
+            auth = dict(m.verified_authorities).get(aid, ())
+            add(f"- {aid} — {role} [authority: {', '.join(auth) or 'none'}]")
         add(
-            f"\n- verified rule: {', '.join(m.verified_rules)}  \n"
-            f"- expected seats: {m.expected_voting_seats}, represented: "
-            f"{m.represented_voting_seats}, verdict: {m.integrity_verdict.value}\n"
+            f"\n- expected participants: {m.expected_participants}, represented: "
+            f"{m.represented_participants}, verdict: {m.integrity_verdict.value}\n"
         )
 
-        add("## 6. Causal graph")
-        for e in self.compiled.causal_graph.edges:
-            add(f"- {e.cause} --{e.mechanism}--> {e.effect}")
+        add("## 6. Compiled actions (scenario-specific, mapped to universal effects)")
+        for a in spec.actions:
+            add(
+                f"- **{a.action_id}**: {a.meaning} -> effects [{', '.join(e.op for e in a.effects)}]"
+            )
         add("")
 
-        add("## 7. External uncertain events and branch weights")
+        add("## 7. Compiled process graph")
+        add("- " + " -> ".join(f"{n.node_id}({n.stage})" for n in spec.process.nodes) + "\n")
+
+        add("## 8. External uncertain events and branch weights")
         for u in self.compiled.uncertainty_variables:
             add(f"- **{u.variable_id}** ({u.why_unknown}); reversal-capable={u.reversal_capable}")
             for o in u.outcomes:
                 add(f"    - {o.value}: weight {o.weight.value} [{o.weight.provenance.value}]")
         add("")
 
-        add("## 10. Protocol graph")
-        add(f"- {' -> '.join(self.compiled.protocol.kinds())}\n")
-
-        add("## 11-20. Actor decisions (local view -> intent -> events)")
+        add("## 9. Actor decisions (local view -> action choice -> events)")
         for d in self.run_result.actor_decisions:
-            intent = d.intent
+            c = d.choice
             add(
-                f"- [{d.branch_id}] {d.actor_id} @ {d.stage}: intent={intent['kind']} "
-                f"{intent['payload']} — {intent['rationale']}"
+                f"- [{d.branch_id}] {d.actor_id} @ {d.stage}: {c['mode']} "
+                f"{c.get('action_id') or c.get('novel_description')} -> {d.status} ({d.reason})"
             )
-            add(f"    retrieved memories: {d.retrieved_memory_ids}")
-            add(f"    referenced observations: {intent['referenced_observation_ids']}")
         add("")
 
-        add("## 19-23. Branches, votes, deterministic tally, outcomes")
+        add("## 10. Branches, decisive world state, terminal outcomes")
         for b in f.branch_outcomes:
+            state = ", ".join(f"{k}={v}" for k, v in b.records[:8])
             add(
                 f"- **{b.branch_id}** (weight {b.weight:.4f}) conditions={dict(b.key_conditions)}: "
-                f"votes={dict(b.votes)} tally={dict(b.final_tally)} -> "
+                f"[{state}] -> "
                 f"{b.outcome if b.resolved else 'UNRESOLVED: ' + (b.unresolved_reason or '')}"
             )
         add("")
 
-        add("## 24. Aggregate calculation")
+        add("## 11. Aggregate calculation")
         add(
             f"- resolved YES mass: {f.resolved_yes_mass:.4f}\n"
             f"- resolved NO mass: {f.resolved_no_mass:.4f}\n"
@@ -323,11 +333,8 @@ class TraceContext:
             f"- probability source: {f.probability_source}\n"
         )
 
-        add("## 25. Model-call count and token use")
+        add("## 12. Model-call count and token use")
         add(f"- model: {self.model_id}\n- calls: {f.model_call_count}\n- tokens: {f.token_usage}\n")
-
-        add("## 26. Why the forecast sits where it does")
-        add(_explanation(self))
 
         if f.diagnostics:
             add("\n## Diagnostic comparator (NOT part of the forecast)")
@@ -345,20 +352,15 @@ class TraceContext:
         return "\n".join(lines) + "\n"
 
 
+def _expr_repr(expr: Any) -> str:
+    from .worldspec import Expr
+
+    if not isinstance(expr, Expr):
+        return repr(expr)
+    if expr.op == "const":
+        return repr(expr.args[0] if expr.args else None)
+    return f"{expr.op}(" + ", ".join(_expr_repr(a) for a in expr.args) + ")"
+
+
 def _fmt(x: float | None) -> str:
     return "no point estimate (zero resolved mass)" if x is None else f"{x:.4f}"
-
-
-def _explanation(ctx: TraceContext) -> str:
-    f = ctx.forecast
-    guidance = ctx.compiled.frame.guidance_option
-    n_yes = sum(1 for b in f.branch_outcomes if b.resolved and b.outcome == "YES")
-    n_total = sum(1 for b in f.branch_outcomes if b.resolved)
-    return (
-        f"The initial common position was {guidance!r}. In {n_yes} of {n_total} resolved "
-        f"branches every seat's independently-reasoned final vote coincided with the "
-        f"target predicate; in the rest, an uncertain future signal crossed a member's "
-        f"reaction threshold and moved a vote, breaking the target. The probability is the "
-        f"weighted share of branches whose actual simulated votes met the predicate — not a "
-        f"prior and not a separate institution model."
-    )

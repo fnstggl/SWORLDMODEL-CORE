@@ -1,689 +1,749 @@
 {
-  "question_key": "banxico_2026_06_25",
-  "reality": {
-    "decision_body": "Banco de México Governing Board",
-    "subject_entity": "Banco de México overnight interbank target rate",
-    "resolution_units": "unanimity of the five-seat Governing Board vote (5-0)",
-    "institution_id": "banxico_governing_board",
-    "institution_name": "Banco de México Governing Board",
-    "decision_rule": {
-      "kind": "majority",
-      "total_seats": 5,
-      "threshold": 3,
-      "evidence_claim_ids": [
-        "c_rule_majority"
-      ]
-    },
-    "expected_voting_seats": 5,
-    "target_option": "hold",
-    "terminal": {
-      "mechanism": "committee_vote",
-      "yes_condition": "unanimous_for_option",
-      "target_option": "hold",
-      "evidence_claim_ids": [
-        "c_rule_majority"
-      ]
-    },
-    "horizon": "2026-06-25T13:00:00-06:00",
-    "authoritative_sources": [
-      "Banco de México Governing Board roster",
-      "Banco de México May 7 2026 monetary policy statement",
-      "Banco de México 2026 monetary policy calendar"
+ "question_key": "banxico_2026_06_25",
+ "reality": {
+  "as_of": "2026-05-14T23:59:59-06:00",
+  "horizon": "2026-06-25T13:00:00-06:00",
+  "subject_entity": "Banco de M\u00e9xico overnight interbank target rate",
+  "resolution_units": "unanimity of the five-seat Governing Board vote (5-0)",
+  "target_outcome": "a unanimous 5-0 vote to hold the target rate at 6.50%",
+  "expected_participants": 5,
+  "authoritative_sources": [
+   "Banco de M\u00e9xico Governing Board roster",
+   "Banco de M\u00e9xico May 7 2026 monetary policy statement",
+   "Banco de M\u00e9xico 2026 monetary policy calendar"
+  ]
+ },
+ "world_spec": {
+  "title": "Banxico Governing Board \u2014 25 June 2026 decision",
+  "subject_entity": "Banco de M\u00e9xico overnight interbank target rate",
+  "resolution_units": "unanimity of the five-seat Governing Board vote (5-0)",
+  "entities": [
+   {
+    "entity_id": "victoria_rodriguez_ceja",
+    "name": "Victoria Rodriguez Ceja",
+    "kind": "person",
+    "is_actor": true,
+    "role": "Governing Board member",
+    "authority": [
+     "decide"
     ],
-    "members": [
-      {
-        "actor_id": "victoria_rodriguez_ceja",
-        "name": "Victoria Rodriguez Ceja",
-        "role": "Governor",
-        "is_voting_seat": true,
-        "vote_power": 1,
-        "prior_action": "cut",
-        "authority": [
-          "vote",
-          "introduce_proposal",
-          "chair"
-        ],
-        "stable_identity": {
-          "seat": "governor"
-        },
-        "evidence_claim_ids": [
-          "c_roster_victoria",
-          "c_may7_vote_victoria"
-        ],
-        "memory_seeds": [
-          {
-            "content": "On 7 May 2026 I voted with the majority to cut the target rate to 6.50% and the Board communicated that the easing cycle is ending.",
-            "kind": "episodic",
-            "importance": 0.85,
-            "valid_time": "2026-05-07T13:00:00-06:00",
-            "evidence_claim_ids": [
-              "c_may7_vote_victoria",
-              "c_may7_guidance"
-            ]
-          }
-        ]
-      },
-      {
-        "actor_id": "jonathan_heath",
-        "name": "Jonathan Heath",
-        "role": "Deputy Governor",
-        "is_voting_seat": true,
-        "vote_power": 1,
-        "prior_action": "hold",
-        "authority": [
-          "vote"
-        ],
-        "stable_identity": {
-          "seat": "deputy"
-        },
-        "evidence_claim_ids": [
-          "c_roster_heath",
-          "c_may7_vote_heath"
-        ],
-        "memory_seeds": [
-          {
-            "content": "On 7 May 2026 I preferred to hold rather than cut further, citing inflation risks.",
-            "kind": "episodic",
-            "importance": 0.8,
-            "valid_time": "2026-05-07T13:00:00-06:00",
-            "evidence_claim_ids": [
-              "c_may7_vote_heath"
-            ]
-          }
-        ]
-      },
-      {
-        "actor_id": "galia_borja_gomez",
-        "name": "Galia Borja Gomez",
-        "role": "Deputy Governor",
-        "is_voting_seat": true,
-        "vote_power": 1,
-        "prior_action": "hold",
-        "authority": [
-          "vote"
-        ],
-        "stable_identity": {
-          "seat": "deputy"
-        },
-        "evidence_claim_ids": [
-          "c_roster_borja",
-          "c_may7_vote_borja"
-        ],
-        "memory_seeds": [
-          {
-            "content": "On 7 May 2026 I preferred to hold rather than cut further.",
-            "kind": "episodic",
-            "importance": 0.8,
-            "valid_time": "2026-05-07T13:00:00-06:00",
-            "evidence_claim_ids": [
-              "c_may7_vote_borja"
-            ]
-          }
-        ]
-      },
-      {
-        "actor_id": "omar_mejia_castelazo",
-        "name": "Omar Mejia Castelazo",
-        "role": "Deputy Governor",
-        "is_voting_seat": true,
-        "vote_power": 1,
-        "prior_action": "cut",
-        "authority": [
-          "vote"
-        ],
-        "stable_identity": {
-          "seat": "deputy"
-        },
-        "evidence_claim_ids": [
-          "c_roster_mejia",
-          "c_may7_vote_mejia"
-        ],
-        "memory_seeds": [
-          {
-            "content": "On 7 May 2026 I voted to cut the rate to 6.50%.",
-            "kind": "episodic",
-            "importance": 0.8,
-            "valid_time": "2026-05-07T13:00:00-06:00",
-            "evidence_claim_ids": [
-              "c_may7_vote_mejia"
-            ]
-          }
-        ]
-      },
-      {
-        "actor_id": "jose_gabriel_cuadra_garcia",
-        "name": "Jose Gabriel Cuadra Garcia",
-        "role": "Deputy Governor",
-        "is_voting_seat": true,
-        "vote_power": 1,
-        "prior_action": "cut",
-        "authority": [
-          "vote"
-        ],
-        "stable_identity": {
-          "seat": "deputy"
-        },
-        "evidence_claim_ids": [
-          "c_roster_cuadra",
-          "c_may7_vote_cuadra"
-        ],
-        "memory_seeds": [
-          {
-            "content": "On 7 May 2026 I voted to cut the rate to 6.50%.",
-            "kind": "episodic",
-            "importance": 0.8,
-            "valid_time": "2026-05-07T13:00:00-06:00",
-            "evidence_claim_ids": [
-              "c_may7_vote_cuadra"
-            ]
-          }
-        ]
-      }
-    ],
-    "as_of": "2026-05-14T23:59:59-06:00"
-  },
-  "frame": {
-    "options": [
-      "cut",
-      "hold",
-      "hike"
-    ],
-    "signals": [
-      {
-        "name": "inflation_surprise",
-        "baseline": 0.0,
-        "description": "Deviation of incoming inflation prints from the Board's expected path (positive = upside surprise).",
-        "evidence_claim_ids": [
-          "c_infl_apr"
-        ]
-      },
-      {
-        "name": "growth_weakness",
-        "baseline": 0.0,
-        "description": "Severity of downside surprises in incoming activity data (positive = weaker growth).",
-        "evidence_claim_ids": [
-          "c_activity"
-        ]
-      }
-    ],
-    "reaction_rules": [
-      {
-        "trigger_signal": "inflation_surprise",
-        "direction": "above",
-        "threshold": 0.5,
-        "moves_to_option": "hike",
-        "rationale": "A large upside inflation surprise would push a rate-setter toward tightening bias, away from a hold.",
-        "evidence_claim_ids": [
-          "c_infl_apr",
-          "c_may7_guidance"
-        ]
-      },
-      {
-        "trigger_signal": "growth_weakness",
-        "direction": "above",
-        "threshold": 0.5,
-        "moves_to_option": "cut",
-        "rationale": "A material growth downside would push a rate-setter toward one more cut, away from a hold.",
-        "evidence_claim_ids": [
-          "c_activity"
-        ]
-      }
-    ],
-    "guidance_option": "hold",
-    "guidance_text": "The Board signaled the easing cycle is ending and that maintaining the target rate would be appropriate going forward.",
-    "guidance_evidence_ids": [
-      "c_may7_guidance"
-    ],
-    "acceptance_tolerance": 0.5,
-    "uncertainty": [
-      {
-        "signal": "inflation_surprise",
-        "why_unknown": "May and June inflation prints are not yet published at the 2026-05-14 cutoff.",
-        "reversal_capable": true,
-        "constraining_evidence_ids": [
-          "c_infl_apr"
-        ],
-        "outcomes": [
-          {
-            "value": "in_line",
-            "weight": 0.8,
-            "provenance": "symmetric_ignorance_assumption",
-            "source_detail": "base case: prints broadly consistent with the expected path after an explicit end-of-cycle signal",
-            "signal_effects": [
-              [
-                "inflation_surprise",
-                0.0
-              ]
-            ],
-            "description": "no threshold-crossing inflation surprise"
-          },
-          {
-            "value": "upside",
-            "weight": 0.2,
-            "provenance": "explicit_model_distribution",
-            "source_detail": "tail: a large upside surprise given still-sticky services inflation",
-            "signal_effects": [
-              [
-                "inflation_surprise",
-                0.6
-              ]
-            ],
-            "description": "upside inflation surprise large enough to shift the board toward tightening bias"
-          }
-        ]
-      },
-      {
-        "signal": "growth_weakness",
-        "why_unknown": "Activity indicators covering May-June are not yet published at the cutoff.",
-        "reversal_capable": true,
-        "constraining_evidence_ids": [
-          "c_activity"
-        ],
-        "outcomes": [
-          {
-            "value": "in_line",
-            "weight": 0.72,
-            "provenance": "symmetric_ignorance_assumption",
-            "source_detail": "base case: activity broadly as expected",
-            "signal_effects": [
-              [
-                "growth_weakness",
-                0.0
-              ]
-            ],
-            "description": "no material growth downside"
-          },
-          {
-            "value": "moderate",
-            "weight": 0.2,
-            "provenance": "explicit_model_distribution",
-            "source_detail": "a moderate downside surprise",
-            "signal_effects": [
-              [
-                "growth_weakness",
-                0.4
-              ]
-            ],
-            "description": "moderate growth downside — enough to tempt the prior cut coalition, not the holders"
-          },
-          {
-            "value": "severe",
-            "weight": 0.08,
-            "provenance": "explicit_model_distribution",
-            "source_detail": "a severe downside surprise",
-            "signal_effects": [
-              [
-                "growth_weakness",
-                0.6
-              ]
-            ],
-            "description": "severe growth downside crossing every seat's easing threshold"
-          }
-        ]
-      }
+    "evidence_claim_ids": [
+     "c_roster_victoria",
+     "c_may7_vote_victoria"
     ]
+   },
+   {
+    "entity_id": "jonathan_heath",
+    "name": "Jonathan Heath",
+    "kind": "person",
+    "is_actor": true,
+    "role": "Governing Board member",
+    "authority": [
+     "decide"
+    ],
+    "evidence_claim_ids": [
+     "c_roster_heath",
+     "c_may7_vote_heath"
+    ]
+   },
+   {
+    "entity_id": "galia_borja_gomez",
+    "name": "Galia Borja Gomez",
+    "kind": "person",
+    "is_actor": true,
+    "role": "Governing Board member",
+    "authority": [
+     "decide"
+    ],
+    "evidence_claim_ids": [
+     "c_roster_borja",
+     "c_may7_vote_borja"
+    ]
+   },
+   {
+    "entity_id": "omar_mejia_castelazo",
+    "name": "Omar Mejia Castelazo",
+    "kind": "person",
+    "is_actor": true,
+    "role": "Governing Board member",
+    "authority": [
+     "decide"
+    ],
+    "evidence_claim_ids": [
+     "c_roster_mejia",
+     "c_may7_vote_mejia"
+    ]
+   },
+   {
+    "entity_id": "jose_gabriel_cuadra_garcia",
+    "name": "Jose Gabriel Cuadra Garcia",
+    "kind": "person",
+    "is_actor": true,
+    "role": "Governing Board member",
+    "authority": [
+     "decide"
+    ],
+    "evidence_claim_ids": [
+     "c_roster_cuadra",
+     "c_may7_vote_cuadra"
+    ]
+   }
+  ],
+  "actors": [
+   {
+    "entity_id": "victoria_rodriguez_ceja",
+    "reasoning": "May 7 position was cut; June common stance is hold",
+    "memory_seeds": [
+     {
+      "content": "My 7 May 2026 vote was to cut.",
+      "kind": "episodic",
+      "importance": 0.8,
+      "evidence_claim_ids": [
+       "c_roster_victoria",
+       "c_may7_vote_victoria"
+      ]
+     }
+    ],
+    "policy": {
+     "default_action_id": "record_position",
+     "default_params": {
+      "position": "hold"
+     },
+     "rules": [
+      {
+       "when_field": "inflation_surprise",
+       "op": "below",
+       "value": -0.5,
+       "action_id": "record_position",
+       "params": {
+        "position": "cut"
+       }
+      }
+     ]
+    }
+   },
+   {
+    "entity_id": "jonathan_heath",
+    "reasoning": "May 7 position was hold; June common stance is hold",
+    "memory_seeds": [
+     {
+      "content": "My 7 May 2026 vote was to hold.",
+      "kind": "episodic",
+      "importance": 0.8,
+      "evidence_claim_ids": [
+       "c_roster_heath",
+       "c_may7_vote_heath"
+      ]
+     }
+    ],
+    "policy": {
+     "default_action_id": "record_position",
+     "default_params": {
+      "position": "hold"
+     },
+     "rules": []
+    }
+   },
+   {
+    "entity_id": "galia_borja_gomez",
+    "reasoning": "May 7 position was hold; June common stance is hold",
+    "memory_seeds": [
+     {
+      "content": "My 7 May 2026 vote was to hold.",
+      "kind": "episodic",
+      "importance": 0.8,
+      "evidence_claim_ids": [
+       "c_roster_borja",
+       "c_may7_vote_borja"
+      ]
+     }
+    ],
+    "policy": {
+     "default_action_id": "record_position",
+     "default_params": {
+      "position": "hold"
+     },
+     "rules": []
+    }
+   },
+   {
+    "entity_id": "omar_mejia_castelazo",
+    "reasoning": "May 7 position was cut; June common stance is hold",
+    "memory_seeds": [
+     {
+      "content": "My 7 May 2026 vote was to cut.",
+      "kind": "episodic",
+      "importance": 0.8,
+      "evidence_claim_ids": [
+       "c_roster_mejia",
+       "c_may7_vote_mejia"
+      ]
+     }
+    ],
+    "policy": {
+     "default_action_id": "record_position",
+     "default_params": {
+      "position": "hold"
+     },
+     "rules": [
+      {
+       "when_field": "inflation_surprise",
+       "op": "below",
+       "value": -0.5,
+       "action_id": "record_position",
+       "params": {
+        "position": "cut"
+       }
+      }
+     ]
+    }
+   },
+   {
+    "entity_id": "jose_gabriel_cuadra_garcia",
+    "reasoning": "May 7 position was cut; June common stance is hold",
+    "memory_seeds": [
+     {
+      "content": "My 7 May 2026 vote was to cut.",
+      "kind": "episodic",
+      "importance": 0.8,
+      "evidence_claim_ids": [
+       "c_roster_cuadra",
+       "c_may7_vote_cuadra"
+      ]
+     }
+    ],
+    "policy": {
+     "default_action_id": "record_position",
+     "default_params": {
+      "position": "hold"
+     },
+     "rules": [
+      {
+       "when_field": "inflation_surprise",
+       "op": "below",
+       "value": -0.5,
+       "action_id": "record_position",
+       "params": {
+        "position": "cut"
+       }
+      }
+     ]
+    }
+   }
+  ],
+  "fields": [
+   {
+    "field_id": "inflation_surprise",
+    "value_type": "number",
+    "initial": 0.0
+   }
+  ],
+  "resources": [],
+  "channels": [],
+  "documents": [],
+  "actions": [
+   {
+    "action_id": "record_position",
+    "meaning": "record the member's policy-rate vote",
+    "eligible_actors": [
+     "*"
+    ],
+    "required_authority": [
+     "decide"
+    ],
+    "stages": [
+     "decision"
+    ],
+    "parameters": [
+     {
+      "name": "position",
+      "type": "option",
+      "choices": [
+       "cut",
+       "hold",
+       "hike"
+      ]
+     }
+    ],
+    "visibility": "private",
+    "effects": [
+     {
+      "op": "append_record",
+      "collection": "votes",
+      "key": "$actor",
+      "value": "$param.position",
+      "visibility": "private"
+     }
+    ],
+    "evidence_claim_ids": [
+     "c_may7_guidance"
+    ]
+   }
+  ],
+  "process": {
+   "nodes": [
+    {
+     "node_id": "briefing",
+     "stage": "brief",
+     "advance_seconds": 3600,
+     "effects": [
+      {
+       "op": "deliver_information",
+       "text": "The 25 June policy decision is open.",
+       "visibility": "public"
+      }
+     ]
+    },
+    {
+     "node_id": "decision",
+     "stage": "decision",
+     "participants": [
+      "*"
+     ],
+     "action_ids": [
+      "record_position"
+     ],
+     "rounds": 1
+    }
+   ]
   },
-  "world_facts": [
-    {
-      "text": "The current overnight interbank target rate is 6.50%, set at the 7 May 2026 meeting.",
-      "evidence_claim_ids": [
-        "c_may7_decision"
-      ],
-      "available_at": "2026-05-07T13:00:00-06:00",
-      "epistemic_type": "observation"
-    },
-    {
-      "text": "The 7 May 2026 decision was a 3-2 cut: Rodriguez, Mejia and Cuadra formed the cut coalition; Borja and Heath preferred to hold.",
-      "evidence_claim_ids": [
-        "c_may7_vote_victoria",
-        "c_may7_vote_mejia",
-        "c_may7_vote_cuadra",
-        "c_may7_vote_borja",
-        "c_may7_vote_heath"
-      ],
-      "available_at": "2026-05-07T13:00:00-06:00",
-      "epistemic_type": "observation"
-    },
-    {
-      "text": "The 7 May 2026 statement signaled that the easing cycle is ending and that maintaining the rate would be appropriate going forward.",
-      "evidence_claim_ids": [
-        "c_may7_guidance"
-      ],
-      "available_at": "2026-05-07T13:00:00-06:00",
-      "epistemic_type": "observation"
-    },
-    {
-      "text": "The next monetary policy decision is scheduled for 25 June 2026.",
-      "evidence_claim_ids": [
-        "c_next_date"
-      ],
-      "available_at": "2026-01-10T09:00:00-06:00",
-      "epistemic_type": "observation"
-    }
-  ],
-  "required_reality_facts": [
-    {
-      "key": "roster",
-      "description": "The five-seat Governing Board roster at the cutoff.",
-      "evidence_claim_ids": [
-        "c_roster_victoria",
-        "c_roster_heath",
-        "c_roster_borja",
-        "c_roster_mejia",
-        "c_roster_cuadra"
+  "terminal": {
+   "yes_when": {
+    "op": "equals",
+    "args": [
+     {
+      "op": "count",
+      "args": [
+       "votes",
+       {
+        "op": "equals",
+        "args": [
+         {
+          "op": "item",
+          "args": [
+           "value"
+          ]
+         },
+         "hold"
+        ]
+       }
       ]
-    },
-    {
-      "key": "prior_votes",
-      "description": "The individual May 7 2026 votes.",
-      "evidence_claim_ids": [
-        "c_may7_vote_victoria",
-        "c_may7_vote_heath",
-        "c_may7_vote_borja",
-        "c_may7_vote_mejia",
-        "c_may7_vote_cuadra"
+     },
+     5
+    ]
+   },
+   "unresolved_when": {
+    "op": "less_than",
+    "args": [
+     {
+      "op": "count",
+      "args": [
+       "votes"
       ]
-    },
-    {
-      "key": "decision_rule",
-      "description": "The Board decides by majority of five seats.",
-      "evidence_claim_ids": [
-        "c_rule_majority"
-      ]
-    },
-    {
-      "key": "current_rate",
-      "description": "The policy rate at the cutoff.",
-      "evidence_claim_ids": [
-        "c_may7_decision"
-      ]
-    },
-    {
-      "key": "guidance",
-      "description": "The forward guidance from the May 7 statement.",
-      "evidence_claim_ids": [
-        "c_may7_guidance"
-      ]
-    },
-    {
-      "key": "terminal_date",
-      "description": "The scheduled June 25 2026 decision date.",
-      "evidence_claim_ids": [
-        "c_next_date"
-      ]
-    }
-  ],
-  "reference_class": null,
-  "sources": [
-    {
-      "source_id": "banxico_board_roster",
-      "url": "https://www.banxico.org.mx/about/governing-board",
-      "title": "Banco de Mexico — Governing Board",
-      "source_type": "official_institutional",
-      "authority_level": 4,
-      "published_at": "2026-01-15T09:00:00-06:00",
-      "available_at": "2026-01-15T09:00:00-06:00",
-      "lineage_event_id": "banxico_board_roster_2026",
-      "claims": [
-        {
-          "id": "c_roster_victoria",
-          "proposition": "office: Victoria Rodriguez Ceja is Governor of Banco de Mexico",
-          "normalized_value": "governor",
-          "entities": [
-            "Victoria Rodriguez Ceja",
-            "Banco de Mexico"
-          ],
-          "epistemic_type": "observation",
-          "confidence": 0.99,
-          "supporting_excerpt": "Governor: Victoria Rodriguez Ceja"
-        },
-        {
-          "id": "c_roster_heath",
-          "proposition": "office: Jonathan Heath is a Deputy Governor of Banco de Mexico",
-          "normalized_value": "deputy_governor",
-          "entities": [
-            "Jonathan Heath",
-            "Banco de Mexico"
-          ],
-          "epistemic_type": "observation",
-          "confidence": 0.99,
-          "supporting_excerpt": "Deputy Governor: Jonathan Heath"
-        },
-        {
-          "id": "c_roster_borja",
-          "proposition": "office: Galia Borja Gomez is a Deputy Governor of Banco de Mexico",
-          "normalized_value": "deputy_governor",
-          "entities": [
-            "Galia Borja Gomez",
-            "Banco de Mexico"
-          ],
-          "epistemic_type": "observation",
-          "confidence": 0.99,
-          "supporting_excerpt": "Deputy Governor: Galia Borja Gomez"
-        },
-        {
-          "id": "c_roster_mejia",
-          "proposition": "office: Omar Mejia Castelazo is a Deputy Governor of Banco de Mexico",
-          "normalized_value": "deputy_governor",
-          "entities": [
-            "Omar Mejia Castelazo",
-            "Banco de Mexico"
-          ],
-          "epistemic_type": "observation",
-          "confidence": 0.99,
-          "supporting_excerpt": "Deputy Governor: Omar Mejia Castelazo"
-        },
-        {
-          "id": "c_roster_cuadra",
-          "proposition": "office: Jose Gabriel Cuadra Garcia is a Deputy Governor of Banco de Mexico",
-          "normalized_value": "deputy_governor",
-          "entities": [
-            "Jose Gabriel Cuadra Garcia",
-            "Banco de Mexico"
-          ],
-          "epistemic_type": "observation",
-          "confidence": 0.99,
-          "supporting_excerpt": "Deputy Governor: Jose Gabriel Cuadra Garcia"
-        },
-        {
-          "id": "c_rule_majority",
-          "proposition": "rule: the Governing Board decides monetary policy by majority of its five seats",
-          "normalized_value": "majority_5",
-          "entities": [
-            "Banco de Mexico"
-          ],
-          "epistemic_type": "observation",
-          "confidence": 0.98,
-          "supporting_excerpt": "Decisions are taken by majority of the five-member Board."
-        }
-      ]
-    },
-    {
-      "source_id": "banxico_may7_statement",
-      "url": "https://www.banxico.org.mx/press/announcements/2026-05-07",
-      "title": "Banco de Mexico — Monetary Policy Statement, 7 May 2026",
-      "source_type": "primary_record",
-      "authority_level": 4,
-      "published_at": "2026-05-07T13:00:00-06:00",
-      "available_at": "2026-05-07T13:00:00-06:00",
-      "lineage_event_id": "banxico_2026_05_07_decision",
-      "claims": [
-        {
-          "id": "c_may7_decision",
-          "proposition": "decision: the Board cut the target rate to 6.50% on 7 May 2026",
-          "normalized_value": "6.50",
-          "entities": [
-            "Banco de Mexico"
-          ],
-          "epistemic_type": "observation",
-          "confidence": 0.99,
-          "valid_from": "2026-05-07T13:00:00-06:00",
-          "supporting_excerpt": "The Board decided to lower the target for the overnight interbank interest rate to 6.50%."
-        },
-        {
-          "id": "c_may7_vote_victoria",
-          "proposition": "vote_2026_05_07: Victoria Rodriguez Ceja voted to cut",
-          "normalized_value": "cut",
-          "entities": [
-            "Victoria Rodriguez Ceja"
-          ],
-          "epistemic_type": "observation",
-          "confidence": 0.97,
-          "supporting_excerpt": "voted in favor of the reduction"
-        },
-        {
-          "id": "c_may7_vote_mejia",
-          "proposition": "vote_2026_05_07: Omar Mejia Castelazo voted to cut",
-          "normalized_value": "cut",
-          "entities": [
-            "Omar Mejia Castelazo"
-          ],
-          "epistemic_type": "observation",
-          "confidence": 0.97,
-          "supporting_excerpt": "voted in favor of the reduction"
-        },
-        {
-          "id": "c_may7_vote_cuadra",
-          "proposition": "vote_2026_05_07: Jose Gabriel Cuadra Garcia voted to cut",
-          "normalized_value": "cut",
-          "entities": [
-            "Jose Gabriel Cuadra Garcia"
-          ],
-          "epistemic_type": "observation",
-          "confidence": 0.97,
-          "supporting_excerpt": "voted in favor of the reduction"
-        },
-        {
-          "id": "c_may7_vote_borja",
-          "proposition": "vote_2026_05_07: Galia Borja Gomez preferred to hold",
-          "normalized_value": "hold",
-          "entities": [
-            "Galia Borja Gomez"
-          ],
-          "epistemic_type": "observation",
-          "confidence": 0.95,
-          "supporting_excerpt": "voted to keep the rate unchanged"
-        },
-        {
-          "id": "c_may7_vote_heath",
-          "proposition": "vote_2026_05_07: Jonathan Heath preferred to hold",
-          "normalized_value": "hold",
-          "entities": [
-            "Jonathan Heath"
-          ],
-          "epistemic_type": "observation",
-          "confidence": 0.95,
-          "supporting_excerpt": "voted to keep the rate unchanged"
-        },
-        {
-          "id": "c_may7_guidance",
-          "proposition": "guidance: the statement signaled the easing cycle is ending and holding would be appropriate going forward",
-          "normalized_value": "easing_ending_hold_appropriate",
-          "entities": [
-            "Banco de Mexico"
-          ],
-          "epistemic_type": "observation",
-          "confidence": 0.9,
-          "supporting_excerpt": "The Board considers that the easing cycle is nearing its end and that maintaining the rate would be appropriate going forward."
-        }
-      ]
-    },
-    {
-      "source_id": "banxico_calendar",
-      "url": "https://www.banxico.org.mx/about/calendar-2026",
-      "title": "Banco de Mexico — 2026 Monetary Policy Calendar",
-      "source_type": "official_institutional",
-      "authority_level": 4,
-      "published_at": "2026-01-10T09:00:00-06:00",
-      "available_at": "2026-01-10T09:00:00-06:00",
-      "lineage_event_id": "banxico_calendar_2026",
-      "claims": [
-        {
-          "id": "c_next_date",
-          "proposition": "schedule: the next monetary policy decision is 25 June 2026",
-          "normalized_value": "2026-06-25",
-          "entities": [
-            "Banco de Mexico"
-          ],
-          "epistemic_type": "observation",
-          "confidence": 0.99,
-          "supporting_excerpt": "Monetary policy decision: June 25, 2026."
-        }
-      ]
-    },
-    {
-      "source_id": "inegi_cpi_apr2026",
-      "url": "https://www.inegi.org.mx/inpc/2026-04",
-      "title": "INEGI — Consumer Price Index, April 2026",
-      "source_type": "official_institutional",
-      "authority_level": 3,
-      "published_at": "2026-05-09T07:00:00-06:00",
-      "available_at": "2026-05-09T07:00:00-06:00",
-      "lineage_event_id": "inegi_cpi_apr2026",
-      "claims": [
-        {
-          "id": "c_infl_apr",
-          "proposition": "context: April 2026 headline inflation was broadly in line with the Board's expected disinflation path, with services inflation still sticky",
-          "normalized_value": "in_line_sticky_services",
-          "entities": [
-            "Mexico"
-          ],
-          "epistemic_type": "observation",
-          "confidence": 0.9,
-          "supporting_excerpt": "Annual headline inflation eased in April, though services remained elevated."
-        }
-      ]
-    },
-    {
-      "source_id": "inegi_igae",
-      "url": "https://www.inegi.org.mx/igae/2026-03",
-      "title": "INEGI — Global Economic Activity Indicator, March 2026",
-      "source_type": "official_institutional",
-      "authority_level": 3,
-      "published_at": "2026-05-12T07:00:00-06:00",
-      "available_at": "2026-05-12T07:00:00-06:00",
-      "lineage_event_id": "inegi_igae_mar2026",
-      "claims": [
-        {
-          "id": "c_activity",
-          "proposition": "context: economic activity was soft in early 2026, with growth near stagnation",
-          "normalized_value": "soft_near_stagnation",
-          "entities": [
-            "Mexico"
-          ],
-          "epistemic_type": "observation",
-          "confidence": 0.88,
-          "supporting_excerpt": "Economic activity showed little momentum, close to stagnation."
-        }
-      ]
-    },
-    {
-      "source_id": "banxico_2026_06_25_decision",
-      "url": "https://www.banxico.org.mx/press/announcements/2026-06-25",
-      "title": "Banco de Mexico — Monetary Policy Statement, 25 June 2026 (POST-CUTOFF)",
-      "source_type": "primary_record",
-      "authority_level": 4,
-      "published_at": "2026-06-25T13:00:00-06:00",
-      "available_at": "2026-06-25T13:00:00-06:00",
-      "lineage_event_id": "banxico_2026_06_25_decision",
-      "claims": [
-        {
-          "id": "c_june_decision_POSTCUTOFF",
-          "proposition": "decision: on 25 June 2026 the Board kept the target rate at 6.50%",
-          "normalized_value": "hold_6.50",
-          "entities": [
-            "Banco de Mexico"
-          ],
-          "epistemic_type": "observation",
-          "confidence": 0.99,
-          "supporting_excerpt": "The Board decided to keep the target rate unchanged at 6.50%."
-        }
-      ]
-    }
-  ],
-  "outcome": {
-    "resolved": "YES",
-    "description": "On 25 June 2026 the Board kept the target rate at 6.50% in a unanimous 5-0 decision (per the 25 June statement and 9 July minutes). Revealed only post-cutoff; used solely for evaluation.",
-    "evidence_source": "banxico_2026_06_25_decision"
+     },
+     5
+    ]
+   },
+   "description": "YES iff all five recorded votes equal hold (a unanimous 5-0 hold)"
   }
+ },
+ "uncertainties": [
+  {
+   "variable": "inflation_surprise",
+   "why_unknown": "the late-June inflation print relative to expectation is unknown",
+   "reversal_capable": true,
+   "constraining_evidence_ids": [
+    "c_may7_guidance"
+   ],
+   "outcomes": [
+    {
+     "value": "in_line",
+     "weight": 0.72,
+     "provenance": "calibrated_behavior_model",
+     "field_effects": [
+      [
+       "inflation_surprise",
+       0.0
+      ]
+     ],
+     "description": "inflation in line; board holds unanimously per guidance"
+    },
+    {
+     "value": "downside",
+     "weight": 0.28,
+     "provenance": "symmetric_ignorance_assumption",
+     "field_effects": [
+      [
+       "inflation_surprise",
+       -0.7
+      ]
+     ],
+     "description": "downside surprise revives the dovish cut coalition"
+    }
+   ]
+  }
+ ],
+ "world_facts": [
+  {
+   "text": "The current overnight interbank target rate is 6.50%, set at the 7 May 2026 meeting.",
+   "evidence_claim_ids": [
+    "c_may7_decision"
+   ],
+   "available_at": "2026-05-07T13:00:00-06:00",
+   "epistemic_type": "observation"
+  },
+  {
+   "text": "The 7 May 2026 decision was a 3-2 cut: Rodriguez, Mejia and Cuadra formed the cut coalition; Borja and Heath preferred to hold.",
+   "evidence_claim_ids": [
+    "c_may7_vote_victoria",
+    "c_may7_vote_mejia",
+    "c_may7_vote_cuadra",
+    "c_may7_vote_borja",
+    "c_may7_vote_heath"
+   ],
+   "available_at": "2026-05-07T13:00:00-06:00",
+   "epistemic_type": "observation"
+  },
+  {
+   "text": "The 7 May 2026 statement signaled that the easing cycle is ending and that maintaining the rate would be appropriate going forward.",
+   "evidence_claim_ids": [
+    "c_may7_guidance"
+   ],
+   "available_at": "2026-05-07T13:00:00-06:00",
+   "epistemic_type": "observation"
+  },
+  {
+   "text": "The next monetary policy decision is scheduled for 25 June 2026.",
+   "evidence_claim_ids": [
+    "c_next_date"
+   ],
+   "available_at": "2026-01-10T09:00:00-06:00",
+   "epistemic_type": "observation"
+  }
+ ],
+ "required_reality_facts": [
+  {
+   "key": "roster",
+   "description": "The five-seat Governing Board roster at the cutoff.",
+   "evidence_claim_ids": [
+    "c_roster_victoria",
+    "c_roster_heath",
+    "c_roster_borja",
+    "c_roster_mejia",
+    "c_roster_cuadra"
+   ]
+  },
+  {
+   "key": "prior_votes",
+   "description": "The individual May 7 2026 votes.",
+   "evidence_claim_ids": [
+    "c_may7_vote_victoria",
+    "c_may7_vote_heath",
+    "c_may7_vote_borja",
+    "c_may7_vote_mejia",
+    "c_may7_vote_cuadra"
+   ]
+  },
+  {
+   "key": "decision_rule",
+   "description": "The Board decides by majority of five seats.",
+   "evidence_claim_ids": [
+    "c_rule_majority"
+   ]
+  },
+  {
+   "key": "current_rate",
+   "description": "The policy rate at the cutoff.",
+   "evidence_claim_ids": [
+    "c_may7_decision"
+   ]
+  },
+  {
+   "key": "guidance",
+   "description": "The forward guidance from the May 7 statement.",
+   "evidence_claim_ids": [
+    "c_may7_guidance"
+   ]
+  },
+  {
+   "key": "terminal_date",
+   "description": "The scheduled June 25 2026 decision date.",
+   "evidence_claim_ids": [
+    "c_next_date"
+   ]
+  }
+ ],
+ "reference_class": null,
+ "sources": [
+  {
+   "source_id": "banxico_board_roster",
+   "url": "https://www.banxico.org.mx/about/governing-board",
+   "title": "Banco de Mexico \u2014 Governing Board",
+   "source_type": "official_institutional",
+   "authority_level": 4,
+   "published_at": "2026-01-15T09:00:00-06:00",
+   "available_at": "2026-01-15T09:00:00-06:00",
+   "lineage_event_id": "banxico_board_roster_2026",
+   "claims": [
+    {
+     "id": "c_roster_victoria",
+     "proposition": "office: Victoria Rodriguez Ceja is Governor of Banco de Mexico",
+     "normalized_value": "governor",
+     "entities": [
+      "Victoria Rodriguez Ceja",
+      "Banco de Mexico"
+     ],
+     "epistemic_type": "observation",
+     "confidence": 0.99,
+     "supporting_excerpt": "Governor: Victoria Rodriguez Ceja"
+    },
+    {
+     "id": "c_roster_heath",
+     "proposition": "office: Jonathan Heath is a Deputy Governor of Banco de Mexico",
+     "normalized_value": "deputy_governor",
+     "entities": [
+      "Jonathan Heath",
+      "Banco de Mexico"
+     ],
+     "epistemic_type": "observation",
+     "confidence": 0.99,
+     "supporting_excerpt": "Deputy Governor: Jonathan Heath"
+    },
+    {
+     "id": "c_roster_borja",
+     "proposition": "office: Galia Borja Gomez is a Deputy Governor of Banco de Mexico",
+     "normalized_value": "deputy_governor",
+     "entities": [
+      "Galia Borja Gomez",
+      "Banco de Mexico"
+     ],
+     "epistemic_type": "observation",
+     "confidence": 0.99,
+     "supporting_excerpt": "Deputy Governor: Galia Borja Gomez"
+    },
+    {
+     "id": "c_roster_mejia",
+     "proposition": "office: Omar Mejia Castelazo is a Deputy Governor of Banco de Mexico",
+     "normalized_value": "deputy_governor",
+     "entities": [
+      "Omar Mejia Castelazo",
+      "Banco de Mexico"
+     ],
+     "epistemic_type": "observation",
+     "confidence": 0.99,
+     "supporting_excerpt": "Deputy Governor: Omar Mejia Castelazo"
+    },
+    {
+     "id": "c_roster_cuadra",
+     "proposition": "office: Jose Gabriel Cuadra Garcia is a Deputy Governor of Banco de Mexico",
+     "normalized_value": "deputy_governor",
+     "entities": [
+      "Jose Gabriel Cuadra Garcia",
+      "Banco de Mexico"
+     ],
+     "epistemic_type": "observation",
+     "confidence": 0.99,
+     "supporting_excerpt": "Deputy Governor: Jose Gabriel Cuadra Garcia"
+    },
+    {
+     "id": "c_rule_majority",
+     "proposition": "rule: the Governing Board decides monetary policy by majority of its five seats",
+     "normalized_value": "majority_5",
+     "entities": [
+      "Banco de Mexico"
+     ],
+     "epistemic_type": "observation",
+     "confidence": 0.98,
+     "supporting_excerpt": "Decisions are taken by majority of the five-member Board."
+    }
+   ]
+  },
+  {
+   "source_id": "banxico_may7_statement",
+   "url": "https://www.banxico.org.mx/press/announcements/2026-05-07",
+   "title": "Banco de Mexico \u2014 Monetary Policy Statement, 7 May 2026",
+   "source_type": "primary_record",
+   "authority_level": 4,
+   "published_at": "2026-05-07T13:00:00-06:00",
+   "available_at": "2026-05-07T13:00:00-06:00",
+   "lineage_event_id": "banxico_2026_05_07_decision",
+   "claims": [
+    {
+     "id": "c_may7_decision",
+     "proposition": "decision: the Board cut the target rate to 6.50% on 7 May 2026",
+     "normalized_value": "6.50",
+     "entities": [
+      "Banco de Mexico"
+     ],
+     "epistemic_type": "observation",
+     "confidence": 0.99,
+     "valid_from": "2026-05-07T13:00:00-06:00",
+     "supporting_excerpt": "The Board decided to lower the target for the overnight interbank interest rate to 6.50%."
+    },
+    {
+     "id": "c_may7_vote_victoria",
+     "proposition": "vote_2026_05_07: Victoria Rodriguez Ceja voted to cut",
+     "normalized_value": "cut",
+     "entities": [
+      "Victoria Rodriguez Ceja"
+     ],
+     "epistemic_type": "observation",
+     "confidence": 0.97,
+     "supporting_excerpt": "voted in favor of the reduction"
+    },
+    {
+     "id": "c_may7_vote_mejia",
+     "proposition": "vote_2026_05_07: Omar Mejia Castelazo voted to cut",
+     "normalized_value": "cut",
+     "entities": [
+      "Omar Mejia Castelazo"
+     ],
+     "epistemic_type": "observation",
+     "confidence": 0.97,
+     "supporting_excerpt": "voted in favor of the reduction"
+    },
+    {
+     "id": "c_may7_vote_cuadra",
+     "proposition": "vote_2026_05_07: Jose Gabriel Cuadra Garcia voted to cut",
+     "normalized_value": "cut",
+     "entities": [
+      "Jose Gabriel Cuadra Garcia"
+     ],
+     "epistemic_type": "observation",
+     "confidence": 0.97,
+     "supporting_excerpt": "voted in favor of the reduction"
+    },
+    {
+     "id": "c_may7_vote_borja",
+     "proposition": "vote_2026_05_07: Galia Borja Gomez preferred to hold",
+     "normalized_value": "hold",
+     "entities": [
+      "Galia Borja Gomez"
+     ],
+     "epistemic_type": "observation",
+     "confidence": 0.95,
+     "supporting_excerpt": "voted to keep the rate unchanged"
+    },
+    {
+     "id": "c_may7_vote_heath",
+     "proposition": "vote_2026_05_07: Jonathan Heath preferred to hold",
+     "normalized_value": "hold",
+     "entities": [
+      "Jonathan Heath"
+     ],
+     "epistemic_type": "observation",
+     "confidence": 0.95,
+     "supporting_excerpt": "voted to keep the rate unchanged"
+    },
+    {
+     "id": "c_may7_guidance",
+     "proposition": "guidance: the statement signaled the easing cycle is ending and holding would be appropriate going forward",
+     "normalized_value": "easing_ending_hold_appropriate",
+     "entities": [
+      "Banco de Mexico"
+     ],
+     "epistemic_type": "observation",
+     "confidence": 0.9,
+     "supporting_excerpt": "The Board considers that the easing cycle is nearing its end and that maintaining the rate would be appropriate going forward."
+    }
+   ]
+  },
+  {
+   "source_id": "banxico_calendar",
+   "url": "https://www.banxico.org.mx/about/calendar-2026",
+   "title": "Banco de Mexico \u2014 2026 Monetary Policy Calendar",
+   "source_type": "official_institutional",
+   "authority_level": 4,
+   "published_at": "2026-01-10T09:00:00-06:00",
+   "available_at": "2026-01-10T09:00:00-06:00",
+   "lineage_event_id": "banxico_calendar_2026",
+   "claims": [
+    {
+     "id": "c_next_date",
+     "proposition": "schedule: the next monetary policy decision is 25 June 2026",
+     "normalized_value": "2026-06-25",
+     "entities": [
+      "Banco de Mexico"
+     ],
+     "epistemic_type": "observation",
+     "confidence": 0.99,
+     "supporting_excerpt": "Monetary policy decision: June 25, 2026."
+    }
+   ]
+  },
+  {
+   "source_id": "inegi_cpi_apr2026",
+   "url": "https://www.inegi.org.mx/inpc/2026-04",
+   "title": "INEGI \u2014 Consumer Price Index, April 2026",
+   "source_type": "official_institutional",
+   "authority_level": 3,
+   "published_at": "2026-05-09T07:00:00-06:00",
+   "available_at": "2026-05-09T07:00:00-06:00",
+   "lineage_event_id": "inegi_cpi_apr2026",
+   "claims": [
+    {
+     "id": "c_infl_apr",
+     "proposition": "context: April 2026 headline inflation was broadly in line with the Board's expected disinflation path, with services inflation still sticky",
+     "normalized_value": "in_line_sticky_services",
+     "entities": [
+      "Mexico"
+     ],
+     "epistemic_type": "observation",
+     "confidence": 0.9,
+     "supporting_excerpt": "Annual headline inflation eased in April, though services remained elevated."
+    }
+   ]
+  },
+  {
+   "source_id": "inegi_igae",
+   "url": "https://www.inegi.org.mx/igae/2026-03",
+   "title": "INEGI \u2014 Global Economic Activity Indicator, March 2026",
+   "source_type": "official_institutional",
+   "authority_level": 3,
+   "published_at": "2026-05-12T07:00:00-06:00",
+   "available_at": "2026-05-12T07:00:00-06:00",
+   "lineage_event_id": "inegi_igae_mar2026",
+   "claims": [
+    {
+     "id": "c_activity",
+     "proposition": "context: economic activity was soft in early 2026, with growth near stagnation",
+     "normalized_value": "soft_near_stagnation",
+     "entities": [
+      "Mexico"
+     ],
+     "epistemic_type": "observation",
+     "confidence": 0.88,
+     "supporting_excerpt": "Economic activity showed little momentum, close to stagnation."
+    }
+   ]
+  },
+  {
+   "source_id": "banxico_2026_06_25_decision",
+   "url": "https://www.banxico.org.mx/press/announcements/2026-06-25",
+   "title": "Banco de Mexico \u2014 Monetary Policy Statement, 25 June 2026 (POST-CUTOFF)",
+   "source_type": "primary_record",
+   "authority_level": 4,
+   "published_at": "2026-06-25T13:00:00-06:00",
+   "available_at": "2026-06-25T13:00:00-06:00",
+   "lineage_event_id": "banxico_2026_06_25_decision",
+   "claims": [
+    {
+     "id": "c_june_decision_POSTCUTOFF",
+     "proposition": "decision: on 25 June 2026 the Board kept the target rate at 6.50%",
+     "normalized_value": "hold_6.50",
+     "entities": [
+      "Banco de Mexico"
+     ],
+     "epistemic_type": "observation",
+     "confidence": 0.99,
+     "supporting_excerpt": "The Board decided to keep the target rate unchanged at 6.50%."
+    }
+   ]
+  }
+ ],
+ "outcome": {
+  "resolved": "YES",
+  "description": "On 25 June 2026 the Board kept the target rate at 6.50% in a unanimous 5-0 decision (per the 25 June statement and 9 July minutes). Revealed only post-cutoff; used solely for evaluation.",
+  "evidence_source": "banxico_2026_06_25_decision"
+ }
 }

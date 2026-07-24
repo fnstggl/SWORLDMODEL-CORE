@@ -11,9 +11,10 @@ from __future__ import annotations
 
 import itertools
 from dataclasses import dataclass
+from typing import Any
 
 from .errors import MassConservationError
-from .models import ScenarioFrame, UncertaintyOutcome, WeightProvenance
+from .models import UncertaintyOutcome, UncertaintySpec, WeightProvenance
 
 # Ordering from weakest (most epistemically humble) to strongest identification.
 # When outcomes with different provenance combine, the branch takes the weakest.
@@ -33,8 +34,8 @@ class Scenario:
     weight: float
     provenance: WeightProvenance
     provenance_detail: str
-    signal_levels: tuple[tuple[str, float], ...]
-    conditions: tuple[tuple[str, str], ...]  # (signal, outcome_value)
+    field_levels: tuple[tuple[str, Any], ...]  # world-field name -> level under this branch
+    conditions: tuple[tuple[str, str], ...]  # (variable, outcome_value)
 
 
 @dataclass(frozen=True)
@@ -48,23 +49,28 @@ def _weakest(provs: list[WeightProvenance]) -> WeightProvenance:
     return min(provs, key=lambda p: _PROVENANCE_STRENGTH[p])
 
 
-def enumerate_scenarios(frame: ScenarioFrame, *, max_branches: int = 24) -> ScenarioSet:
-    """Build joint scenarios from the frame's uncertainty declarations.
+def enumerate_scenarios(
+    uncertainties: tuple[UncertaintySpec, ...],
+    baseline_fields: dict[str, Any],
+    *,
+    max_branches: int = 24,
+) -> ScenarioSet:
+    """Build joint scenarios from the world's uncertainty declarations.
 
     If there is no declared uncertainty, a single baseline scenario (weight 1.0)
     represents the world as verified. Otherwise we take the product across uncertain
-    signals (each is a distinct external event, so independence is defensible), rank
+    variables (each is a distinct external event, so independence is defensible), rank
     by weight, cap at ``max_branches``, and disclose any dropped mass.
     """
 
-    specs = frame.uncertainty
+    specs = uncertainties
     if not specs:
         baseline = Scenario(
             scenario_id="baseline",
             weight=1.0,
             provenance=WeightProvenance.DIRECT_EMPIRICAL,
             provenance_detail="no declared future uncertainty; world taken as verified",
-            signal_levels=tuple(sorted((s.name, s.baseline) for s in frame.signals)),
+            field_levels=tuple(sorted(baseline_fields.items())),
             conditions=(),
         )
         return ScenarioSet(scenarios=(baseline,), truncated_mass=0.0, truncated_reason="")
@@ -76,26 +82,26 @@ def enumerate_scenarios(frame: ScenarioFrame, *, max_branches: int = 24) -> Scen
         total = sum(o.weight.value for o in spec.outcomes)
         if total <= 0:
             raise MassConservationError(
-                f"uncertainty {spec.signal!r} has non-positive total weight"
+                f"uncertainty {spec.variable!r} has non-positive total weight"
             )
         per_var.append(list(spec.outcomes))
-        var_names.append(spec.signal)
+        var_names.append(spec.variable)
 
-    baseline_levels = {s.name: s.baseline for s in frame.signals}
+    baseline_levels = dict(baseline_fields)
     raw: list[Scenario] = []
     for combo in itertools.product(*per_var):
         weight = 1.0
         provs: list[WeightProvenance] = []
         details: list[str] = []
-        levels = dict(baseline_levels)
+        levels: dict[str, Any] = dict(baseline_levels)
         conditions: list[tuple[str, str]] = []
         for name, outcome, spec in zip(var_names, combo, specs, strict=True):
             var_total = sum(o.weight.value for o in spec.outcomes)
             weight *= outcome.weight.value / var_total
             provs.append(outcome.weight.provenance)
             details.append(f"{name}={outcome.value}({outcome.weight.provenance.value})")
-            for sig, lvl in outcome.signal_effects:
-                levels[sig] = lvl
+            for fld, lvl in outcome.field_effects:
+                levels[fld] = lvl
             conditions.append((name, outcome.value))
         sid = "sc_" + "_".join(f"{n}:{v}" for n, v in conditions)
         raw.append(
@@ -104,7 +110,7 @@ def enumerate_scenarios(frame: ScenarioFrame, *, max_branches: int = 24) -> Scen
                 weight=weight,
                 provenance=_weakest(provs),
                 provenance_detail="; ".join(details),
-                signal_levels=tuple(sorted(levels.items())),
+                field_levels=tuple(sorted(levels.items())),
                 conditions=tuple(conditions),
             )
         )

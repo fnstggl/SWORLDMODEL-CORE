@@ -24,26 +24,20 @@ def _run():
 
 
 def test_question_only_pipeline_produces_a_trajectory_forecast() -> None:
-    result, _, _ = _run()
+    result, ctx, _ = _run()
     assert result.probability_source == "weighted_simulated_trajectories"
     assert result.integrity_manifest.is_verified
-    assert result.integrity_manifest.represented_voting_seats == 3
+    assert result.integrity_manifest.represented_participants == 3
     for b in result.branch_outcomes:
         if b.resolved:
-            assert len(b.votes) == 3  # every seat casts a final vote
+            world = ctx.run_result.final_worlds[b.branch_id]
+            assert len(world.get_records("votes")) == 3  # every seat records a vote
 
 
 def test_pipeline_separates_llm_stages() -> None:
     _, _, config = _run()
     stages = config.gateway.stage_call_counts()
-    for stage in (
-        "research_plan",
-        "extract_claims",
-        "compile_reality",
-        "compile_uncertainty",
-        "compile_world",
-        "actor_decision",
-    ):
+    for stage in ("research_plan", "extract_claims", "compile_world_spec", "actor_decision"):
         assert stages.get(stage, 0) > 0, f"stage {stage} never called"
 
 
