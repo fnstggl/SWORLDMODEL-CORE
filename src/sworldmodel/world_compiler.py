@@ -718,17 +718,36 @@ def _parse_iso(value: object) -> datetime | None:
     return None
 
 
+def _epistemic(raw: object, has_citations: bool) -> EpistemicType:
+    """Read an epistemic label the model produced.
+
+    Unrecognized labels are common — a compiler will happily write "rule" or "fact" —
+    and they must not crash a run. They also must not be promoted to OBSERVATION, which
+    is what a permissive default would do: an unrecognized label means we do not know
+    the epistemic status, and the one thing we may not do is call it established fact.
+    An uncited statement is a hypothesis regardless of what it was labeled.
+    """
+
+    if isinstance(raw, str):
+        try:
+            return EpistemicType(raw.strip().lower())
+        except ValueError:
+            pass
+    return EpistemicType.INFERENCE if has_citations else EpistemicType.HYPOTHESIS
+
+
 def parse_world_facts(items: Any, default_time: datetime) -> tuple[WorldFact, ...]:
     facts: list[WorldFact] = []
     for i, wf in enumerate(items or []):
         at = wf.get("available_at")
+        cites = tuple(str(c) for c in (wf.get("evidence_claim_ids") or []))
         facts.append(
             WorldFact(
                 fact_id=f"fact_{i}",
                 text=str(wf.get("text", "")),
-                evidence_claim_ids=tuple(wf.get("evidence_claim_ids", []) or []),
+                evidence_claim_ids=cites,
                 available_at=datetime.fromisoformat(at) if isinstance(at, str) else default_time,
-                epistemic_type=EpistemicType(wf.get("epistemic_type", "observation")),
+                epistemic_type=_epistemic(wf.get("epistemic_type"), bool(cites)),
             )
         )
     return tuple(facts)

@@ -90,14 +90,20 @@ class EffectExecutor:
     def can_apply(
         self, world: WorldState, effects: tuple[Effect, ...], binding: dict[str, Any]
     ) -> tuple[bool, str]:
-        """Return ``(ok, reason)``. Checks that every op is universal and that no
-        resource would go negative when the effects are applied in order."""
+        """Return ``(ok, reason)``. Checks that every op is universal, that every value
+        an effect will treat as a quantity really is one, and that no resource would go
+        negative when the effects are applied in order."""
 
         resources = dict(world.resources)
         for eff in effects:
             if eff.op not in UNIVERSAL_OPS:
                 return False, f"effect op {eff.op!r} is not a universal world operation"
             p = _resolve_params(eff.params_dict, binding, world)
+            bad = _unusable_quantity(eff.op, p)
+            if bad:
+                # Coercing an unreadable amount to zero would turn "transfer what I
+                # said" into "transfer nothing" and record it as done.
+                return False, bad
             if eff.op == "transfer_resource":
                 res, frm, amt = str(p.get("resource")), str(p.get("from")), _num(p.get("amount"))
                 if amt < 0:
@@ -123,13 +129,27 @@ class EffectExecutor:
 
     def build_events(
         self, world: WorldState, effects: tuple[Effect, ...], binding: dict[str, Any]
-    ) -> list[Event]:
+    ) -> tuple[list[Event], list[tuple[datetime, Effect]]]:
+        """Split compiled effects into what happens **now** and what is *scheduled*.
+
+        An effect stamped with a future time is not something that has happened; it is
+        something that will. Applying it immediately — which is what a single event list
+        forces — both makes the future arrive early and drags the branch clock forward
+        over everything legitimately scheduled in between. ``schedule_event`` in
+        particular has to actually schedule.
+        """
+
         actor_id = binding.get("actor")
         events: list[Event] = []
+        deferred: list[tuple[datetime, Effect]] = []
         for eff in effects:
             p = _resolve_params(eff.params_dict, binding, world)
+            when = _event_time(world, eff.op, p)
+            if when > world.time:
+                deferred.append((when, eff))
+                continue
             events.append(self._event(world, eff, p, actor_id))
-        return events
+        return events, deferred
 
     def raw_event(
         self,
@@ -161,7 +181,8 @@ class EffectExecutor:
     def _event(self, world: WorldState, eff: Effect, p: dict[str, Any], actor_id: Any) -> Event:
         visibility = _visibility(eff.op, p)
         audience = _audience(eff.op, p)
-        time = _event_time(world, eff.op, p)
+        # An applied event happens now. Anything later was split off as deferred.
+        time = min(_event_time(world, eff.op, p), world.time)
         payload = _payload_for(eff.op, p)
         ev_ids = tuple(str(x) for x in (p.get("evidence_claim_ids") or []))
         seq = self._next_seq()
@@ -312,6 +333,40 @@ def _event_time(world: WorldState, op: str, p: dict[str, Any]) -> datetime:
         if after is not None:
             return world.time + timedelta(seconds=_num(after))
     return world.time
+
+
+# Effect parameters that are genuinely quantities: if one of these cannot be read as a
+# number, the action is refused rather than applied with a value nobody chose.
+_QUANTITY_PARAMS: dict[str, tuple[str, ...]] = {
+    "transfer_resource": ("amount",),
+    "consume_resource": ("amount",),
+    "adjust_field": ("delta",),
+    "advance_time": ("by_seconds",),
+    "schedule_event": ("after_seconds",),
+}
+
+
+def _unusable_quantity(op: str, p: dict[str, Any]) -> str:
+    for name in _QUANTITY_PARAMS.get(op, ()):
+        if name not in p or p[name] is None:
+            continue
+        if not _is_number(p[name]):
+            return (
+                f"{op} needs {name!r} to be a number; got {p[name]!r}, which cannot be read as one"
+            )
+    return ""
+
+
+def _is_number(v: Any) -> bool:
+    if isinstance(v, bool):
+        return False
+    if isinstance(v, (int, float)):
+        return True
+    try:
+        float(v)
+    except (TypeError, ValueError):
+        return False
+    return True
 
 
 def _as_dict(v: Any) -> dict[str, Any]:

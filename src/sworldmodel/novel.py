@@ -90,7 +90,17 @@ def resolve_novel(
 
     required = tuple(str(a) for a in (data.get("required_authority") or []))
 
-    # 2. authority validation.
+    # 2. authority validation — against the world, not only against the interpreter.
+    #    The interpreter is a model, and a model asked "what authority does this need?"
+    #    can answer "none". That would make a novel action a way to do, without
+    #    standing, exactly what the compiled world says requires standing. So the
+    #    binding check is what the *compiled world* demands of anyone producing this
+    #    effect; the interpreter's answer is an additional constraint on top, never a
+    #    replacement for it.
+    blocked = _blocked_by_world_authority(spec, effects, actor)
+    if blocked:
+        return NovelResolution(False, blocked, effects, required), [resp]
+
     missing = [a for a in required if a not in actor.authority]
     if missing:
         return (
@@ -110,11 +120,58 @@ def resolve_novel(
         return NovelResolution(False, f"infeasible: {reason}", effects, required), [resp]
 
     # 5. translation into safe world operations -> execute.
-    events = executor.build_events(world, effects, binding)
+    events, _deferred = executor.build_events(world, effects, binding)
     return NovelResolution(True, "novel action authorized and executed", effects, required), [
         resp,
         *events,
     ]
+
+
+def _effect_signature(eff: Effect) -> tuple[str, str]:
+    """What an effect *does*, ignoring its values: the op plus the thing it writes to.
+
+    Two effects with the same signature change the same part of the world, whatever the
+    action producing them is called.
+    """
+
+    p = eff.params_dict
+    target = str(
+        p.get("collection") or p.get("field") or p.get("document") or p.get("resource") or ""
+    )
+    return (eff.op, target)
+
+
+def _blocked_by_world_authority(
+    spec: WorldSpec, effects: tuple[Effect, ...], actor: ActorState
+) -> str:
+    """Refuse a novel action that reaches an effect the compiled world gates.
+
+    If every compiled action that produces this same effect requires standing this actor
+    does not hold, the actor cannot reach that effect by renaming the route to it.
+    Effects the compiled world has no action for are not covered here — those are
+    genuinely novel, and the interpreter's declared authority governs them.
+    """
+
+    for eff in effects:
+        sig = _effect_signature(eff)
+        gatekeepers = [
+            a for a in spec.actions if any(_effect_signature(e) == sig for e in a.effects)
+        ]
+        if not gatekeepers:
+            continue
+        if any(
+            all(token in actor.authority for token in a.required_authority)
+            and a.eligible(actor.role, actor.actor_id)
+            for a in gatekeepers
+        ):
+            continue
+        needed = sorted({t for a in gatekeepers for t in a.required_authority})
+        return (
+            f"this would {eff.op} {sig[1] or 'world state'}, which in this world requires "
+            f"standing the actor does not hold (compiled actions producing it require "
+            f"{needed}); a novel action is not a way around authority"
+        )
+    return ""
 
 
 def _parse_effects(raw: Any) -> tuple[Effect, ...]:

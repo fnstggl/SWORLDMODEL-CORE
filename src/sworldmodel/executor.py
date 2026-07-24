@@ -60,6 +60,8 @@ class TurnOutcome:
     mode: str
     action_id: str = ""
     scheduled: list[ScheduledEntry] = field(default_factory=list)
+    # Effects this action stamped in the future: they are scheduled, not applied.
+    deferred: list[tuple[datetime, Effect]] = field(default_factory=list)
     ongoing: OngoingAction | None = None
     gateway_responses: list[Any] = field(default_factory=list)
 
@@ -100,8 +102,9 @@ class ActionExecutor:
                 f"action {action.action_id!r} is not available in stage {world.stage!r} "
                 f"(permitted stages: {list(action.stages)})"
             )
-        if not _timing_ok(world.time, action.not_before, action.not_after):
-            return False, "action is outside its permitted time window"
+        timing_ok, timing_reason = _timing_ok(world.time, action.not_before, action.not_after)
+        if not timing_ok:
+            return False, timing_reason
         for res, cost in action.resource_costs:
             if world.get_resource(res, actor.actor_id) < float(cost):
                 return False, f"actor lacks resource {res!r}"
@@ -266,13 +269,14 @@ class ActionExecutor:
         if not feasible:
             return self._fail(world, actor, action.action_id, f"no longer feasible: {why}")
 
-        events = self.effects.build_events(world, effects, binding)
+        events, deferred = self.effects.build_events(world, effects, binding)
         return TurnOutcome(
             events=events,
             status="executed",
             reason=f"action {action.action_id!r} completed",
             mode="compiled_action",
             action_id=action.action_id,
+            deferred=deferred,
         )
 
     def _execute_novel(
@@ -374,20 +378,27 @@ def _binding(actor: ActorState, params: dict[str, Any], target: str) -> dict[str
     }
 
 
-def _timing_ok(now: datetime, not_before: Any, not_after: Any) -> bool:
-    if isinstance(not_before, str) and not_before:
+def _timing_ok(now: datetime, not_before: Any, not_after: Any) -> tuple[bool, str]:
+    """Check an action's time window.
+
+    An unreadable bound is not an absent bound. Swallowing the parse error turned a gate
+    the compiler wrote into a gate that always passes — the action becomes available at
+    every moment, which is the opposite of what was compiled.
+    """
+
+    for label, raw, too_early in (
+        ("not_before", not_before, True),
+        ("not_after", not_after, False),
+    ):
+        if not isinstance(raw, str) or not raw:
+            continue
         try:
-            if now < datetime.fromisoformat(not_before):
-                return False
+            bound = datetime.fromisoformat(raw)
         except ValueError:
-            pass
-    if isinstance(not_after, str) and not_after:
-        try:
-            if now > datetime.fromisoformat(not_after):
-                return False
-        except ValueError:
-            pass
-    return True
+            return False, f"action has an unreadable {label} bound {raw!r}"
+        if (now < bound) if too_early else (now > bound):
+            return False, f"action is outside its permitted time window ({label}={raw})"
+    return True, "ok"
 
 
 def _target_ok(

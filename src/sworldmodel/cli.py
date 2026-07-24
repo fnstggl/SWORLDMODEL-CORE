@@ -280,7 +280,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     fc = sub.add_parser("forecast", help="question-only live forecast")
     fc.add_argument("--question", required=True)
-    fc.add_argument("--as-of", required=True, help="ISO datetime cutoff")
+    fc.add_argument(
+        "--as-of",
+        required=True,
+        help="ISO datetime cutoff. If it is in the past, every source must be "
+        "retrieved as its archived capture at that time and un-archived sources are "
+        "refused; pass the current time for a nowcast",
+    )
     fc.add_argument("--horizon", required=True, help="ISO datetime resolution horizon")
     fc.add_argument("--model", default=None, help="override model id")
     fc.add_argument("--max-branches", type=int, default=6)

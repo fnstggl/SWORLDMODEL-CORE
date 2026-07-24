@@ -515,6 +515,47 @@ def test_a_planned_step_with_a_time_schedules_a_real_future_opportunity() -> Non
     assert any("2026-06-11" in t for t in times), times
 
 
+def test_a_scheduled_effect_actually_schedules() -> None:
+    """An effect stamped in the future must not happen now, and must not drag the clock.
+
+    Before, a future-stamped effect was applied on the spot and pulled the branch clock
+    along with it, so everything genuinely due in between was skipped — which is the
+    exact opposite of what scheduling means.
+    """
+
+    data = single_response_world()
+    data["world_spec"]["process"]["nodes"][0]["effects"] = [
+        {
+            "op": "deliver_information",
+            "to": ["recipient"],
+            "text": "the request has arrived",
+        },
+        {
+            "op": "schedule_event",
+            "at": "2026-06-15T09:00:00+00:00",
+            "event_type": "follow_up",
+            "text": "a follow-up, three weeks later",
+        },
+    ]
+    times: list[str] = []
+
+    def decide(ctx: dict) -> dict:
+        times.append(str(ctx["branch_time"]))
+        return wait_decision()
+
+    gw = _gateway(decide)
+    compiled = _compile(data, gw)
+    result = run(compiled, gw, seed=0)
+    world = next(iter(result.final_worlds.values()))
+
+    follow = [e for e in world.event_history if e.payload_dict.get("event_type") == "follow_up"]
+    assert follow, "the scheduled event never fired"
+    # It fired at its own time, not at the moment it was scheduled.
+    assert follow[0].time.date().isoformat() == "2026-06-15"
+    # And the clock did not leap there: the actor was seen on 05-20 first.
+    assert any("2026-05-20" in t for t in times), times
+
+
 # ---------------------------------------------------------------------------
 # 5. Real time, real ordering, real limits
 # ---------------------------------------------------------------------------

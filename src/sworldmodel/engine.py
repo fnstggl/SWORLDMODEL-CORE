@@ -40,7 +40,7 @@ from .actors import (
     ActorState,
 )
 from .compiled import CompiledWorld
-from .effects import EffectExecutor
+from .effects import UNIVERSAL_OPS, EffectExecutor
 from .errors import GatewayError
 from .executor import KIND_ACTION_COMPLETION, ActionExecutor
 from .expressions import evaluate
@@ -56,7 +56,7 @@ from .schedule import (
 )
 from .uncertainty import Scenario
 from .world import Delivery, WorldState
-from .worldspec import ProcessNode, TerminalExpression, WakeRule, WorldSpec
+from .worldspec import Effect, ProcessNode, TerminalExpression, WakeRule, WorldSpec
 
 # Structural schedule-entry kinds. These are runtime mechanics, not domain event types:
 # what a "message" or a "vote" is lives entirely in compiled data.
@@ -69,6 +69,7 @@ KIND_REVISIT = "revisit_condition"
 KIND_NEED_DEADLINE = "information_need_deadline"
 KIND_PLAN_STEP = "plan_step_due"
 KIND_DEADLINE = "process_deadline"
+KIND_DEFERRED_EFFECT = "deferred_effect"
 
 # Why an actor was woken. Every invocation carries exactly one of these plus a detail.
 WAKE_OPPORTUNITY = "process_opportunity"
@@ -530,6 +531,8 @@ def _dispatch(
         return _fire_process_node(world, spec, entry, effects, ledger)
     if kind == KIND_EXTERNAL:
         return _fire_external(world, spec, entry, effects, ledger)
+    if kind == KIND_DEFERRED_EFFECT:
+        return _fire_deferred(world, spec, entry, effects, ledger)
     if kind == KIND_ACTION_COMPLETION:
         return _complete_action(world, spec, entry, action_exec, ledger)
     if kind == KIND_NOTICE:
@@ -593,16 +596,26 @@ def _fire_process_node(
         world = world.with_stage(node.stage)
 
     produced: list[Event] = []
+    follow: list[ScheduledEntry] = []
     if node.effects:
-        env_events = effects.build_events(world, node.effects, {"actor": None, "self": None})
+        env_events, deferred = effects.build_events(
+            world, node.effects, {"actor": None, "self": None}
+        )
         world = world.apply(env_events)
         for ev in env_events:
             applied = _find(world, ev.event_id)
             ledger.append(applied)
             produced.append(applied)
         world = _propagate(world, spec, produced)
-
-    follow: list[ScheduledEntry] = []
+        follow.extend(
+            _deferred_entries(
+                deferred,
+                origin=ORIGIN_PROCESS,
+                detail=node.node_id,
+                parents=tuple(e.event_id for e in produced),
+                microstep=entry.microstep + 1,
+            )
+        )
     for nxt_id in node.next_nodes:
         nxt = spec.process.node(nxt_id)
         if nxt is None:
@@ -654,6 +667,62 @@ def _fire_process_node(
     return world, produced
 
 
+def _deferred_entries(
+    deferred: list[tuple[datetime, Effect]],
+    *,
+    origin: str,
+    detail: str,
+    parents: tuple[str, ...] = (),
+    microstep: int = 1,
+) -> list[ScheduledEntry]:
+    """Turn effects stamped in the future into real entries on the branch calendar.
+
+    This is what makes ``schedule_event`` schedule. Before, a future-stamped effect was
+    applied on the spot and pulled the clock along with it, so everything genuinely due
+    in between was skipped.
+    """
+
+    return [
+        make_entry(
+            at=when,
+            kind=KIND_DEFERRED_EFFECT,
+            payload={"op": eff.op, "params": dict(eff.params)},
+            origin=origin,
+            origin_detail=detail,
+            causal_parents=parents,
+            microstep=microstep,
+        )
+        for when, eff in deferred
+    ]
+
+
+def _fire_deferred(
+    world: WorldState,
+    spec: WorldSpec,
+    entry: ScheduledEntry,
+    effects: EffectExecutor,
+    ledger: list[Event],
+) -> tuple[WorldState, list[Event]]:
+    """Apply an effect whose scheduled moment has now arrived."""
+
+    p = entry.payload_dict
+    eff = Effect(op=str(p.get("op", "")), params=tuple(sorted(dict(p.get("params") or {}).items())))
+    if eff.op not in UNIVERSAL_OPS:
+        return world, []
+    # `at`/`after_seconds` already fired by being scheduled; strip them so the effect
+    # lands now rather than re-deferring itself forever.
+    eff = Effect(
+        op=eff.op,
+        params=tuple((k, v) for k, v in eff.params if k not in ("at", "after_seconds")),
+    )
+    evs, _ = effects.build_events(world, (eff,), {"actor": entry.actor_id, "self": None})
+    world = world.apply(evs)
+    produced = [_find(world, e.event_id) for e in evs]
+    for ev in produced:
+        ledger.append(ev)
+    return _propagate(world, spec, produced), produced
+
+
 def _fire_external(
     world: WorldState,
     spec: WorldSpec,
@@ -675,13 +744,25 @@ def _fire_external(
         return world, []
     produced: list[Event] = []
     if occ.effects:
-        evs = effects.build_events(world, occ.effects, {"actor": None, "self": None})
+        evs, deferred = effects.build_events(world, occ.effects, {"actor": None, "self": None})
         world = world.apply(evs)
         for ev in evs:
             applied = _find(world, ev.event_id)
             ledger.append(applied)
             produced.append(applied)
         world = _propagate(world, spec, produced)
+        if deferred:
+            world = world.with_schedule(
+                world.schedule.push(
+                    *_deferred_entries(
+                        deferred,
+                        origin=ORIGIN_EXTERNAL,
+                        detail=proc.process_id,
+                        parents=tuple(e.event_id for e in produced),
+                        microstep=entry.microstep + 1,
+                    )
+                )
+            )
     return world, produced
 
 
@@ -702,6 +783,18 @@ def _complete_action(
     for ev in produced:
         ledger.append(ev)
     world = _propagate(world, spec, produced, source_action_id=outcome.action_id)
+    if outcome.deferred:
+        world = world.with_schedule(
+            world.schedule.push(
+                *_deferred_entries(
+                    outcome.deferred,
+                    origin=ORIGIN_CONSEQUENCE,
+                    detail=f"action:{outcome.action_id}",
+                    parents=tuple(e.event_id for e in produced),
+                    microstep=entry.microstep + 1,
+                )
+            )
+        )
 
     if actor is not None:
         status = "completed" if outcome.status == "executed" else "failed"
@@ -898,6 +991,15 @@ def _invoke_actor(
     world = world.with_actor(updated)
 
     follow: list[ScheduledEntry] = list(outcome.scheduled)
+    follow.extend(
+        _deferred_entries(
+            outcome.deferred,
+            origin=ORIGIN_CONSEQUENCE,
+            detail=f"action:{outcome.action_id}",
+            parents=tuple(e.event_id for e in produced),
+            microstep=entry.microstep + 1,
+        )
+    )
     follow.extend(_plan_entries(updated))
     follow.extend(_commitment_entries(updated))
     follow.extend(_revisit_entries(updated, world))
@@ -1265,6 +1367,15 @@ def _decision_entry(
 
 
 def _node_time(node: ProcessNode, default: datetime, *, after: datetime | None = None) -> datetime:
+    """When this node happens.
+
+    A node with an explicit ``at`` happens then. A node without one happens relative to
+    what entered it. An ``at`` the runtime cannot read is a compilation defect, not a
+    licence to invent a time — but it is also not worth ending a run over, so the node
+    falls back to its relative timing and the unreadable value is left in the compiled
+    spec where the trace shows it.
+    """
+
     at = _parse_dt(node.at)
     if at is not None:
         return at

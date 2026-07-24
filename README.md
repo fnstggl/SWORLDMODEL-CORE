@@ -40,6 +40,22 @@ change**.
 > Hardcode only the universal laws by which a world changes. Never hardcode what world,
 > process, or actions a question must contain.
 
+### Nowcast vs pastcast: what `--as-of` actually does
+
+`--as-of` is enforced mechanically, not politely. If the cutoff is **now**, sources are
+fetched live. If the cutoff is **in the past** — by ten hours or ten years — every
+source must be retrieved as the archived capture that existed at that cutoff, and a
+source with no such capture is refused rather than fetched live.
+
+That is the only sound rule. A page published before your cutoff can be edited after it,
+and a live fetch cannot tell you that it was. But it has a real cost: **archive coverage
+limits pastcast recall**, and recent pages are archived thinnest. A pastcast will
+therefore find less than a nowcast on the same question, and may refuse to simulate at
+all if what it finds cannot ground the actors.
+
+Passing a cutoff a few hours in the past when you meant "now" silently makes the run a
+pastcast. Use the current time for a nowcast.
+
 ## The one canonical path
 
 ```

@@ -270,6 +270,76 @@ def test_an_unauthorized_novel_action_is_rejected() -> None:
     assert world.get_field("external_signal") != 99
 
 
+def test_a_novel_action_cannot_route_around_the_authority_a_compiled_action_needs() -> None:
+    """The interpreter says "no authority needed"; the world says otherwise.
+
+    Recording a position requires standing in this world. An actor without that standing
+    must not be able to reach the same effect by describing it differently — and the
+    model interpreting the description is not the authority on who may do what.
+    """
+
+    data = scheduled_multiparty_world()
+    data["reality"]["expected_participants"] = 6
+    # This actor is a participant with no standing to record anything.
+    data["world_spec"]["entities"].append(
+        {
+            "entity_id": "observer",
+            "name": "An Observer",
+            "kind": "person",
+            "is_actor": True,
+            "role": "observer",
+            "authority": [],
+            "evidence_claim_ids": ["c_session"],
+        }
+    )
+    data["world_spec"]["actors"].append(
+        {
+            "entity_id": "observer",
+            "reasoning": "attends but does not decide",
+            "memory_seeds": [
+                {
+                    "content": "I attended the previous session as an observer.",
+                    "kind": "episodic",
+                    "importance": 0.6,
+                    "evidence_claim_ids": ["c_session"],
+                }
+            ],
+        }
+    )
+
+    def decide(ctx: dict) -> dict:
+        if ctx["actor_id"] == "observer":
+            # The interpreter will report required_authority=[] for this.
+            return propose(
+                "note my own position in the record",
+                [
+                    {
+                        "op": "append_record",
+                        "collection": "positions",
+                        "key": "observer",
+                        "value": "hold",
+                    }
+                ],
+            )
+        if ctx["stage"] == "session":
+            return act("record_position", {"position": "hold"})
+        return wait_decision()
+
+    gw = _gateway(decide)
+    compiled = _compile(data, gw)
+    result = run(compiled, gw, seed=0)
+    world = next(iter(result.final_worlds.values()))
+
+    refused = [
+        d
+        for d in result.actor_decisions
+        if d.actor_id == "observer" and d.validation_status == "rejected"
+    ]
+    assert refused, "an actor with no standing reached a gated effect"
+    assert "requires standing" in refused[0].validation_reason
+    assert not any(r.key == "observer" for r in world.records_dict().get("positions", ()))
+
+
 def test_an_unrepresentable_novel_action_is_refused_not_approximated() -> None:
     data = scheduled_multiparty_world()
     gw = ProgrammableGateway(
