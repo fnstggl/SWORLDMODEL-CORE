@@ -1,18 +1,31 @@
 """The live, question-only research backend.
 
-Accepts only ``research(question, as_of, horizon)`` and automatically builds the
-complete evidence store from live sources: it plans research from the question,
-issues Google News RSS and official-domain queries, fetches the underlying pages,
-extracts and verifies claims, groups them by lineage, enforces the cutoff, and loops
-with follow-up queries until evidence saturates or the budget is exhausted. It then
-LLM-compiles the reality and uncertainty frame into a :class:`ResearchBundle`.
+Accepts only ``research(question, as_of, horizon)`` and builds the complete evidence
+store from live sources: it plans research from the question, issues authoritative,
+Google News RSS and general web queries, fetches the underlying pages *as they stood at
+the cutoff*, extracts and verifies claims, groups them by lineage, detects
+contradictions, and loops with follow-up queries until evidence saturates or the budget
+is exhausted. It then LLM-compiles the reality and uncertainty frame into a
+:class:`ResearchBundle`.
+
+Three properties of the loop are load-bearing:
+
+* **Authoritative discovery runs first and cannot be starved.** Official-domain and
+  planned-authoritative-source queries are issued ahead of general discovery and hold a
+  reserved share of the query budget, so a broad question can never spend the whole cap
+  on general search before reaching a primary source.
+* **Only admissible evidence counts as progress.** A source that cannot be shown to
+  predate the cutoff never reaches the extractor, and only claims that are reachable
+  through the cutoff view count toward the claim total or reset the saturation counter.
+* **Follow-up research extends the store it was given.** Coverage repair appends to the
+  existing store — same claim ids, lineage preserved — so nothing already verified is
+  discarded by researching more.
 
 No ``corpus.json`` is read. This is the production research path.
 """
 
 from __future__ import annotations
 
-import re
 import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
@@ -20,20 +33,31 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any
 
+from .errors import GatewayError
 from .evidence import EvidenceClaim, EvidenceStore, EvidenceView
-from .gateway import ModelGateway
-from .http import HttpError, HttpTransport, UrllibTransport
+from .gateway import GatewayRequest, ModelGateway
+from .http import (
+    DEFAULT_POLICY,
+    FetchPolicy,
+    HttpError,
+    HttpTransport,
+    UrllibTransport,
+    UrlRejected,
+    check_url_shape,
+)
 from .ids import content_id
 from .models import AuthorityLevel, EpistemicType, SourceType
 from .research import ResearchBundle, assemble_bundle
 from .research_planner import ResearchPlan, followup_queries, plan_research
-from .rss import google_news_rss_url, parse_rss
+from .rss import google_news_rss_url, parse_rss, resolve_item_url
 from .search import duckduckgo_search, site_query
-from .source_extract import extract_claims
+from .source_extract import ExtractedClaim, ExtractionResult, distinctive_terms, extract_claims
 from .source_fetch import FetchedSource, fetch_source
 from .world_compiler import compile_world_spec_live
 
-_WORD = re.compile(r"[a-z0-9]{4,}")
+# A search engine's URL length limit; a query longer than this is truncated by the
+# engine anyway, so it is trimmed here where the truncation is visible in the trace.
+_MAX_QUERY_CHARS = 120
 
 
 @dataclass
@@ -48,34 +72,131 @@ class ResearchBudget:
     fetch_concurrency: int = 6
     extract_concurrency: int = 4
     low_info_rounds_to_stop: int = 2
+    max_contradiction_checks: int = 8
+
+    @property
+    def authoritative_query_reserve(self) -> int:
+        """The share of the query budget general discovery may not consume.
+
+        Discovery has two channels — authoritative/official and general — and this is an
+        even split between them while both have work queued. It is a division of a
+        budget between channels, not a tuned preference: whenever the authoritative
+        queue empties, general discovery may use the whole remaining cap.
+        """
+
+        return self.max_queries // 2
 
 
 @dataclass
 class ResearchTrace:
-    queries: list[str] = field(default_factory=list)
+    """The replayable record of one research session (possibly extended by repair)."""
+
+    queries: list[dict[str, Any]] = field(default_factory=list)
     rss_requests: list[dict[str, Any]] = field(default_factory=list)
+    search_failures: list[dict[str, Any]] = field(default_factory=list)
+    attempted_urls: list[str] = field(default_factory=list)
+    seen_content_hashes: list[str] = field(default_factory=list)
     fetched: list[dict[str, Any]] = field(default_factory=list)
     rejected: list[dict[str, Any]] = field(default_factory=list)
+    extraction_calls: list[dict[str, Any]] = field(default_factory=list)
     claim_count: int = 0
+    admissible_claim_count: int = 0
     contradictions: list[str] = field(default_factory=list)
+    contradiction_checks: int = 0
     stop_reason: str = ""
     extract_calls: int = 0
+    rounds: int = 0
+    fact_retrieval: dict[str, list[str]] = field(default_factory=dict)
 
-    def to_dict(self, plan: ResearchPlan) -> dict[str, Any]:
+    def query_texts(self) -> list[str]:
+        return [q["query"] for q in self.queries]
+
+    def to_dict(self, plan: ResearchPlan, store: EvidenceStore) -> dict[str, Any]:
         return {
+            "plan": plan.to_dict(),
             "process_summary": plan.process_summary,
             "resolution_event": plan.resolution_event,
             "required_facts": list(plan.required_facts),
+            "official_domains": list(plan.official_domains),
             "queries": self.queries,
             "rss_requests": self.rss_requests,
-            "official_domains": list(plan.official_domains),
+            "search_failures": self.search_failures,
+            "attempted_urls": self.attempted_urls,
+            "seen_content_hashes": self.seen_content_hashes,
             "sources_fetched": self.fetched,
             "sources_rejected": self.rejected,
+            "extraction_calls": self.extraction_calls,
             "claim_count": self.claim_count,
+            "admissible_claim_count": self.admissible_claim_count,
             "contradictions": self.contradictions,
+            "contradiction_checks": self.contradiction_checks,
             "extract_calls": self.extract_calls,
+            "rounds": self.rounds,
+            # Labeled for what it is: lexical retrieval over claim text, NOT a check
+            # that a required fact is established. Nothing here asserts coverage.
+            "required_fact_lexical_retrieval": {
+                "method": "distinctive-term overlap between the planned fact and claim text",
+                "warning": "a listed claim is a retrieval candidate, not verified support",
+                "candidates": self.fact_retrieval,
+            },
+            # Everything needed to re-open the exact document behind every claim.
+            "claim_provenance": store.provenance_records(),
             "stop_reason": self.stop_reason,
         }
+
+    @classmethod
+    def resume(cls, prior: dict[str, Any] | None) -> ResearchTrace:
+        """Rebuild the session state of a previous research run so a follow-up round
+        continues it (same seen-URL and seen-content sets, cumulative counters)."""
+
+        if not prior:
+            return cls()
+        return cls(
+            queries=list(prior.get("queries", [])),
+            rss_requests=list(prior.get("rss_requests", [])),
+            search_failures=list(prior.get("search_failures", [])),
+            attempted_urls=list(prior.get("attempted_urls", [])),
+            seen_content_hashes=list(prior.get("seen_content_hashes", [])),
+            fetched=list(prior.get("sources_fetched", [])),
+            rejected=list(prior.get("sources_rejected", [])),
+            extraction_calls=list(prior.get("extraction_calls", [])),
+            claim_count=int(prior.get("claim_count", 0)),
+            admissible_claim_count=int(prior.get("admissible_claim_count", 0)),
+            contradictions=list(prior.get("contradictions", [])),
+            contradiction_checks=int(prior.get("contradiction_checks", 0)),
+            extract_calls=int(prior.get("extract_calls", 0)),
+            rounds=int(prior.get("rounds", 0)),
+        )
+
+
+@dataclass
+class _QueryQueues:
+    """Discovery queries split by channel, drained authoritative-first."""
+
+    targeted: deque[str] = field(default_factory=deque)
+    authoritative: deque[str] = field(default_factory=deque)
+    general: deque[str] = field(default_factory=deque)
+    authoritative_used: int = 0
+    general_used: int = 0
+
+    def empty(self) -> bool:
+        return not (self.targeted or self.authoritative or self.general)
+
+
+@dataclass
+class _Session:
+    """One pass of the research loop, with its own budget.
+
+    The trace accumulates across passes, but the *budget* counters do not: a follow-up
+    pass that inherited an exhausted query or extract count could never issue the very
+    query it was created to issue, which would make coverage repair a no-op.
+    """
+
+    queues: _QueryQueues
+    seen_urls: set[str]
+    seen_hashes: set[str]
+    queries_used: int = 0
+    extract_calls: int = 0
 
 
 class LiveResearchBackend:
@@ -94,6 +215,8 @@ class LiveResearchBackend:
         self.budget = budget or ResearchBudget()
         self._now = now  # injectable for tests; else datetime.now(tz) at call time
 
+    # -- public API -------------------------------------------------------------
+
     def research(
         self,
         question: str,
@@ -102,64 +225,531 @@ class LiveResearchBackend:
         *,
         extra_queries: tuple[str, ...] = (),
     ) -> ResearchBundle:
+        plan = plan_research(self.gateway, question, as_of, horizon)
+        store = EvidenceStore()
+        trace = ResearchTrace()
+        self._run_rounds(question, as_of, plan, store, trace, extra_queries)
+        return self._compile(question, as_of, horizon, plan, store, trace)
+
+    def augment_for_coverage(
+        self,
+        question: str,
+        as_of: datetime,
+        horizon: datetime,
+        missing: list[str],
+        prior: ResearchBundle,
+    ) -> ResearchBundle | None:
+        """Targeted follow-up research when the coverage gate finds a material item
+        absent. Each missing candidate becomes an explicit query so the follow-up goes
+        looking for exactly what the world was missing.
+
+        The follow-up **extends** ``prior``: the same :class:`EvidenceStore` is carried
+        forward and new claims are appended to it, so every previously verified claim
+        keeps its id and lineage and nothing already established is thrown away by the
+        act of researching more. The trace continues too, so the audit record covers
+        both passes.
+        """
+
+        queries = tuple(q for q in (_missing_query(m) for m in missing) if q)
+        if not queries:
+            return None
+        store = prior.evidence_store
+        trace = ResearchTrace.resume(prior.live_trace)
+        plan = ResearchPlan.from_dict((prior.live_trace or {}).get("plan"))
+        if plan is None:
+            plan = plan_research(self.gateway, question, as_of, horizon)
+        before = len(store.claims)
+        self._run_rounds(question, as_of, plan, store, trace, queries)
+        if len(store.claims) == before:
+            # Nothing new was found. The caller must still get the prior bundle back
+            # rather than a rebuilt one, so returning None keeps the gate's own
+            # "augmentation cannot help" path intact.
+            return None
+        return self._compile(question, as_of, horizon, plan, store, trace)
+
+    # -- research loop ----------------------------------------------------------
+
+    def _run_rounds(
+        self,
+        question: str,
+        as_of: datetime,
+        plan: ResearchPlan,
+        store: EvidenceStore,
+        trace: ResearchTrace,
+        extra_queries: tuple[str, ...],
+    ) -> None:
         now = self._now or datetime.now(as_of.tzinfo)
         t0 = time.monotonic()
-        plan = plan_research(self.gateway, question, as_of, horizon)
-        trace = ResearchTrace()
-        store = EvidenceStore()
-        seen_urls: set[str] = set()
-        seen_hashes: set[str] = set()
-
-        queries: deque[str] = deque(plan.initial_queries[: self.budget.max_queries])
-        # Targeted queries (coverage repair) go first so they run even under a budget.
-        for q in extra_queries:
-            queries.appendleft(q[:120])
-        # Per-decision-maker queries surface articles that name each individual actor.
-        for maker in plan.decision_makers[:6]:
-            queries.append(f"{maker} {plan.resolution_event or question}"[:120])
-        # Official-domain queries reach primary sources directly.
-        terms = plan.resolution_event or question
-        for dom in plan.official_domains[:4]:
-            queries.append(site_query(dom, terms))
+        session = _Session(
+            queues=self._build_queues(plan, question, extra_queries, trace.query_texts()),
+            seen_urls=set(trace.attempted_urls),
+            seen_hashes=set(trace.seen_content_hashes),
+        )
 
         low_info = 0
         rounds = 0
-        while queries and rounds < self.budget.max_rounds and not self._time_up(t0):
+        while (
+            not session.queues.empty() and rounds < self.budget.max_rounds and not self._time_up(t0)
+        ):
             rounds += 1
-            candidates = self._collect_candidates(queries, trace)
-            sources = self._fetch_all(candidates, seen_urls, now, trace)
-            added = self._extract_all(question, as_of, sources, seen_hashes, store, trace)
+            trace.rounds += 1
+            candidates = self._collect_candidates(session, as_of, trace)
+            sources = self._fetch_all(candidates, session, now, as_of, trace)
+            added = self._extract_all(question, as_of, sources, session, store, trace)
 
+            view = store.view(as_of)
             trace.claim_count = len(store.all())
+            trace.admissible_claim_count = len(view.available())
+            self._detect_contradictions(store, as_of, trace)
             trace.contradictions = [f"{a}<>{b}" for a, b in store.contradictions()]
-            missing = _missing_facts(plan, store.view(as_of))
+            unsupported = self._record_fact_retrieval(plan, view, trace)
 
-            if added == 0:
-                low_info += 1
-            else:
-                low_info = 0
-            if not missing:
-                trace.stop_reason = "all required facts have supporting evidence"
-                break
+            low_info = low_info + 1 if added == 0 else 0
             if low_info >= self.budget.low_info_rounds_to_stop:
-                trace.stop_reason = "evidence saturation (consecutive low-information rounds)"
+                trace.stop_reason = "evidence saturation (consecutive rounds added no usable claim)"
                 break
-            if trace.extract_calls >= self.budget.max_extract_calls:
+            if session.extract_calls >= self.budget.max_extract_calls:
                 trace.stop_reason = "extract budget exhausted"
                 break
-            fq = followup_queries(
+            if session.queries_used >= self.budget.max_queries:
+                trace.stop_reason = "query budget exhausted"
+                break
+            for q in followup_queries(
                 self.gateway,
                 question,
-                missing_facts=missing,
+                missing_facts=unsupported,
                 contradictions=trace.contradictions,
-                have_summary=[c.proposition for c in store.view(as_of).available()],
-            )
-            for q in fq:
-                if q not in trace.queries and len(trace.queries) < self.budget.max_queries:
-                    queries.append(q)
+                have_summary=[c.proposition for c in view.available()],
+            ):
+                if q not in trace.query_texts():
+                    session.queues.general.append(q[:_MAX_QUERY_CHARS])
         if not trace.stop_reason:
             trace.stop_reason = "round/time/query budget reached"
+        trace.attempted_urls = sorted(session.seen_urls)
+        trace.seen_content_hashes = sorted(session.seen_hashes)
 
+    def _build_queues(
+        self,
+        plan: ResearchPlan,
+        question: str,
+        extra_queries: tuple[str, ...],
+        already_run: list[str],
+    ) -> _QueryQueues:
+        terms = plan.resolution_event or question
+        queues = _QueryQueues()
+        seen: set[str] = set(already_run)  # never re-issue a query an earlier pass ran
+        for q in extra_queries:
+            text = q[:_MAX_QUERY_CHARS].strip()
+            if text and text not in seen:
+                seen.add(text)
+                queues.targeted.append(text)
+
+        def push(queue: deque[str], text: str) -> None:
+            q = text[:_MAX_QUERY_CHARS].strip()
+            if q and q not in seen:
+                seen.add(q)
+                queue.append(q)
+
+        # Authoritative channel: official domains first, then the sources the plan says
+        # would actually confirm the outcome — which were previously never queried.
+        for domain in plan.official_domains:
+            push(queues.authoritative, site_query(domain, terms))
+        for source in plan.authoritative_sources:
+            if _looks_like_domain(source):
+                push(queues.authoritative, site_query(source, terms))
+            else:
+                push(queues.authoritative, f"{source} {terms}")
+        # General discovery.
+        for q in plan.initial_queries:
+            push(queues.general, q)
+        for maker in plan.decision_makers:
+            push(queues.general, f"{maker} {terms}")
+        return queues
+
+    def _next_queries(self, session: _Session) -> list[tuple[str, str]]:
+        """Pop this round's queries as ``(channel, query)``, authoritative first.
+
+        General discovery is held to ``max_queries - authoritative_query_reserve``
+        while authoritative work remains queued, which is what stops a broad question
+        from spending the whole cap before it reaches a primary source.
+        """
+
+        queues = session.queues
+        picked: list[tuple[str, str]] = []
+        general_cap = self.budget.max_queries - self.budget.authoritative_query_reserve
+        while (
+            len(picked) < self.budget.max_queries_per_round
+            and session.queries_used + len(picked) < self.budget.max_queries
+        ):
+            if queues.targeted:
+                picked.append(("targeted", queues.targeted.popleft()))
+            elif queues.authoritative:
+                queues.authoritative_used += 1
+                picked.append(("authoritative", queues.authoritative.popleft()))
+            elif queues.general and (queues.general_used < general_cap or not queues.authoritative):
+                queues.general_used += 1
+                picked.append(("general", queues.general.popleft()))
+            else:
+                break
+        return picked
+
+    def _collect_candidates(
+        self, session: _Session, as_of: datetime, trace: ResearchTrace
+    ) -> list[str]:
+        urls: list[str] = []
+        for channel, q in self._next_queries(session):
+            session.queries_used += 1
+            trace.queries.append({"query": q, "channel": channel})
+            urls.extend(self._rss_candidates(q, as_of, trace))
+            outcome = duckduckgo_search(self.transport, q, limit=self.budget.max_pages_per_query)
+            if outcome.ok:
+                urls.extend(outcome.urls)
+            else:
+                # A blocked or challenged search is a failure to search, not an empty
+                # result set, and it is surfaced instead of poisoning the queue.
+                trace.search_failures.append(
+                    {"query": q, "channel": channel, "error": outcome.error}
+                )
+        return self._policy_filtered(urls, trace)
+
+    def _rss_candidates(self, query: str, as_of: datetime, trace: ResearchTrace) -> list[str]:
+        """Google News RSS as a real discovery channel: resolve item links to publisher
+        URLs and hand them to the fetcher like any other candidate."""
+
+        rss_url = google_news_rss_url(query)
+        try:
+            resp = self.transport.get(rss_url, timeout=15)
+            items = parse_rss(resp.text)
+        except HttpError as exc:
+            trace.rss_requests.append({"query": query, "url": rss_url, "error": str(exc)})
+            return []
+        # The feed is fetched live, so it lists today's articles. An item published after
+        # the cutoff cannot inform a pastcast and is dropped before any request is spent.
+        within = [i for i in items if i.published is None or i.published <= as_of]
+        resolved: list[str] = []
+        unresolved = 0
+        for item in within:
+            url = resolve_item_url(item)
+            if url:
+                resolved.append(url)
+            else:
+                unresolved += 1
+        picked = resolved[: self.budget.max_pages_per_query]
+        trace.rss_requests.append(
+            {
+                "query": query,
+                "url": rss_url,
+                "items": len(items),
+                "within_cutoff": len(within),
+                "resolved_to_publisher": len(resolved),
+                "unresolvable_redirects": unresolved,
+                "urls_queued": picked,
+            }
+        )
+        return picked
+
+    def _policy_filtered(self, urls: list[str], trace: ResearchTrace) -> list[str]:
+        """Drop URLs that must not be requested at all. These come off third-party HTML,
+        so a non-http(s) scheme or a private/loopback literal is refused here, before a
+        request exists. The transport re-checks every hop, including after redirects."""
+
+        policy: FetchPolicy = getattr(self.transport, "policy", DEFAULT_POLICY)
+        out: list[str] = []
+        for url in urls:
+            try:
+                check_url_shape(url, policy)
+            except UrlRejected as exc:
+                trace.rejected.append({"url": url, "reason": f"refused by fetch policy: {exc}"})
+            else:
+                out.append(url)
+        return out
+
+    def _fetch_all(
+        self,
+        urls: list[str],
+        session: _Session,
+        now: datetime,
+        as_of: datetime,
+        trace: ResearchTrace,
+    ) -> list[FetchedSource]:
+        seen = session.seen_urls
+        todo = [u for u in dict.fromkeys(urls) if u not in seen][: self.budget.max_fetches]
+        for u in todo:
+            seen.add(u)
+        results: list[FetchedSource] = []
+        if not todo:
+            return results
+        with ThreadPoolExecutor(max_workers=self.budget.fetch_concurrency) as pool:
+            fetched = list(
+                pool.map(lambda u: fetch_source(self.transport, u, now=now, as_of=as_of), todo)
+            )
+        for src in fetched:
+            if src.ok:
+                results.append(src)
+                trace.fetched.append(
+                    {
+                        "url": src.url,
+                        "fetched_url": src.fetched_url,
+                        "publisher": src.publisher,
+                        "status": src.status,
+                        "published_at": _iso(src.published_at),
+                        "archived_at": _iso(src.archived_at),
+                        "observed_at": _iso(src.observed_at),
+                        "content_sha256": src.content_hash,
+                    }
+                )
+            else:
+                trace.rejected.append(
+                    {
+                        "url": src.url,
+                        "reason": src.rejection_reason
+                        or f"unreachable/empty (status {src.status})",
+                    }
+                )
+        return results
+
+    def _extract_all(
+        self,
+        question: str,
+        as_of: datetime,
+        sources: list[FetchedSource],
+        session: _Session,
+        store: EvidenceStore,
+        trace: ResearchTrace,
+    ) -> int:
+        """Extract from admissible, unseen sources. Returns the number of claims that
+        actually entered the store *and* are reachable through the cutoff view — the
+        only kind of progress that justifies another round."""
+
+        fresh: list[FetchedSource] = []
+        for s in sources:
+            # A source whose content cannot be dated at or before the cutoff can only
+            # produce claims that are invisible through the cutoff view. Such a source
+            # must not consume the bounded extract budget, and must not be able to
+            # report progress by producing claims nobody can use.
+            if s.evidence_time() > as_of:
+                trace.rejected.append(
+                    {
+                        "url": s.url,
+                        "reason": (
+                            f"content not datable at or before the cutoff "
+                            f"(usable from {s.evidence_time().isoformat()})"
+                        ),
+                    }
+                )
+            elif s.content_hash in session.seen_hashes:
+                trace.rejected.append(
+                    {"url": s.url, "reason": "duplicate of a source already read"}
+                )
+            else:
+                fresh.append(s)
+        budget_left = max(0, self.budget.max_extract_calls - session.extract_calls)
+        chosen = fresh[:budget_left]
+        for s in chosen:
+            session.seen_hashes.add(s.content_hash)
+        if not chosen:
+            return 0
+        with ThreadPoolExecutor(max_workers=self.budget.extract_concurrency) as pool:
+            batches = list(
+                pool.map(lambda s: (s, extract_claims(self.gateway, question, s, as_of)), chosen)
+            )
+        session.extract_calls += len(chosen)
+        trace.extract_calls += len(chosen)
+        added = 0
+        for source, result in batches:
+            trace.extraction_calls.append(
+                {
+                    "fetched_url": source.fetched_url,
+                    "content_sha256": source.content_hash,
+                    "prompt_sha256": result.prompt_sha256,
+                    "prompt": result.prompt,
+                    "window_chars": result.window_chars,
+                    "document_truncated": result.truncated,
+                    "claims_returned": len(result.claims),
+                }
+            )
+            for c in result.claims:
+                if not c.verified_in_text:
+                    trace.rejected.append(
+                        {
+                            "url": source.fetched_url,
+                            "reason": f"claim not verified: {c.rejection_reason}",
+                            "proposition": c.proposition[:_MAX_QUERY_CHARS],
+                        }
+                    )
+                    continue
+                if self._add_claim(store, source, c, result, as_of):
+                    added += 1
+        return added
+
+    def _add_claim(
+        self,
+        store: EvidenceStore,
+        source: FetchedSource,
+        claim: ExtractedClaim,
+        result: ExtractionResult,
+        as_of: datetime,
+    ) -> bool:
+        available_at = source.evidence_time()
+        cid = content_id("c", source.url, claim.proposition, claim.normalized_value)
+        if cid in store.claims:
+            return False
+        entity = claim.entities[0] if claim.entities else source.publisher
+        lineage = content_id(
+            "evt", _topic(claim.proposition), entity.lower(), claim.normalized_value.lower()
+        )
+        store.add(
+            EvidenceClaim(
+                id=cid,
+                proposition=claim.proposition,
+                normalized_value=claim.normalized_value,
+                entities=claim.entities,
+                valid_from=None,
+                valid_until=None,
+                published_at=available_at,
+                available_at=available_at,
+                source_id=source.publisher or source.url,
+                source_url=source.url,
+                source_title=source.title,
+                source_type=_source_type(claim.authority_hint),
+                authority_level=AuthorityLevel(claim.authority_hint),
+                supporting_excerpt=claim.supporting_excerpt,
+                lineage_event_id=lineage,
+                epistemic_type=EpistemicType(claim.epistemic_type),
+                # The source's authority level normalized onto [0,1]. It is a rank of
+                # source authority, NOT a probability that the claim is true, and no
+                # invented arithmetic is applied to it.
+                confidence=int(claim.authority_hint) / int(max(AuthorityLevel)),
+                retrieved_at=source.fetched_at,
+                retrieved_url=source.fetched_url,
+                archived_at=source.archived_at,
+                content_sha256=source.content_hash,
+                extraction_prompt_sha256=result.prompt_sha256,
+            )
+        )
+        # Defence in depth: the source gate above should already guarantee this, and a
+        # claim invisible through the cutoff view is not progress even when it is stored.
+        return store.claims[cid].is_available_at(as_of)
+
+    # -- contradiction detection ------------------------------------------------
+
+    def _detect_contradictions(
+        self, store: EvidenceStore, as_of: datetime, trace: ResearchTrace
+    ) -> None:
+        """Find claims that disagree about the same fact and record the decisive ones.
+
+        Candidates are claims available at the cutoff that describe the same subject
+        (same proposition topic and same entities) but carry different canonical values.
+        Sharing a subject is not yet a contradiction — "is Chair" and "is a member" are
+        compatible — so each candidate pair is adjudicated by the model's
+        ``contradiction`` task, and only an explicitly decisive verdict is recorded.
+
+        Restricting candidates to the cutoff view keeps a post-cutoff claim from
+        manufacturing a conflict that blocks a pastcast.
+        """
+
+        already = {tuple(sorted(p)) for p in store.contradictions()}
+        groups: dict[str, list[EvidenceClaim]] = {}
+        for claim in store.view(as_of).available():
+            key = _subject_key(claim)
+            if key:
+                groups.setdefault(key, []).append(claim)
+        for _key, claims in sorted(groups.items()):
+            by_value: dict[str, EvidenceClaim] = {}
+            for c in sorted(claims, key=lambda c: c.id):
+                by_value.setdefault(c.normalized_value.strip().lower(), c)
+            values = sorted(by_value)
+            for i in range(len(values)):
+                for j in range(i + 1, len(values)):
+                    if trace.contradiction_checks >= self.budget.max_contradiction_checks:
+                        return
+                    a, b = by_value[values[i]], by_value[values[j]]
+                    if tuple(sorted((a.id, b.id))) in already:
+                        continue
+                    trace.contradiction_checks += 1
+                    if self._is_decisive_conflict(a, b):
+                        store.record_contradiction(a.id, b.id)
+                        already.add(tuple(sorted((a.id, b.id))))
+
+    def _is_decisive_conflict(self, a: EvidenceClaim, b: EvidenceClaim) -> bool:
+        prompt = f"""Two evidence claims describe the same subject but carry different values.
+Decide whether they are DECISIVELY contradictory: whether both cannot be true of the
+same subject at the same time. Complementary facts, different aspects, different points
+in time, or differing levels of detail are NOT contradictions.
+
+CLAIM A: {a.proposition}
+  value: {a.normalized_value}
+  source: {a.source_id} ({a.published_at.date()})
+  excerpt: {a.supporting_excerpt}
+
+CLAIM B: {b.proposition}
+  value: {b.normalized_value}
+  source: {b.source_id} ({b.published_at.date()})
+  excerpt: {b.supporting_excerpt}
+
+Return JSON {{"decisive": true|false, "reason": "<one line>"}}."""
+        try:
+            resp = self.gateway.generate(
+                GatewayRequest(
+                    task_kind="contradiction",
+                    prompt=prompt,
+                    context={"a": a.id, "b": b.id},
+                    seed=int(content_id("x", a.id, b.id)[-8:], 16),
+                    expected_keys=("decisive",),
+                )
+            )
+        except GatewayError:
+            # Unadjudicated means unrecorded: we do not assert a conflict we could not
+            # confirm, and we do not silently claim the pair is consistent either — the
+            # check count in the trace shows the pair was examined.
+            return False
+        return resp.data.get("decisive") is True
+
+    # -- required facts (retrieval only) ----------------------------------------
+
+    def _record_fact_retrieval(
+        self, plan: ResearchPlan, view: EvidenceView, trace: ResearchTrace
+    ) -> list[str]:
+        """Record, per planned required fact, the claims a lexical search retrieves, and
+        return the facts nothing was retrieved for.
+
+        This is retrieval, not verification: sharing a name or a number with a fact does
+        not establish it. Nothing here is reported as coverage and it never stops
+        research — its only job is to steer the next round's queries. The mechanical
+        check that a required fact is actually supported is the compiled world's
+        ``required_reality_facts``, where each fact must cite claim ids that exist and
+        are available at the cutoff.
+        """
+
+        available = view.available()
+        unsupported: list[str] = []
+        trace.fact_retrieval = {}
+        for fact in plan.required_facts:
+            terms = distinctive_terms(fact)
+            hits = (
+                [c.id for c in available if distinctive_terms(_claim_text(c)) & terms]
+                if terms
+                else []
+            )
+            trace.fact_retrieval[fact] = sorted(hits)
+            if not hits:
+                unsupported.append(fact)
+        return unsupported
+
+    # -- compilation ------------------------------------------------------------
+
+    def _compile(
+        self,
+        question: str,
+        as_of: datetime,
+        horizon: datetime,
+        plan: ResearchPlan,
+        store: EvidenceStore,
+        trace: ResearchTrace,
+    ) -> ResearchBundle:
+        trace.claim_count = len(store.all())
+        trace.admissible_claim_count = len(store.view(as_of).available())
+        trace.contradictions = [f"{a}<>{b}" for a, b in store.contradictions()]
         compilation, resp = compile_world_spec_live(
             self.gateway, question, as_of, horizon, store.view(as_of)
         )
@@ -175,171 +765,20 @@ class LiveResearchBackend:
                 "expected_participants": compilation.get("expected_participants"),
                 "as_of": as_of.isoformat(),
                 "horizon": horizon.isoformat(),
-                "authoritative_sources": [],
+                "authoritative_sources": list(plan.authoritative_sources),
             },
             "_compile_responses": [resp],
         }
         bundle = assemble_bundle(store, data)
-        return replace(bundle, live_trace=trace.to_dict(plan))
-
-    def augment_for_coverage(
-        self,
-        question: str,
-        as_of: datetime,
-        horizon: datetime,
-        missing: list[str],
-        prior: ResearchBundle,
-    ) -> ResearchBundle | None:
-        """Targeted follow-up research when the coverage gate finds a material item
-        absent. Each missing candidate becomes an explicit query so the follow-up
-        research goes looking for exactly what the world was missing."""
-
-        queries = tuple(_missing_query(m) for m in missing if _missing_query(m))
-        if not queries:
-            return None
-        return self.research(question, as_of, horizon, extra_queries=queries)
-
-    # -- research loop helpers --------------------------------------------------
-
-    def _collect_candidates(self, queries: deque[str], trace: ResearchTrace) -> list[str]:
-        urls: list[str] = []
-        for _ in range(min(len(queries), self.budget.max_queries_per_round)):
-            if len(trace.queries) >= self.budget.max_queries:
-                break
-            q = queries.popleft()
-            trace.queries.append(q)
-            # Channel 1: Google News RSS (recorded as a discovery signal). Its links are
-            # obfuscated redirects, so we do not fetch them directly.
-            rss_url = google_news_rss_url(q)
-            try:
-                resp = self.transport.get(rss_url, timeout=15)
-                items = parse_rss(resp.text)
-            except HttpError:
-                items = []
-            trace.rss_requests.append({"query": q, "url": rss_url, "items": len(items)})
-            # Channel 2: DuckDuckGo — real, fetchable publisher/official URLs.
-            for u in duckduckgo_search(self.transport, q, limit=self.budget.max_pages_per_query):
-                urls.append(u)
-        return urls
-
-    def _fetch_all(
-        self, urls: list[str], seen: set[str], now: datetime, trace: ResearchTrace
-    ) -> list[FetchedSource]:
-        todo = [u for u in dict.fromkeys(urls) if u not in seen][: self.budget.max_fetches]
-        for u in todo:
-            seen.add(u)
-        results: list[FetchedSource] = []
-        if not todo:
-            return results
-        with ThreadPoolExecutor(max_workers=self.budget.fetch_concurrency) as pool:
-            for src in pool.map(lambda u: fetch_source(self.transport, u, now=now), todo):
-                if src.ok:
-                    results.append(src)
-                    trace.fetched.append(
-                        {
-                            "url": src.final_url,
-                            "publisher": src.publisher,
-                            "status": src.status,
-                            "published_at": src.published_at.isoformat()
-                            if src.published_at
-                            else None,
-                        }
-                    )
-                else:
-                    trace.rejected.append(
-                        {"url": src.url, "reason": f"unreachable/empty (status {src.status})"}
-                    )
-        return results
-
-    def _extract_all(
-        self,
-        question: str,
-        as_of: datetime,
-        sources: list[FetchedSource],
-        seen_hashes: set[str],
-        store: EvidenceStore,
-        trace: ResearchTrace,
-    ) -> int:
-        # For a pastcast, a source published after the cutoff can only yield claims that
-        # are then excluded — so it must not consume the (bounded) extract budget. This
-        # concentrates the budget on usable pre-cutoff sources, which is what makes
-        # roster/vote verification reliable rather than variance-dependent.
-        fresh: list[FetchedSource] = []
-        for s in sources:
-            if s.published_at is not None and s.published_at > as_of:
-                trace.rejected.append(
-                    {
-                        "url": s.final_url,
-                        "reason": f"published after cutoff ({s.published_at.date()})",
-                    }
-                )
-            elif s.content_hash not in seen_hashes:
-                fresh.append(s)
-        budget_left = self.budget.max_extract_calls - trace.extract_calls
-        sources = fresh[: max(0, budget_left)]
-        for s in sources:
-            seen_hashes.add(s.content_hash)
-        if not sources:
-            return 0
-        added = 0
-        with ThreadPoolExecutor(max_workers=self.budget.extract_concurrency) as pool:
-            batches = list(
-                pool.map(lambda s: (s, extract_claims(self.gateway, question, s, as_of)), sources)
-            )
-        trace.extract_calls += len(sources)
-        for source, claims in batches:
-            for c in claims:
-                if not c.verified_in_text:
-                    trace.rejected.append(
-                        {
-                            "url": source.final_url,
-                            "reason": "claim not supported by fetched text",
-                            "proposition": c.proposition[:120],
-                        }
-                    )
-                    continue
-                if self._add_claim(store, source, c, as_of):
-                    added += 1
-        return added
-
-    def _add_claim(
-        self, store: EvidenceStore, source: FetchedSource, claim: Any, as_of: datetime
-    ) -> bool:
-        available_at = source.published_at or source.fetched_at
-        published_at = source.published_at or source.fetched_at
-        cid = content_id("c", source.final_url, claim.proposition, claim.normalized_value)
-        if cid in store.claims:
-            return False
-        entity = claim.entities[0] if claim.entities else source.publisher
-        lineage = content_id(
-            "evt", _topic(claim.proposition), entity.lower(), claim.normalized_value.lower()
-        )
-        store.add(
-            EvidenceClaim(
-                id=cid,
-                proposition=claim.proposition,
-                normalized_value=claim.normalized_value,
-                entities=claim.entities,
-                valid_from=None,
-                valid_until=None,
-                published_at=published_at,
-                available_at=available_at,
-                source_id=source.publisher or source.final_url,
-                source_url=source.final_url,
-                source_title=source.title,
-                source_type=_source_type(claim.authority_hint),
-                authority_level=AuthorityLevel(claim.authority_hint),
-                supporting_excerpt=claim.supporting_excerpt,
-                lineage_event_id=lineage,
-                epistemic_type=EpistemicType(claim.epistemic_type),
-                confidence=0.6 + 0.1 * claim.authority_hint,
-                retrieved_at=source.fetched_at,
-            )
-        )
-        return True
+        return replace(bundle, live_trace=trace.to_dict(plan, store))
 
     def _time_up(self, t0: float) -> bool:
         return (time.monotonic() - t0) > self.budget.max_seconds
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 
 def _missing_query(label: str) -> str:
@@ -354,25 +793,42 @@ def _topic(proposition: str) -> str:
     return proposition.split(":", 1)[0].strip().lower() if ":" in proposition else "fact"
 
 
+def _subject_key(claim: EvidenceClaim) -> str:
+    """A claim's subject: its proposition topic plus the entities it is about.
+
+    Two claims sharing a subject are talking about the same thing, which is the
+    precondition for their values being able to disagree. A claim naming no entity has
+    no identifiable subject and is not paired with anything.
+    """
+
+    if not claim.entities:
+        return ""
+    entities = ",".join(sorted(e.strip().lower() for e in claim.entities))
+    return f"{_topic(claim.proposition)}|{entities}"
+
+
+def _looks_like_domain(text: str) -> bool:
+    candidate = text.strip().lower()
+    return " " not in candidate and "." in candidate and not candidate.endswith(".")
+
+
+def _claim_text(claim: EvidenceClaim) -> str:
+    return f"{claim.proposition} {' '.join(claim.entities)} {claim.supporting_excerpt}"
+
+
+def _iso(value: datetime | None) -> str | None:
+    return value.isoformat() if value else None
+
+
+# The source category implied by each declared authority level. Keyed by the enum rather
+# than by bare integers so the mapping stays total as the enum changes.
+_SOURCE_TYPE_BY_AUTHORITY: dict[AuthorityLevel, SourceType] = {
+    AuthorityLevel.AUTHORITATIVE: SourceType.OFFICIAL_INSTITUTIONAL,
+    AuthorityLevel.HIGH: SourceType.PRIMARY_RECORD,
+    AuthorityLevel.MEDIUM: SourceType.CONTEMPORANEOUS_REPORTING,
+    AuthorityLevel.LOW: SourceType.LOW_QUALITY,
+}
+
+
 def _source_type(hint: int) -> SourceType:
-    return {
-        4: SourceType.OFFICIAL_INSTITUTIONAL,
-        3: SourceType.PRIMARY_RECORD,
-        2: SourceType.CONTEMPORANEOUS_REPORTING,
-        1: SourceType.LOW_QUALITY,
-    }.get(hint, SourceType.CONTEMPORANEOUS_REPORTING)
-
-
-def _missing_facts(plan: ResearchPlan, view: EvidenceView) -> list[str]:
-    """A required fact is 'covered' if some available claim shares vocabulary with it."""
-
-    available = view.available()
-    corpus_tokens = set()
-    for c in available:
-        corpus_tokens |= set(_WORD.findall((c.proposition + " " + " ".join(c.entities)).lower()))
-    missing = []
-    for fact in plan.required_facts:
-        tokens = set(_WORD.findall(fact.lower()))
-        if tokens and len(tokens & corpus_tokens) / len(tokens) < 0.5:
-            missing.append(fact)
-    return missing
+    return _SOURCE_TYPE_BY_AUTHORITY[AuthorityLevel(hint)]

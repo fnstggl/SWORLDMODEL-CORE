@@ -281,7 +281,7 @@ def _seed_branch(
                 )
             )
 
-    for aid, actor in world.actors.items():
+    for actor in world.actors.values():
         entries.extend(_plan_entries(actor))
         entries.extend(_commitment_entries(actor))
 
@@ -1036,9 +1036,12 @@ def _relevance(
         for cond in actor.revisit_conditions:
             if cond.on_information_from and cond.on_information_from == (ev.actor_id or ""):
                 return WAKE_REVISIT, cond.description
-            if cond.on_record_in and ev.kind == "append_record":
-                if str(ev.payload_dict.get("collection", "")) == cond.on_record_in:
-                    return WAKE_REVISIT, cond.description
+            if (
+                cond.on_record_in
+                and ev.kind == "append_record"
+                and str(ev.payload_dict.get("collection", "")) == cond.on_record_in
+            ):
+                return WAKE_REVISIT, cond.description
             if cond.on_field_change and ev.kind in ("set_field", "release_data", "adjust_field"):
                 data = ev.payload_dict
                 names = set(dict(data.get("fields", {})).keys()) | {str(data.get("field", ""))}

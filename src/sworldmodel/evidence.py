@@ -35,6 +35,13 @@ class EvidenceClaim:
     together. Multiple qualitative implications may be drawn from one meeting, but
     they share a lineage id and must never be counted as independent statistical
     cases.
+
+    The provenance fields (``retrieved_url``, ``archived_at``, ``content_sha256``,
+    ``extraction_prompt_sha256``) are what make a claim re-checkable: together with
+    ``supporting_excerpt`` and ``retrieved_at`` they identify the exact document the
+    claim came from, including which URL was actually requested when that differs from
+    the publisher's URL. They default to empty for stores built from an authored corpus,
+    where the corpus file is itself the record.
     """
 
     id: str
@@ -56,6 +63,32 @@ class EvidenceClaim:
     confidence: float
     retrieved_at: datetime
     contradiction_ids: tuple[str, ...] = ()
+    retrieved_url: str = ""
+    archived_at: datetime | None = None
+    content_sha256: str = ""
+    extraction_prompt_sha256: str = ""
+
+    def provenance(self) -> dict[str, object]:
+        """Everything a reader needs to re-verify this claim against its document."""
+
+        return {
+            "claim_id": self.id,
+            "proposition": self.proposition,
+            "normalized_value": self.normalized_value,
+            "source_url": self.source_url,
+            "retrieved_url": self.retrieved_url or self.source_url,
+            "archived_at": self.archived_at.isoformat() if self.archived_at else None,
+            "retrieved_at": self.retrieved_at.isoformat(),
+            "published_at": self.published_at.isoformat(),
+            "available_at": self.available_at.isoformat(),
+            "content_sha256": self.content_sha256,
+            "extraction_prompt_sha256": self.extraction_prompt_sha256,
+            "supporting_excerpt": self.supporting_excerpt,
+            "source_type": self.source_type.value,
+            "authority_level": int(self.authority_level),
+            "lineage_event_id": self.lineage_event_id,
+            "contradiction_ids": list(self.contradiction_ids),
+        }
 
     def __post_init__(self) -> None:
         if self.available_at < self.published_at:
@@ -116,13 +149,32 @@ class EvidenceStore:
         return {c.lineage_event_id for c in self.claims.values()}
 
     def contradictions(self) -> list[tuple[str, str]]:
-        """Return decisive contradiction pairs (a_id, b_id) recorded on claims."""
+        """Return decisive contradiction pairs (a_id, b_id) recorded on claims.
+
+        This reads only what :func:`record_contradiction` (or a corpus) put there. A
+        caller that reports "no conflicts" from an empty result is only entitled to do
+        so if contradiction detection actually ran on the claims in this store.
+        """
 
         pairs: set[tuple[str, str]] = set()
         for claim in self.claims.values():
             for other in claim.contradiction_ids:
                 pairs.add(tuple(sorted((claim.id, other))))  # type: ignore[arg-type]
         return sorted(pairs)
+
+    def record_contradiction(self, a_id: str, b_id: str) -> None:
+        """Record a decisive contradiction between two stored claims, symmetrically."""
+
+        if a_id == b_id:
+            raise EvidenceError(f"Claim {a_id} cannot contradict itself")
+        na, nb = mark_contradiction(self.get(a_id), self.get(b_id))
+        self.claims[na.id] = na
+        self.claims[nb.id] = nb
+
+    def provenance_records(self) -> list[dict[str, object]]:
+        """Per-claim provenance for the audit trail, ordered by claim id."""
+
+        return [c.provenance() for c in sorted(self.claims.values(), key=lambda c: c.id)]
 
     def view(self, as_of: datetime) -> EvidenceView:
         """Return the cutoff-bounded, read-only view used by all downstream code."""
@@ -165,21 +217,21 @@ class EvidenceView:
         return {c.lineage_event_id for c in self.available()}
 
     def relevant(self, query: str, *, limit: int) -> list[EvidenceClaim]:
-        """Rank available claims by lexical relevance to ``query`` and authority.
+        """Rank available claims by lexical relevance to ``query``, then by authority.
 
-        This is an *operational* retrieval heuristic — token overlap plus authority —
-        it encodes no social outcome. It never deletes anything: it selects the top
-        ``limit`` claims and renders them fully, ids intact.
+        This is an *operational* retrieval heuristic; it encodes no social outcome. The
+        two criteria are applied in order rather than combined by a weight, so no
+        invented exchange rate decides how much authority is worth how much overlap. It
+        never deletes anything: it selects the top ``limit`` claims and renders them
+        fully, ids intact.
         """
 
         q = set(_tokens(query))
-        scored: list[tuple[float, EvidenceClaim]] = []
-        for claim in self.available():
-            overlap = len(q & set(claim.tokens()))
-            score = overlap + 0.1 * int(claim.authority_level)
-            scored.append((score, claim))
-        scored.sort(key=lambda pair: (-pair[0], pair[1].id))
-        return [claim for _, claim in scored[:limit]]
+        ordered = sorted(
+            self.available(),
+            key=lambda c: (-len(q & set(c.tokens())), -int(c.authority_level), c.id),
+        )
+        return ordered[:limit]
 
     def render_view(self, query: str, *, limit: int) -> tuple[str, tuple[str, ...]]:
         """Render a token-limited, id-preserving evidence view for a prompt.

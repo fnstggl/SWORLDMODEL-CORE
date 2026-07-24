@@ -10,19 +10,29 @@ role, authority, and retrieved memories.
 This module fixes that generally. It builds a typed :class:`ActorGroundingProfile` per
 actor in which every element carries an explicit epistemic mark:
 
-    VERIFIED_OBSERVATION  — directly supported by cited evidence
-    SUPPORTED_INFERENCE   — reasoned from cited evidence, labeled as inference
-    SIMULATED_HYPOTHESIS  — an explicitly represented unknown explored in simulation
-    UNKNOWN               — not found; recorded as missing, never invented
+    VERIFIED_OBSERVATION  — directly supported by evidence claims that survived the
+                            store's citation check
+    SUPPORTED_INFERENCE   — reasoned from surviving cited evidence, labeled as inference
+    UNSUPPORTED           — no citation survived; kept for the audit trail, never
+                            rendered into an actor's prompt
 
-Two rules are structural, not stylistic:
+There is no mark for "not found". What was looked for and not found is recorded in
+``missing_information`` and rendered to the actor as such — it is not an element of
+the profile, because there is nothing to be an element of.
 
+Three rules are structural, not stylistic:
+
+* A mark may never outrun its citations. An item marked VERIFIED_OBSERVATION or
+  SUPPORTED_INFERENCE without a surviving claim id cannot be constructed at all
+  (:meth:`GroundedItem.__post_init__` raises), because the compiler upstream deletes
+  claim ids that are not in the evidence store — so an actor memory whose citations
+  were stripped would otherwise reach the live actor stamped as an observed fact.
 * A verified historical action may never be overwritten by an inferred current
-  position. ``previous_observed_action`` and ``current_evidence_grounded_inclination``
+  position. ``previous_observed_actions`` and ``current_evidence_grounded_inclination``
   are separate fields with separate provenance.
 * Similarity between actors is allowed — actors genuinely share positions — but it must
-  come from evidence, never from a generic template. An actor known to exist whose
-  grounding is only a name plus a generic role is a defect the gate refuses.
+  come from evidence, never from a generic template. An actor that carries no cited,
+  self-attributed record of its own is a defect the gate refuses, naming the actor.
 
 Nothing here is scenario-specific: the same structure grounds a committee member, a
 head of state, an organization's representative, or a constructed population stratum.
@@ -36,14 +46,27 @@ from enum import StrEnum
 
 from .errors import WorldIntegrityError
 
+_WORD = re.compile(r"[a-z0-9]+")
+
+# Grammatical first person. This is a closed class of English pronouns — a property of
+# *voice*, not a domain vocabulary — so it says "this record is written as the actor's
+# own" for a committee member, a head of state or a population stratum alike.
+_FIRST_PERSON = frozenset(
+    {"i", "me", "my", "mine", "myself", "we", "us", "our", "ours", "ourselves"}
+)
+
 
 class Provenance(StrEnum):
-    """How a grounding element is known. An inference is never presented as a fact."""
+    """How a grounding element is known. An inference is never presented as a fact,
+    and an uncited item is never presented as either."""
 
     VERIFIED_OBSERVATION = "verified_observation"
     SUPPORTED_INFERENCE = "supported_inference"
-    SIMULATED_HYPOTHESIS = "simulated_hypothesis"
-    UNKNOWN = "unknown"
+    UNSUPPORTED = "unsupported"
+
+
+# The marks that assert evidential support. Both require at least one surviving claim id.
+_SUPPORTED = frozenset({Provenance.VERIFIED_OBSERVATION, Provenance.SUPPORTED_INFERENCE})
 
 
 @dataclass(frozen=True)
@@ -56,29 +79,56 @@ class GroundedItem:
     lineage_ids: tuple[str, ...] = ()
     valid_time: str | None = None
 
+    def __post_init__(self) -> None:
+        # The mark exists to track the citations that actually survived. A supported
+        # mark with no claim id would be rendered to a live actor as established fact
+        # with nothing behind it, which is the worst failure this system has.
+        if self.provenance in _SUPPORTED and not self.claim_ids:
+            raise WorldIntegrityError(
+                f"a {self.provenance.value} element must cite at least one evidence claim",
+                details={"content": self.content},
+            )
+
     @property
     def is_verified(self) -> bool:
         return self.provenance is Provenance.VERIFIED_OBSERVATION
 
+    @property
+    def is_supported(self) -> bool:
+        """True when evidence actually stands behind this item. Only supported items
+        are rendered into an actor's prompt."""
+
+        return self.provenance in _SUPPORTED
+
     def render(self) -> str:
-        """Render with the epistemic mark visible, so a model reading the prompt can
-        never mistake an inference for an observed fact."""
+        """Render with the epistemic mark and its citations visible, so a model reading
+        the prompt can never mistake an inference for an observed fact."""
 
         cites = f" [{','.join(self.claim_ids)}]" if self.claim_ids else ""
         when = f" ({self.valid_time})" if self.valid_time else ""
         return f"{self.content}{when} — {self.provenance.value.upper()}{cites}"
 
 
-def verified(content: str, claim_ids: tuple[str, ...] = (), **kw: object) -> GroundedItem:
-    return GroundedItem(content, Provenance.VERIFIED_OBSERVATION, claim_ids, **kw)  # type: ignore[arg-type]
+def observation(
+    content: str, claim_ids: tuple[str, ...], *, valid_time: str | None = None
+) -> GroundedItem:
+    """Something the evidence records about this actor.
+
+    VERIFIED_OBSERVATION when at least one citation survived the evidence store's
+    check; UNSUPPORTED when none did. The mark is decided by the citations, never by
+    the caller's confidence.
+    """
+
+    mark = Provenance.VERIFIED_OBSERVATION if claim_ids else Provenance.UNSUPPORTED
+    return GroundedItem(content, mark, claim_ids, valid_time=valid_time)
 
 
-def inferred(content: str, claim_ids: tuple[str, ...] = (), **kw: object) -> GroundedItem:
-    return GroundedItem(content, Provenance.SUPPORTED_INFERENCE, claim_ids, **kw)  # type: ignore[arg-type]
+def inference(content: str, claim_ids: tuple[str, ...]) -> GroundedItem:
+    """Something reasoned from evidence. SUPPORTED_INFERENCE when a citation survived,
+    UNSUPPORTED when none did — an inference with nothing behind it is not support."""
 
-
-def unknown(content: str) -> GroundedItem:
-    return GroundedItem(content, Provenance.UNKNOWN, ())
+    mark = Provenance.SUPPORTED_INFERENCE if claim_ids else Provenance.UNSUPPORTED
+    return GroundedItem(content, mark, claim_ids)
 
 
 @dataclass(frozen=True)
@@ -88,6 +138,9 @@ class ActorGroundingProfile:
     ``is_constructed_representative`` marks a deliberately synthetic agent (a population
     stratum) — such an actor is permitted to be generic, carries a population weight,
     and may never impersonate a named real person.
+
+    ``unsupported_records`` holds elements whose citations did not survive. They are
+    kept so the trace can show what was dropped and why; they are never rendered.
     """
 
     actor_id: str
@@ -110,11 +163,11 @@ class ActorGroundingProfile:
 
     current_evidence_grounded_inclination: GroundedItem | None = None
     conditional_reaction_model: tuple[GroundedItem, ...] = ()
-    unresolved_private_hypotheses: tuple[GroundedItem, ...] = ()
 
     claim_ids: tuple[str, ...] = ()
     lineage_ids: tuple[str, ...] = ()
     missing_information: tuple[str, ...] = ()
+    unsupported_records: tuple[GroundedItem, ...] = ()
 
     is_constructed_representative: bool = False
     population_weight: float | None = None
@@ -122,28 +175,53 @@ class ActorGroundingProfile:
     # ---- derived views -----------------------------------------------------
 
     @property
+    def own_record_groups(self) -> tuple[tuple[GroundedItem, ...], ...]:
+        """The groups that hold this actor's own record of what it did, said, holds, or
+        is bound by — as opposed to context, inferences about it, or documents."""
+
+        return (
+            self.previous_observed_actions,
+            self.direct_statements,
+            self.stated_preferences,
+            self.commitments,
+        )
+
+    @property
     def previous_observed_action(self) -> GroundedItem | None:
-        """The most recent verified action, if any. Never an inference."""
+        """The leading entry of this actor's own verified history, if it has one.
+
+        Entries are in construction order (an explicitly compiled previous action
+        first, then seeded memories in compiled order); nothing here claims to know
+        which is most recent. Never an inference.
+        """
 
         for item in self.previous_observed_actions:
             if item.is_verified:
                 return item
-        return self.previous_observed_actions[0] if self.previous_observed_actions else None
+        return None
+
+    def identity_keys(self) -> frozenset[str]:
+        """The name forms by which this actor may be referred to in prose.
+
+        A single character is a letter, not a name: it carries no discriminating signal
+        and would fire on the article "a" or an initial inside any record, so it is not
+        used to decide who a record is about.
+        """
+
+        keys = {self.actor_id.lower(), self.canonical_identity.lower()}
+        keys.update(a.lower() for a in self.aliases)
+        return frozenset(k for k in keys if len(k) > 1)
 
     def all_items(self) -> list[GroundedItem]:
         groups = (
-            self.previous_observed_actions,
-            self.direct_statements,
-            self.stated_preferences,
+            *self.own_record_groups,
             self.inferred_preferences,
             self.goals,
             self.constraints,
-            self.commitments,
             self.relationships,
             self.information_access,
             self.relevant_documents,
             self.conditional_reaction_model,
-            self.unresolved_private_hypotheses,
         )
         items = [i for g in groups for i in g]
         if self.current_evidence_grounded_inclination is not None:
@@ -158,21 +236,37 @@ class ActorGroundingProfile:
         return tuple(sorted(ids))
 
     @property
-    def is_only_name_and_role(self) -> bool:
-        """True when nothing actor-specific beyond identity/role/authority is known —
-        i.e. the actor is effectively a generic role template."""
+    def own_cited_records(self) -> tuple[GroundedItem, ...]:
+        """This actor's own record: verified (hence cited) *and* self-attributed —
+        written in the actor's own voice, or explicitly naming the actor.
 
-        substantive = (
-            self.previous_observed_actions
-            + self.direct_statements
-            + self.stated_preferences
-            + self.commitments
-            + self.goals
+        A cited fact about the world is not grounding for a person; a first-person
+        record with no surviving citation is not evidence. Only items that are both
+        count.
+        """
+
+        keys = self.identity_keys()
+        return tuple(
+            item
+            for group in self.own_record_groups
+            for item in group
+            if item.is_verified and _self_attributed(item.content, keys)
         )
-        return not any(i.provenance is not Provenance.UNKNOWN for i in substantive)
+
+    @property
+    def has_own_cited_record(self) -> bool:
+        """True when the actor carries at least one cited, self-attributed record of a
+        prior action, statement, stated position or commitment of its own."""
+
+        return bool(self.own_cited_records)
 
     def render_grounding(self) -> str:
-        """The ACTOR-SPECIFIC GROUNDING block placed in this actor's prompt."""
+        """The ACTOR-SPECIFIC GROUNDING block placed in this actor's prompt.
+
+        Only items with surviving citations are rendered, each carrying its own mark
+        and claim ids. An element whose citations did not survive is never shown here
+        — the actor is told how many were withheld, not what they said.
+        """
 
         lines: list[str] = [f"You are {self.canonical_identity}."]
         if self.aliases:
@@ -187,11 +281,15 @@ class ActorGroundingProfile:
             )
 
         def block(title: str, items: tuple[GroundedItem, ...]) -> None:
-            if items:
+            shown = [i for i in items if i.is_supported]
+            if shown:
                 lines.append(f"\n{title}:")
-                lines.extend(f"  - {i.render()}" for i in items)
+                lines.extend(f"  - {i.render()}" for i in shown)
 
-        block("YOUR OWN PREVIOUS ACTIONS (historical record)", self.previous_observed_actions)
+        block(
+            "YOUR OWN RECORD, FROM CITED EVIDENCE (what you previously did, said, or held)",
+            self.previous_observed_actions,
+        )
         block("YOUR OWN PUBLIC STATEMENTS", self.direct_statements)
         block("YOUR STATED PREFERENCES", self.stated_preferences)
         block("YOUR COMMITMENTS", self.commitments)
@@ -200,14 +298,14 @@ class ActorGroundingProfile:
         block("YOUR RELATIONSHIPS", self.relationships)
         block("YOUR INFORMATION ACCESS", self.information_access)
         block("PREFERENCES INFERRED ABOUT YOU (not observed)", self.inferred_preferences)
-        if self.current_evidence_grounded_inclination is not None:
+        incl = self.current_evidence_grounded_inclination
+        if incl is not None and incl.is_supported:
             lines.append(
                 "\nYOUR CURRENT INCLINATION (an inference about now — it does NOT replace "
-                "your previous actions above):"
+                "your own record above):"
             )
-            lines.append(f"  - {self.current_evidence_grounded_inclination.render()}")
+            lines.append(f"  - {incl.render()}")
         block("WHAT WOULD CHANGE YOUR POSITION", self.conditional_reaction_model)
-        block("OPEN QUESTIONS ABOUT YOUR OWN VIEW", self.unresolved_private_hypotheses)
         if self.missing_information:
             lines.append("\nNOT KNOWN ABOUT YOU (do not invent these):")
             lines.extend(f"  - {m}" for m in self.missing_information)
@@ -249,7 +347,8 @@ class ActorGroundingProfile:
                 {"content": incl.content, "provenance": incl.provenance.value} if incl else None
             ),
             "conditional_reaction_model": ser(self.conditional_reaction_model),
-            "unresolved_private_hypotheses": ser(self.unresolved_private_hypotheses),
+            "own_cited_records": ser(self.own_cited_records),
+            "unsupported_records": ser(self.unsupported_records),
             "claim_ids": list(self.evidence_claim_ids),
             "lineage_ids": list(self.lineage_ids),
             "missing_information": list(self.missing_information),
@@ -258,39 +357,56 @@ class ActorGroundingProfile:
         }
 
 
+def _self_attributed(content: str, keys: frozenset[str]) -> bool:
+    """True when ``content`` is this actor's own record: written in the first person,
+    or explicitly naming the actor."""
+
+    low = content.lower()
+    if set(_WORD.findall(low)) & _FIRST_PERSON:
+        return True
+    return any(_names(k, low) for k in keys)
+
+
+def _names(key: str, text: str) -> bool:
+    """True when ``key`` occurs in ``text`` as a whole word/phrase (not a substring of
+    a longer word), so an id like "ada" cannot match inside "adamant"."""
+
+    return re.search(rf"(?<![a-z0-9]){re.escape(key)}(?![a-z0-9])", text) is not None
+
+
 # ---------------------------------------------------------------------------
 # Deterministic actor-grounding coverage gate
 # ---------------------------------------------------------------------------
 
 
-class ActorClaimDisposition(StrEnum):
-    INCLUDED_IN_ACTOR_PROFILE = "included_in_actor_profile"
-    INCLUDED_AS_SHARED_CONTEXT = "included_as_shared_context"
-    EXCLUDED_IRRELEVANT = "excluded_irrelevant"
-    MERGED_DUPLICATE = "merged_duplicate"
-    UNCERTAIN = "uncertain"
-    REQUIRED_BUT_UNRESOLVED = "required_but_unresolved"
+# The only disposition an actor-grounding pass assigns: this claim reached this
+# actor's profile. Deciding that a claim is irrelevant, a duplicate, or unresolved is
+# the coverage gate's job (see :class:`sworldmodel.coverage.Disposition`); mirroring
+# that vocabulary here declared five outcomes this module never produces.
+_INCLUDED_IN_ACTOR_PROFILE = "included_in_actor_profile"
 
 
 @dataclass(frozen=True)
 class ActorGroundingReport:
     profiles: tuple[ActorGroundingProfile, ...]
-    generic_actors: tuple[str, ...] = ()
+    ungrounded_actors: tuple[str, ...] = ()
     misattributed: tuple[str, ...] = ()
     missing_previous_actions: tuple[str, ...] = ()
+    dropped_uncited: tuple[str, ...] = ()
     dispositions: tuple[tuple[str, str, str], ...] = ()  # (claim_id, actor_id, disposition)
     notes: tuple[str, ...] = ()
 
     @property
     def is_complete(self) -> bool:
-        return not (self.generic_actors or self.misattributed or self.missing_previous_actions)
+        return not (self.ungrounded_actors or self.misattributed or self.missing_previous_actions)
 
     def as_dict(self) -> dict[str, object]:
         return {
             "complete": self.is_complete,
-            "generic_actors": list(self.generic_actors),
+            "ungrounded_actors": list(self.ungrounded_actors),
             "misattributed": list(self.misattributed),
             "missing_previous_actions": list(self.missing_previous_actions),
+            "dropped_uncited": list(self.dropped_uncited),
             "profiles": [p.as_dict() for p in self.profiles],
             "dispositions": [
                 {"claim_id": c, "actor_id": a, "disposition": d} for c, a, d in self.dispositions
@@ -304,28 +420,28 @@ def assess_actor_grounding(
     *,
     require_previous_action: bool = False,
 ) -> ActorGroundingReport:
-    """Check that each named actor is grounded as a specific person rather than a
-    generic role template, and that no actor carries another actor's history."""
+    """Check that each actor is grounded as the specific entity it claims to be.
 
-    generic: list[str] = []
+    An actor passes only when it carries at least one *cited, self-attributed* record
+    of its own — a prior action, statement, stated position or commitment that both
+    survives the citation check and is written in the actor's own voice (or names it).
+    No actor may carry another actor's personal record.
+    """
+
+    ungrounded: list[str] = []
     misattributed: list[str] = []
     missing_prev: list[str] = []
+    dropped: list[str] = []
     dispositions: list[tuple[str, str, str]] = []
 
     # Cross-assignment check. Sharing a *source* is legitimate — one set of minutes or
     # one poll can back every actor — so claim-id overlap is not misattribution. The
     # real defect is an actor's personal record whose CONTENT is about someone else
     # (a profile carrying "<another actor> stated: ...").
-    others: dict[str, set[str]] = {}
+    keys_by_actor = {p.actor_id: p.identity_keys() for p in profiles}
     for p in profiles:
-        keys = {p.actor_id.lower(), p.canonical_identity.lower()}
-        keys.update(a.lower() for a in p.aliases)
-        # Very short handles ("a", "b") are matched as whole words only; they carry no
-        # discriminating signal inside prose and would otherwise fire on any substring.
-        others[p.actor_id] = {k for k in keys if len(k) >= 3}
-    for p in profiles:
-        mine = others[p.actor_id]
-        foreign = {k for other, keys in others.items() if other != p.actor_id for k in keys}
+        mine = keys_by_actor[p.actor_id]
+        foreign = {k for other, keys in keys_by_actor.items() if other != p.actor_id for k in keys}
         for item in list(p.previous_observed_actions) + list(p.direct_statements):
             low = item.content.lower()
             if any(_names(m, low) for m in mine):
@@ -333,55 +449,51 @@ def assess_actor_grounding(
             hit = next((k for k in sorted(foreign) if _names(k, low)), None)
             if hit:
                 misattributed.append(
-                    f"{p.actor_id} carries a personal record naming {hit!r}: {item.content[:80]!r}"
+                    f"{p.actor_id} carries a personal record naming {hit!r}: {item.content!r}"
                 )
 
     for p in profiles:
+        for item in p.unsupported_records:
+            dropped.append(f"{p.actor_id}: {item.content!r} had no surviving evidence citation")
         if p.is_constructed_representative:
             # A deliberately synthetic stratum is allowed to be generic, but it must be
             # labeled and carry a population weight.
             if p.population_weight is None:
-                generic.append(f"{p.actor_id}: constructed representative without a weight")
+                ungrounded.append(f"{p.actor_id}: constructed representative without a weight")
             continue
-        if p.is_only_name_and_role:
-            generic.append(
-                f"{p.actor_id} ({p.canonical_identity}): only a name and a generic role — "
-                "no verified action, statement, preference, or commitment"
+        if not p.has_own_cited_record:
+            ungrounded.append(
+                f"{p.actor_id} ({p.canonical_identity}): no cited, first-person, "
+                "evidence-supported prior action, statement, position or commitment — "
+                "this actor is a name and a role, not a grounded participant"
             )
         if require_previous_action and p.previous_observed_action is None:
             missing_prev.append(f"{p.actor_id} ({p.canonical_identity}): no previous action found")
         for cid in p.evidence_claim_ids:
-            dispositions.append(
-                (cid, p.actor_id, ActorClaimDisposition.INCLUDED_IN_ACTOR_PROFILE.value)
-            )
+            dispositions.append((cid, p.actor_id, _INCLUDED_IN_ACTOR_PROFILE))
 
     return ActorGroundingReport(
         profiles=profiles,
-        generic_actors=tuple(generic),
+        ungrounded_actors=tuple(ungrounded),
         misattributed=tuple(sorted(set(misattributed))),
         missing_previous_actions=tuple(missing_prev),
+        dropped_uncited=tuple(dropped),
         dispositions=tuple(dispositions),
     )
 
 
-def _names(key: str, text: str) -> bool:
-    """True when ``key`` occurs in ``text`` as a whole word/phrase (not a substring of
-    a longer word), so an id like "ada" cannot match inside "adamant"."""
-
-    return re.search(rf"(?<![a-z0-9]){re.escape(key)}(?![a-z0-9])", text) is not None
-
-
 def enforce_actor_grounding(report: ActorGroundingReport) -> None:
-    """Refuse to simulate a world whose named actors are generic role templates."""
+    """Refuse to simulate a world whose actors are not grounded in cited evidence."""
 
     if report.is_complete:
         return
     raise WorldIntegrityError(
-        "actors are not grounded as specific people — simulation refused",
+        "actors are not grounded in cited evidence — simulation refused",
         details={
-            "generic_actors": list(report.generic_actors),
+            "ungrounded_actors": list(report.ungrounded_actors),
             "misattributed_evidence": list(report.misattributed),
             "missing_previous_actions": list(report.missing_previous_actions),
+            "dropped_uncited_records": list(report.dropped_uncited),
         },
     )
 
@@ -389,9 +501,6 @@ def enforce_actor_grounding(report: ActorGroundingReport) -> None:
 # ---------------------------------------------------------------------------
 # Building profiles from compiled member specs
 # ---------------------------------------------------------------------------
-
-_ACTION_HINTS = ("voted", "vote", "supported", "opposed", "dissent", "preferred", "backed")
-_STATEMENT_HINTS = ("said", "stated", "told", "wrote", "speech", "interview", "remarked")
 
 
 def profile_from_member(
@@ -406,84 +515,82 @@ def profile_from_member(
     inclination: str | None = None,
     inclination_claim_ids: tuple[str, ...] = (),
     reaction_rules: tuple[tuple[str, str], ...] = (),
+    reaction_rule_claim_ids: tuple[str, ...] = (),
     valid_time: str | None = None,
 ) -> ActorGroundingProfile:
     """Build a grounded profile from an actor's compiled evidence.
 
-    The verified previous action is preserved as its own field; the inferred current
-    inclination is recorded separately and explicitly marked as an inference. Seeded
-    memories are sorted into previous actions vs statements by their own wording so an
-    actor's personal history reaches the prompt as history, not as a generic note.
+    Every element's mark is decided by the citations that survived: an item with a
+    surviving claim id becomes a VERIFIED_OBSERVATION (or, for the inclination and the
+    reaction rules, a SUPPORTED_INFERENCE); an item with none becomes UNSUPPORTED, is
+    held in ``unsupported_records`` for the trace, and never reaches the actor's
+    prompt. The verified record is kept in its own field so the inferred current
+    inclination can never overwrite it.
+
+    Seeded memories are not sorted by their wording. Guessing from words like "voted"
+    which memory is an "action" and which a "statement" is a scenario assumption, and
+    it would put the gate at the mercy of vocabulary; a seed is simply this actor's own
+    record, and whether it is self-attributed is checked directly.
     """
 
-    prev: list[GroundedItem] = []
-    statements: list[GroundedItem] = []
-    other: list[GroundedItem] = []
+    records: list[GroundedItem] = []
+    dropped: list[GroundedItem] = []
+
+    def keep(item: GroundedItem, into: list[GroundedItem]) -> None:
+        (into if item.is_supported else dropped).append(item)
+
     if previous_action:
-        prev.append(
-            GroundedItem(
-                content=f"took the action: {previous_action}",
-                provenance=Provenance.VERIFIED_OBSERVATION,
-                claim_ids=previous_action_claim_ids,
+        keep(
+            observation(
+                f"took the action: {previous_action}",
+                previous_action_claim_ids,
                 valid_time=valid_time,
-            )
+            ),
+            records,
         )
     for content, cids in memory_seeds:
         text = content.strip()
-        if not text:
-            continue
-        low = text.lower()
-        item = GroundedItem(
-            content=text, provenance=Provenance.VERIFIED_OBSERVATION, claim_ids=cids
-        )
-        if any(h in low for h in _ACTION_HINTS):
-            prev.append(item)
-        elif any(h in low for h in _STATEMENT_HINTS):
-            statements.append(item)
-        else:
-            other.append(item)
+        if text:
+            keep(observation(text, cids), records)
 
-    inclination_item = None
+    inclination_item: GroundedItem | None = None
     if inclination:
-        inclination_item = GroundedItem(
-            content=f"currently expected to favor: {inclination}",
-            provenance=Provenance.SUPPORTED_INFERENCE,
-            claim_ids=inclination_claim_ids,
-        )
-    reactions = tuple(
-        GroundedItem(
-            content=f"if {signal} crosses its threshold, would move toward {option}",
-            provenance=Provenance.SUPPORTED_INFERENCE,
-        )
-        for signal, option in reaction_rules
-    )
-    missing: list[str] = []
-    if not prev:
-        missing.append("no previous outcome-relevant action found in evidence")
-    if not statements:
-        missing.append("no direct public statement found in evidence")
+        item = inference(f"currently expected to favor: {inclination}", inclination_claim_ids)
+        if item.is_supported:
+            inclination_item = item
+        else:
+            dropped.append(item)
 
-    return ActorGroundingProfile(
+    reactions: list[GroundedItem] = []
+    for signal, option in reaction_rules:
+        keep(
+            inference(
+                f"if {signal} crosses its threshold, would move toward {option}",
+                reaction_rule_claim_ids,
+            ),
+            reactions,
+        )
+
+    profile = ActorGroundingProfile(
         actor_id=actor_id,
         canonical_identity=name,
         role=role,
         authority=authority,
         valid_time=valid_time,
-        previous_observed_actions=tuple(prev),
-        direct_statements=tuple(statements),
-        stated_preferences=tuple(other),
+        previous_observed_actions=tuple(records),
         current_evidence_grounded_inclination=inclination_item,
-        conditional_reaction_model=reactions,
-        missing_information=tuple(missing),
+        conditional_reaction_model=tuple(reactions),
+        unsupported_records=tuple(dropped),
     )
 
-
-def with_simulated_hypothesis(
-    profile: ActorGroundingProfile, hypothesis: str
-) -> ActorGroundingProfile:
-    """Attach an explicitly-simulated private-state hypothesis (never a claimed fact)."""
-
-    item = GroundedItem(hypothesis, Provenance.SIMULATED_HYPOTHESIS, ())
-    return replace(
-        profile, unresolved_private_hypotheses=(*profile.unresolved_private_hypotheses, item)
-    )
+    missing: list[str] = []
+    if not profile.has_own_cited_record:
+        missing.append(
+            "no previous action or statement of this actor is supported by cited evidence"
+        )
+    if dropped:
+        missing.append(
+            f"{len(dropped)} compiled element(s) had no surviving evidence citation and "
+            "were withheld from this briefing"
+        )
+    return replace(profile, missing_information=tuple(missing))

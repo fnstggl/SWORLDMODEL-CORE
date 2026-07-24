@@ -12,10 +12,9 @@ import ast
 from datetime import datetime
 from pathlib import Path
 
+import sworldmodel
 from _fakes import ProgrammableGateway, act, build_bundle, wait_decision
 from _worlds import scheduled_multiparty_world, single_response_world
-
-import sworldmodel
 from sworldmodel.effects import UNIVERSAL_OPS
 from sworldmodel.engine import run
 from sworldmodel.expressions import evaluate
@@ -110,21 +109,24 @@ def test_no_domain_action_vocabulary_is_hardcoded() -> None:
     in production code would mean the runtime has opinions about what people can do.
     """
 
-    assert UNIVERSAL_OPS == frozenset(
-        {
-            "create_event",
-            "schedule_event",
-            "deliver_information",
-            "release_data",
-            "set_field",
-            "adjust_field",
-            "append_record",
-            "update_commitment",
-            "transfer_resource",
-            "consume_resource",
-            "create_or_update_document",
-            "advance_time",
-        }
+    assert (
+        frozenset(
+            {
+                "create_event",
+                "schedule_event",
+                "deliver_information",
+                "release_data",
+                "set_field",
+                "adjust_field",
+                "append_record",
+                "update_commitment",
+                "transfer_resource",
+                "consume_resource",
+                "create_or_update_document",
+                "advance_time",
+            }
+        )
+        == UNIVERSAL_OPS
     )
     banned = {
         "cast_vote",

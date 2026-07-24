@@ -23,11 +23,18 @@ Pipeline (canonical production path, not a diagnostic):
     verified evidence
       -> deterministic candidate inventory        (build_candidate_inventory)
       -> materiality review                        (deterministic + optional LLM)
+      -> the whole inventory handed to the compiler (evidence_checklist)
       -> LLM world compilation using the inventory (world_compiler / corpus)
       -> deterministic coverage comparison         (assess_coverage)
       -> targeted research / compilation repair     (api._compile_with_repair)
       -> world-integrity gate                       (enforce_coverage + verify_reality)
       -> simulation
+
+The checklist is the *whole* inventory, not the material subset. Materiality grows
+with inputs that are read off the compiled world (the identities it names, the claims
+it keys on), which do not exist yet when the compiler is prompted; showing only what
+is material without them would ask the compiler for less than the gate enforces and
+make every difference an unsatisfiable repair round. See :func:`evidence_checklist`.
 
 The comparison runs against the *exact compiled WorldSpec that will be simulated*
 (see :func:`sworldmodel.world_compiler.world_spec_view`), so nothing can be verified
@@ -147,11 +154,16 @@ class WorldObject:
     for and — critically — whether it is *wired* into the simulation and where."""
 
     object_id: str
-    kind: str  # "actor" | "institution" | "rule" | "signal" | "terminal" | "world_fact" | ...
+    # As emitted by ``world_compiler.world_spec_view``: "actor", "rule", "signal",
+    # "document", "resource", "channel", "scheduled_event", "terminal", "world_fact",
+    # or a non-actor entity's own compiled kind.
+    kind: str
     name: str
     claim_ids: tuple[str, ...] = ()
     wired: bool = False
-    uses: tuple[str, ...] = ()  # causal-use tags: actor_view / vote / terminal / reaction / ...
+    # Causal-use tags read off the compiled program: actor_view / action / authority /
+    # reaction / branch / process / terminal / effect_target / resource.
+    uses: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -322,14 +334,21 @@ def _entity_kind(entity: str, propositions: str) -> CandidateKind | None:
     tokens = set(_WORD.findall(low))
     if tokens & _ORG_WORDS or low.split()[-1] in _ORG_SUFFIX:
         return CandidateKind.ORGANIZATION
-    # An all-caps acronym referenced as a body (FOMC, ECB, SCOTUS, UN).
-    if 2 <= len(entity) <= 8 and entity.isupper() and entity.isalpha():
+    # An all-caps acronym referenced as a body (FOMC, ECB, SCOTUS, UN). ``isalpha``
+    # already excludes anything with a space, so no length ceiling is needed to keep
+    # a shouted sentence out; a single letter is excluded because it is an initial,
+    # not an organization.
+    if len(entity) > 1 and entity.isupper() and entity.isalpha():
         return CandidateKind.ORGANIZATION
     if tokens & _POPULATION_WORDS:
         return CandidateKind.POPULATION_GROUP
-    # A multi-word proper name is person-like; or a single name spoken about with a
-    # personal role verb.
-    if len(words) >= 2 and entity[:1].isupper():
+    # A capitalized name of more than one token is person-like. The shape is the whole
+    # rule and there is no threshold to tune: a single capitalized token is as likely a
+    # month, a place or a product, and reading it as a person would manufacture a
+    # participant that the reality gate then demands a seat for. The cost is that a
+    # mononym is only recognized when the evidence also uses organization or population
+    # language about it, or the compiled world names it as a focal identity.
+    if len(words) > 1 and entity[:1].isupper():
         return CandidateKind.PERSON
     return None
 
@@ -429,11 +448,26 @@ def evidence_checklist(
     focal_identities: tuple[str, ...] = (),
     as_of: datetime,
     horizon: datetime,
-    max_items: int = 80,
+    signal_claim_ids: frozenset[str] = frozenset(),
+    required_fact_ids: frozenset[str] = frozenset(),
 ) -> str:
-    """A compact, kind-grouped enumeration of the *material* evidence candidates, for
-    injection into an LLM compile prompt so the model is handed an explicit inventory
-    of what verified reality contains rather than being trusted to recall it."""
+    """The kind-grouped enumeration of evidence candidates handed to the LLM compiler.
+
+    It lists the **whole** inventory, not the subset that is material under the inputs
+    available before compilation. That is not a stylistic choice. Materiality grows
+    monotonically with the inputs: a candidate can only move from immaterial to
+    material as focal identities and signal claim ids arrive, and both of those are
+    read off the compiled world, so they exist at gate time and not here. Filtering
+    here by a materiality computed without them would hand the compiler a strictly
+    smaller list than the gate later enforces — the compiler would be judged on items
+    it was never asked for, and every such item would drive a repair round that no
+    amount of further research can satisfy.
+
+    Listing everything makes the checklist independent of those inputs, so whatever the
+    gate demands was on the list. ``signal_claim_ids`` / ``required_fact_ids`` /
+    ``focal_identities`` are still accepted so a caller that already knows them gets
+    the same materiality labels the gate will compute.
+    """
 
     candidates = build_inventory_from(
         view,
@@ -441,19 +475,23 @@ def evidence_checklist(
         focal_identities=focal_identities,
         as_of=as_of,
         horizon=horizon,
+        required_fact_ids=required_fact_ids,
+        signal_claim_ids=signal_claim_ids,
     )
-    material = [c for c in candidates if c.is_material][:max_items]
-    if not material:
-        return "(no material candidates detected)"
+    if not candidates:
+        return "(the verified evidence implies no world elements)"
     by_kind: dict[str, list[EvidenceCandidate]] = {}
-    for c in material:
+    for c in candidates:
         by_kind.setdefault(c.kind.value, []).append(c)
-    lines: list[str] = []
+    lines: list[str] = [
+        "Every item below was found in the verified evidence and is checked against the "
+        "world you compile. Anything you leave out must be genuinely incidental to the "
+        "outcome.",
+    ]
     for kind in sorted(by_kind):
-        items = "; ".join(
-            f"{c.canonical_identity} [{','.join(c.claim_ids[:4])}]" for c in by_kind[kind]
-        )
-        lines.append(f"- {kind}: {items}")
+        for c in by_kind[kind]:
+            cites = ",".join(c.claim_ids) or "no direct citation"
+            lines.append(f"- {kind} | {c.canonical_identity} [{cites}]")
     return "\n".join(lines)
 
 
@@ -625,7 +663,10 @@ def _claim_kind_candidates(
         claim_ids = tuple(sorted(group.claims))
         conflicted = _conflicting(list(group.claims.values()))
         materiality = _claim_materiality(group.kind, rep, claim_ids, conflicted, ctx)
-        identity = _snippet(rep.proposition)
+        # The whole proposition is the identity. Truncating it to a fixed number of
+        # words shortened what the compiler was shown and changed which compiled
+        # objects the identity could match, on nothing but the size of the cutoff.
+        identity = " ".join(rep.proposition.split())
         out.append(
             EvidenceCandidate(
                 candidate_id=content_id("cand", group.kind.value, rep.lineage_event_id, identity),
@@ -775,9 +816,64 @@ def _conflicting(claims: list[EvidenceClaim]) -> bool:
     return any(len(values) > 1 for values in by_prop.values())
 
 
-def _snippet(text: str, *, words: int = 8) -> str:
-    parts = text.split()
-    return " ".join(parts[:words])
+# ---------------------------------------------------------------------------
+# Participants the evidence itself names
+# ---------------------------------------------------------------------------
+
+
+def evidence_named_participants(
+    view: EvidenceView,
+    contract: ResolutionContract,
+    *,
+    focal_identities: tuple[str, ...] = (),
+    signal_claim_ids: frozenset[str] = frozenset(),
+) -> tuple[str, ...]:
+    """The distinct persons the verified claims themselves name as decision-relevant.
+
+    This is the evidence-side anchor for the participant count. A person counts when
+    the evidence speaks about them in role or authority terms, or when a claim naming
+    them also names a focal identity — the same materiality rule the coverage gate
+    applies, so the two cannot disagree.
+
+    Organizations and population groups are deliberately not counted. The evidence does
+    not say whether such a body is one participant or a container for many, and turning
+    it into a number would invent the very fact the caller is trying to verify.
+
+    An empty result means the evidence does not establish a participant set at all. It
+    is not a count of zero, and a caller must not report a check it could not run.
+    """
+
+    inventory = build_candidate_inventory(
+        view,
+        contract,
+        signal_claim_ids=signal_claim_ids,
+        focal_identities=focal_identities,
+    )
+    return tuple(
+        sorted(
+            {
+                c.canonical_identity
+                for c in inventory
+                if c.kind is CandidateKind.PERSON and c.is_material
+            }
+        )
+    )
+
+
+def participants_absent_from(
+    identities: tuple[str, ...], roster_names: tuple[str, ...]
+) -> tuple[str, ...]:
+    """Those ``identities`` that no name on ``roster_names`` refers to.
+
+    Matching is the same normalized containment the coverage comparison uses, so an
+    identity written "Governor Ada North" in one place and "Ada North" in the other is
+    one person, not two.
+    """
+
+    roster = [n for n in (_norm(r) for r in roster_names) if n]
+    return tuple(
+        ident for ident in identities if not any(_overlaps(_norm(ident), name) for name in roster)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -958,21 +1054,27 @@ def _match_objects(cand: EvidenceCandidate, spec: WorldSpecView) -> list[WorldOb
 
 
 def _semantic_match(cand: EvidenceCandidate, desc: str, obj: WorldObject) -> bool:
-    """Match a candidate to a structural object by meaning when claim ids and names do
-    not overlap — the compiled object may not have been attributed the exact claim id.
+    """Match a candidate to a structural object when claim ids and names do not overlap
+    — the compiled object may not have been attributed the exact claim id.
 
-    A rule candidate corresponds to the compiled decision rule when both name the same
-    decision procedure (majority/unanimity/quorum/...). A scheduled event that names
-    the decision itself is carried by the terminal/institution objects.
+    The only such match is a *two-sided* one: a rule candidate corresponds to a
+    compiled term when the compiled term itself names the same decision procedure the
+    evidence names (majority/unanimity/quorum/...). Both sides must use the word, so
+    the compiled world has actually represented the procedure.
+
+    There is deliberately no one-sided match. A scheduled event used to be counted as
+    represented whenever its description merely contained a word like "decision" or
+    "meeting", which matched it to the always-present terminal object: any such
+    candidate was recorded INCLUDED while being wired into nothing, and the word list
+    doing the deciding was a scenario assumption in code. A candidate now counts as
+    represented only where it is actually wired — an entity, action, field, document,
+    resource, process node, external process, or a terminal term that names it.
     """
 
-    desc_words = set(_WORD.findall(desc))
-    if cand.kind is CandidateKind.RULE and obj.kind in ("rule", "terminal", "institution"):
+    if cand.kind is CandidateKind.RULE and obj.kind in ("rule", "terminal"):
+        desc_words = set(_WORD.findall(desc))
         shared = desc_words & _RULE_PROCEDURE_WORDS & set(_WORD.findall(_norm(obj.name)))
         return bool(shared)
-    if cand.kind is CandidateKind.SCHEDULED_EVENT and obj.kind in ("terminal", "institution"):
-        # The decision/vote event of the deciding body is represented by the terminal.
-        return bool(desc_words & {"decision", "vote", "meeting", "ruling", "verdict"})
     return False
 
 

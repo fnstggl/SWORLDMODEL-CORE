@@ -203,7 +203,7 @@ def test_the_terminal_replays_from_the_event_ledger_alone() -> None:
     for branch_id, final in result.final_worlds.items():
         replayed = compiled.base_world.clone(new_branch_id=branch_id, weight=final.weight)
         # The ledger is the record of what happened; nothing else is consulted.
-        events = [e for e in final.event_history]
+        events = list(final.event_history)
         replayed = replayed.apply(events)
         replayed = replayed.with_time(final.contract.horizon)
 

@@ -1,8 +1,20 @@
 """Fetch a source page and extract readable text, title, publisher, and date.
 
 Live verification: a claim can only be supported by a page that was actually fetched
-and whose text actually contains supporting material. A generated URL is never
-trusted on its own.
+and whose text actually contains supporting material. A generated URL is never trusted
+on its own.
+
+**Cutoff hygiene.** A pastcast researches a past cutoff today, so the fetch happens
+long after ``as_of``. A page's self-declared publication date does not bound its
+*content*: a page dated before the cutoff and edited after it serves post-cutoff text
+under a pre-cutoff timestamp, and dating the source by that timestamp admits it. So
+when the cutoff is in the past this module does not fetch the live page at all. It asks
+the Wayback Machine for the last capture at or before the cutoff and fetches that
+capture's original bytes (the ``id_`` modifier suppresses the archive's own banner and
+link rewriting). The capture timestamp is a *demonstrated* observation time: the
+content provably existed then, which is the property the cutoff actually needs. A URL
+with no capture at or before the cutoff is not admissible for a pastcast and is
+returned with a rejection reason rather than being fetched live.
 """
 
 from __future__ import annotations
@@ -33,33 +45,118 @@ _JSONLD = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 
+WAYBACK_CDX = "https://web.archive.org/cdx/search/cdx"
+WAYBACK_SNAPSHOT = "https://web.archive.org/web"
+# Control characters a real text or HTML document never contains. Their presence means
+# the body is binary, or was decoded with the wrong codec — either way it is not a
+# document we can attribute claims to. U+FFFD is what a failed decode leaves behind.
+_NON_TEXT = re.compile(r"[\x00-\x08\x0b\x0e-\x1f�]")
+
+
+@dataclass(frozen=True)
+class ArchiveCapture:
+    """A Wayback capture: when the content was observed and where to read it back."""
+
+    timestamp: datetime
+    snapshot_url: str
+    original_url: str
+
 
 @dataclass(frozen=True)
 class FetchedSource:
-    url: str
-    final_url: str
+    url: str  # the publisher URL this source is attributed to
+    fetched_url: str  # the URL actually requested (an archive snapshot for a pastcast)
+    final_url: str  # where the request ended up after redirects
     status: int
     reachable: bool
     title: str
     text: str
     publisher: str
     published_at: datetime | None
+    archived_at: datetime | None  # capture time, when read from an archive
     fetched_at: datetime
     content_hash: str
     elapsed_ms: int
+    rejection_reason: str = ""
 
     @property
     def ok(self) -> bool:
-        return self.reachable and self.status == 200 and bool(self.text)
+        return (
+            self.reachable and self.status == 200 and bool(self.text) and not self.rejection_reason
+        )
+
+    @property
+    def observed_at(self) -> datetime:
+        """The instant at which *this exact content* is demonstrated to have existed.
+
+        The archive capture time when the bytes came from an archive; otherwise the
+        moment we fetched them. This — not the page's self-declared date — is what
+        bounds a source for a cutoff.
+        """
+
+        return self.archived_at or self.fetched_at
+
+    def evidence_time(self) -> datetime:
+        """When the information in this source became available.
+
+        The page's own publication date when it is consistent with ``observed_at``
+        (a page cannot have been published after the capture that contains it),
+        otherwise the demonstrated observation time. Never later than ``observed_at``,
+        so a source can never be dated by a claim it makes about itself.
+        """
+
+        declared = self.published_at
+        if declared is not None and declared <= self.observed_at:
+            return declared
+        return self.observed_at
+
+
+def requires_archived_copy(as_of: datetime | None, now: datetime) -> bool:
+    """True when the fetch would happen after the information cutoff.
+
+    That is the whole condition: if we are reading a page later than the cutoff we are
+    researching, the live page may have changed since, and only an archived capture at
+    or before the cutoff demonstrates what it said. A nowcast (``as_of`` at or after the
+    moment research runs, which is what "forecast from today" means) fetches live.
+    """
+
+    return as_of is not None and as_of < now
 
 
 def fetch_source(
-    transport: HttpTransport, url: str, *, now: datetime, timeout: float = 30.0
+    transport: HttpTransport,
+    url: str,
+    *,
+    now: datetime,
+    as_of: datetime | None = None,
+    timeout: float = 30.0,
 ) -> FetchedSource:
+    """Fetch ``url`` as evidence for a question with cutoff ``as_of``.
+
+    When the cutoff is in the past the archived capture at or before it is fetched
+    instead of the live page; when no such capture exists the source is refused with a
+    reason and *not* fetched live.
+    """
+
+    capture: ArchiveCapture | None = None
+    target = url
+    if requires_archived_copy(as_of, now):
+        assert as_of is not None
+        capture = archived_capture(transport, url, as_of, timeout=timeout)
+        if capture is None:
+            return _refused(
+                url,
+                now,
+                f"no archived capture at or before the cutoff {as_of.isoformat()}; "
+                "the live page cannot be shown to be the pre-cutoff content",
+            )
+        target = capture.snapshot_url
+
     try:
-        resp = transport.get(url, timeout=timeout)
-    except HttpError:
-        return FetchedSource(url, url, 0, False, "", "", _publisher(url), None, now, "", 0)
+        resp = transport.get(target, timeout=timeout)
+    except HttpError as exc:
+        return _refused(url, now, f"fetch failed: {exc}", fetched_url=target)
+
     # A PDF (many authoritative minutes/filings) is read from its raw bytes; HTML from
     # its decoded text. A binary body that is neither yields no text.
     if looks_like_pdf(resp.content, content_type=resp.headers.get("content-type", ""), url=url):
@@ -78,19 +175,130 @@ def fetch_source(
     # A date parsed from a page body may be timezone-naive; make every source date aware
     # (assume UTC) so cutoff comparisons never mix naive and aware datetimes.
     published = _aware(published)
+
+    observed = capture.timestamp if capture else now
+    reason = ""
+    if published is not None and published > observed:
+        # The document claims to be newer than the moment we observed it. For an archive
+        # capture that is self-contradictory; for a live fetch it is a future-dated page.
+        # Either way its date cannot be used, and it cannot be dated any earlier.
+        reason = (
+            f"source declares a date ({published.isoformat()}) after the moment its "
+            f"content was observed ({observed.isoformat()})"
+        )
     return FetchedSource(
         url=url,
+        fetched_url=target,
         final_url=resp.final_url,
         status=resp.status,
         reachable=True,
         title=title,
         text=text,
-        publisher=_publisher(resp.final_url),
+        publisher=_publisher(url if capture else resp.final_url),
         published_at=published,
+        archived_at=capture.timestamp if capture else None,
         fetched_at=now,
-        content_hash=sha256_hex(text)[:16] if text else "",
+        # The full digest of the exact text the claims were extracted from: a reader can
+        # re-fetch the recorded URL and confirm they are looking at the same document.
+        content_hash=sha256_hex(text) if text else "",
         elapsed_ms=resp.elapsed_ms,
+        rejection_reason=reason,
     )
+
+
+# ---------------------------------------------------------------------------
+# Wayback Machine
+# ---------------------------------------------------------------------------
+
+
+def wayback_snapshot_url(original_url: str, timestamp: datetime) -> str:
+    """The URL that returns a capture's *original* bytes.
+
+    The ``id_`` suffix on the timestamp tells the Wayback Machine to serve the archived
+    response as captured — no injected banner, no rewritten links — so the text we
+    extract and the excerpts we verify are the publisher's own.
+    """
+
+    return f"{WAYBACK_SNAPSHOT}/{timestamp.strftime('%Y%m%d%H%M%S')}id_/{original_url}"
+
+
+def archived_capture(
+    transport: HttpTransport, url: str, as_of: datetime, *, timeout: float = 30.0
+) -> ArchiveCapture | None:
+    """The last successful Wayback capture of ``url`` at or before ``as_of``.
+
+    Returns ``None`` when the archive has no such capture, when the index is
+    unreachable, or when its answer cannot be parsed — in every one of those cases we
+    have failed to demonstrate the pre-cutoff content, which is a refusal, not a
+    licence to read the live page.
+    """
+
+    query = urllib.parse.urlencode(
+        {
+            "url": url,
+            "to": as_of.astimezone(UTC).strftime("%Y%m%d%H%M%S"),
+            "limit": "-1",  # the LAST row at or before `to`: the closest capture
+            "output": "json",
+            "filter": "statuscode:200",
+            "fl": "timestamp,original",
+        }
+    )
+    try:
+        resp = transport.get(f"{WAYBACK_CDX}?{query}", timeout=timeout)
+    except HttpError:
+        return None
+    if not resp.ok:
+        return None
+    try:
+        rows = json.loads(resp.text or "[]")
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(rows, list) or len(rows) < 2:  # row 0 is the header
+        return None
+    last = rows[-1]
+    if not isinstance(last, list) or len(last) < 2:
+        return None
+    stamp = _parse_wayback_timestamp(str(last[0]))
+    if stamp is None or stamp > as_of:
+        return None
+    original = str(last[1]) or url
+    return ArchiveCapture(
+        timestamp=stamp, snapshot_url=wayback_snapshot_url(original, stamp), original_url=original
+    )
+
+
+def _parse_wayback_timestamp(value: str) -> datetime | None:
+    digits = value.strip()
+    if len(digits) != 14 or not digits.isdigit():
+        return None
+    try:
+        return datetime.strptime(digits, "%Y%m%d%H%M%S").replace(tzinfo=UTC)
+    except ValueError:
+        return None
+
+
+def _refused(url: str, now: datetime, reason: str, *, fetched_url: str = "") -> FetchedSource:
+    return FetchedSource(
+        url=url,
+        fetched_url=fetched_url or url,
+        final_url=url,
+        status=0,
+        reachable=False,
+        title="",
+        text="",
+        publisher=_publisher(url),
+        published_at=None,
+        archived_at=None,
+        fetched_at=now,
+        content_hash="",
+        elapsed_ms=0,
+        rejection_reason=reason,
+    )
+
+
+# ---------------------------------------------------------------------------
+# HTML/text extraction
+# ---------------------------------------------------------------------------
 
 
 def extract_text(html: str) -> str:
@@ -161,13 +369,14 @@ def _aware(dt: datetime | None) -> datetime | None:
 
 
 def _looks_textual(text: str) -> bool:
-    """Reject undecodable/binary bodies (brotli garbage, challenge pages)."""
+    """Reject undecodable/binary bodies (brotli garbage, challenge pages, images).
 
-    if not text:
-        return False
-    sample = text[:2000]
-    printable = sum(1 for ch in sample if ch.isprintable() or ch in "\n\r\t ")
-    return printable / len(sample) >= 0.85
+    A real text or HTML document contains no C0 control characters beyond whitespace and
+    no U+FFFD replacement characters; a body that does was either binary or decoded with
+    the wrong codec. This is a structural property of the bytes, not a tuned threshold.
+    """
+
+    return bool(text) and not _NON_TEXT.search(text)
 
 
 def _publisher(url: str) -> str:
