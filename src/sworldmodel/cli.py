@@ -271,15 +271,17 @@ def _print_actor_comparison(
     print("=" * 78)
     print("COMPARISON")
     print("=" * 78)
-    header = f"{'actor':28s} {'prev action':16s} {'inclination':22s} {'stmts':5s} {'claims':6s}"
-    print(header)
+    print(
+        f"{'actor':28s} {'previous action (verified)':34s} "
+        f"{'inclination (inferred)':34s} {'stmts':6s} {'claims':6s}"
+    )
     for aid in chosen:
         p = profiles.get(aid, {})
         incl = (p.get("current_evidence_grounded_inclination") or {}).get("content", "")
+        prev = str(p.get("previous_observed_action") or "—")
         print(
-            f"{aid:28s} {str(p.get('previous_observed_action'))[:15]:16s} "
-            f"{str(incl)[:21]:22s} {len(p.get('direct_statements', [])):<5d} "
-            f"{len(p.get('claim_ids', [])):<6d}"
+            f"{aid:28s} {prev[:33]:34s} {str(incl)[:33]:34s} "
+            f"{len(p.get('direct_statements', [])):<6d} {len(p.get('claim_ids', [])):<6d}"
         )
     # How much of each prompt is actor-specific rather than shared boilerplate.
     prompts = {a: r.get("exact_prompt") or "" for a, r in chosen.items()}
