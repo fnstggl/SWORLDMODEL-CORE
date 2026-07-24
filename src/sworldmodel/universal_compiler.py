@@ -254,26 +254,44 @@ def _normalize_reality(
     for rf in data.get("required_reality_facts", []):
         rf["evidence_claim_ids"] = _filter_ids(rf.get("evidence_claim_ids"), available)
 
-    data.setdefault("institution_id", "deciding_body")
-    data.setdefault("institution_name", data.get("decision_body", "Deciding Body"))
-    data.setdefault("subject_entity", data.get("decision_body", ""))
-    data.setdefault("resolution_units", "the decision")
-    data.setdefault("authoritative_sources", [])
+    # Coerce every string field so a null/missing LLM value can never crash the
+    # compiler (it either compiles or the reality gate refuses — never a TypeError).
+    body = _s(data.get("decision_body")) or "the deciding body"
+    data["decision_body"] = body
+    data["institution_name"] = _s(data.get("institution_name")) or body
+    data["institution_id"] = _s(data.get("institution_id")) or "deciding_body"
+    data["subject_entity"] = _s(data.get("subject_entity")) or body
+    data["resolution_units"] = _s(data.get("resolution_units")) or "the decision"
+    data["target_option"] = _s(data.get("target_option")) or "yes"
+    terminal["target_option"] = _s(terminal.get("target_option")) or data["target_option"]
+    if not isinstance(data.get("authoritative_sources"), list):
+        data["authoritative_sources"] = []
+    if not isinstance(data.get("members"), list):
+        data["members"] = []
     return data
+
+
+def _s(value: object) -> str:
+    return value.strip() if isinstance(value, str) else ""
 
 
 def _normalize_frame(data: dict[str, Any], view: EvidenceView) -> dict[str, Any]:
     available = _available_ids(view)
-    for s in data.get("signals", []):
+    # Coerce any null/non-list collection to a list so a sparse LLM frame cannot crash.
+    for key in ("options", "signals", "reaction_rules", "uncertainty"):
+        if not isinstance(data.get(key), list):
+            data[key] = []
+    for s in data["signals"]:
         s["evidence_claim_ids"] = _filter_ids(s.get("evidence_claim_ids"), available)
         s.setdefault("baseline", 0.0)
-    for r in data.get("reaction_rules", []):
+    for r in data["reaction_rules"]:
         r["evidence_claim_ids"] = _filter_ids(r.get("evidence_claim_ids"), available)
     data["guidance_evidence_ids"] = _filter_ids(data.get("guidance_evidence_ids"), available)
-    data.setdefault("acceptance_tolerance", 0.5)
+    if not isinstance(data.get("acceptance_tolerance"), int | float):
+        data["acceptance_tolerance"] = 0.5
 
     normalized_unc = []
-    for u in data.get("uncertainty", []):
+    for u in data["uncertainty"]:
         outcomes = u.get("outcomes") or []
         total = sum(float(o.get("weight", 0)) for o in outcomes)
         if total <= 0 or len(outcomes) < 1:
@@ -287,7 +305,6 @@ def _normalize_frame(data: dict[str, Any], view: EvidenceView) -> dict[str, Any]
         u["constraining_evidence_ids"] = _filter_ids(u.get("constraining_evidence_ids"), available)
         normalized_unc.append(u)
     data["uncertainty"] = normalized_unc
-    data.setdefault("options", ["yes", "no"])
-    data.setdefault("signals", [])
-    data.setdefault("reaction_rules", [])
+    if not data["options"]:
+        data["options"] = ["yes", "no"]
     return data

@@ -134,7 +134,7 @@ def compile_world(
         ],
     }
     ev_text, ev_ids = evidence.render_view(
-        contract.decision_body + " " + " ".join(frame.options), limit=40
+        (contract.decision_body or "") + " " + " ".join(frame.options), limit=40
     )
     compile_ctx = {
         "options": list(frame.options),
