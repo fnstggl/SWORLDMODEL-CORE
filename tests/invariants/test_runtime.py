@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from _helpers import base_corpus, dup, run_dict
+from _helpers import base_corpus, compile_dict, dup, run_dict
 from sworldmodel.gateway import DeterministicGateway, GatewayRequest, GatewayResponse
 from sworldmodel.mechanisms import evaluate_terminal
-from sworldmodel.models import EventKind, ForecastStatus
+from sworldmodel.models import EventKind, ForecastStatus, IntentKind
+from sworldmodel.runtime import run
 
 
 class _NoActorDecisionGateway(DeterministicGateway):
@@ -18,6 +19,40 @@ class _NoActorDecisionGateway(DeterministicGateway):
 
             raise GatewayError("actor decisions disabled")
         return super()._generate(request)
+
+
+class _PrematureVoter(DeterministicGateway):
+    """A stage-blind actor that tries to vote at every turn — the kind of loosely
+    stage-aware output a live LLM can produce. The environment must coerce the
+    premature votes (at the positions stage) instead of crashing the run."""
+
+    def _generate(self, request: GatewayRequest) -> GatewayResponse:
+        if request.task_kind == "actor_decision":
+            return GatewayResponse(
+                task_kind=request.task_kind,
+                data={"kind": "cast_vote", "vote_option": "hold", "rationale": "steady"},
+                raw_text="{}",
+                model=self.model_id,
+                params={},
+                seed=request.seed,
+                prompt_hash="x",
+                tokens_in=1,
+                tokens_out=1,
+            )
+        return super()._generate(request)
+
+
+def test_premature_vote_is_coerced_not_crashed() -> None:
+    compiled = compile_dict(base_corpus())
+    # A stage-blind voter must not abort the simulation; the environment coerces.
+    result = run(compiled, _PrematureVoter(), seed=0)
+    coerced = [d for d in result.actor_decisions if d.validation.startswith("coerced:")]
+    # Premature votes at the positions stage are coerced to position statements.
+    assert coerced, "expected at least one coerced premature vote"
+    assert all("out of order" in d.validation for d in coerced)
+    # The binding votes at the decision stage still tally into a real terminal.
+    voted = [d for d in result.actor_decisions if d.intent["kind"] == IntentKind.CAST_VOTE]
+    assert voted, "actors must still cast real votes at the decision stage"
 
 
 def test_probability_mass_is_conserved() -> None:

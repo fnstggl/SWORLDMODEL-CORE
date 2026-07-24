@@ -57,8 +57,12 @@ def render_decision_prompt(context: dict[str, Any]) -> str:
         _block("PUBLIC FACTS AVAILABLE TO YOU", context.get("public_facts")),
         _block("FEASIBLE ACTIONS", context.get("feasible_actions")),
         "Reply with JSON: {kind, vote_option, rationale, expected_effect,"
-        " referenced_memory_ids, referenced_observation_ids}. If you vote, vote_option"
-        " must be exactly one option. Qualitative reasoning only — never numbers.",
+        " referenced_memory_ids, referenced_observation_ids}. `kind` MUST be exactly"
+        " one of: send_message, make_statement, request_information,"
+        " introduce_proposal, revise_proposal, support_proposal, oppose_proposal,"
+        " make_commitment, operational_action, cast_vote, wait. To vote use"
+        " kind=\"cast_vote\" and set vote_option to exactly one option. Qualitative"
+        " reasoning only — never numbers.",
     ]
     return "\n\n".join(lines)
 

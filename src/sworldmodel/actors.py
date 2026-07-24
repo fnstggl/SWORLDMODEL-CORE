@@ -259,7 +259,7 @@ class ActorRuntime:
         return intent, new_actor, responses, context
 
     def _to_intent(self, actor_id: str, data: dict[str, object], view: LocalView) -> Intent:
-        kind = str(data.get("kind", IntentKind.WAIT))
+        kind = _canonical_kind(str(data.get("kind", IntentKind.WAIT)))
         if kind not in IntentKind.ALL:
             raise IntentValidationError(f"Actor {actor_id} emitted unknown intent kind {kind!r}")
         payload: dict[str, object] = {}
@@ -291,6 +291,49 @@ class ActorRuntime:
             referenced_observation_ids=_as_str_tuple(data.get("referenced_observation_ids")),
             expected_effect=str(data.get("expected_effect", "")),
         )
+
+
+# Natural-language shorthands a live LLM commonly emits, mapped to the canonical
+# intent vocabulary. This canonicalizes the *label* only; the actor still chose the
+# action — we do not reinterpret or override its decision.
+_KIND_SYNONYMS: dict[str, str] = {
+    "vote": IntentKind.CAST_VOTE,
+    "cast_a_vote": IntentKind.CAST_VOTE,
+    "castvote": IntentKind.CAST_VOTE,
+    "statement": IntentKind.MAKE_STATEMENT,
+    "make_a_statement": IntentKind.MAKE_STATEMENT,
+    "state": IntentKind.MAKE_STATEMENT,
+    "message": IntentKind.SEND_MESSAGE,
+    "send_a_message": IntentKind.SEND_MESSAGE,
+    "request_info": IntentKind.REQUEST_INFORMATION,
+    "request": IntentKind.REQUEST_INFORMATION,
+    "propose": IntentKind.INTRODUCE_PROPOSAL,
+    "introduce": IntentKind.INTRODUCE_PROPOSAL,
+    "revise": IntentKind.REVISE_PROPOSAL,
+    "support": IntentKind.SUPPORT_PROPOSAL,
+    "oppose": IntentKind.OPPOSE_PROPOSAL,
+    "commit": IntentKind.MAKE_COMMITMENT,
+    "commitment": IntentKind.MAKE_COMMITMENT,
+    "action": IntentKind.OPERATIONAL_ACTION,
+    "act": IntentKind.OPERATIONAL_ACTION,
+    "operate": IntentKind.OPERATIONAL_ACTION,
+    "hold": IntentKind.WAIT,
+    "pass": IntentKind.WAIT,
+    "abstain": IntentKind.WAIT,
+    "none": IntentKind.WAIT,
+    "wait_recorded": IntentKind.WAIT,
+    "preserve": IntentKind.PRESERVE_PLAN,
+    "preserve_plan": IntentKind.PRESERVE_PLAN,
+}
+
+
+def _canonical_kind(raw: str) -> str:
+    """Normalize a model-emitted intent label to the canonical vocabulary."""
+
+    key = raw.strip().lower().replace("-", "_").replace(" ", "_")
+    if key in IntentKind.ALL:
+        return key
+    return _KIND_SYNONYMS.get(key, key)
 
 
 def _as_dict(value: object) -> dict[str, object]:

@@ -10,11 +10,12 @@ There is no second, hidden model: delete the actor calls and the votes disappear
 from __future__ import annotations
 
 from dataclasses import dataclass
+from dataclasses import replace as _replace
 from datetime import timedelta
 
-from .actors import ActorRuntime
+from .actors import ActorRuntime, LocalView
 from .compiler import CompiledWorld
-from .errors import GatewayError
+from .errors import GatewayError, IntentValidationError
 from .gateway import ModelGateway
 from .ids import content_id
 from .intents import Environment
@@ -24,8 +25,11 @@ from .models import (
     BranchWeight,
     Event,
     EventKind,
+    Intent,
+    IntentKind,
     TrajectorySummary,
     Visibility,
+    make_payload,
 )
 from .protocols import ProtocolGraph, StepKind
 from .uncertainty import Scenario
@@ -232,6 +236,32 @@ def _evaluate_and_record(world: WorldState, env: Environment, ledger: list[Event
     return world
 
 
+def _coerce_infeasible_intent(intent: Intent, view: LocalView, world: WorldState) -> Intent:
+    """Map a stage-infeasible intent to the closest feasible action for this stage.
+
+    A premature vote (before the decision stage) becomes a position statement that
+    preserves the actor's favored option — the actor still casts a binding ballot
+    when the decision stage opens. Every other rejected intent degrades to a wait.
+    This never invents a consequence; it only records what the actor could actually
+    do right now.
+    """
+
+    if intent.kind == IntentKind.CAST_VOTE and world.protocol_stage != "decision":
+        option = str(intent.payload_dict.get("option", ""))
+        return _replace(
+            intent,
+            kind=IntentKind.MAKE_STATEMENT,
+            payload=make_payload(
+                {
+                    "statement_text": intent.rationale or f"I currently favor {option}.",
+                    "favored_option": option,
+                    "info_signals": {},
+                }
+            ),
+        )
+    return _replace(intent, kind=IntentKind.WAIT, payload=make_payload({}))
+
+
 def _actor_act(
     world: WorldState,
     actor_id: str,
@@ -246,7 +276,18 @@ def _actor_act(
     intent, new_actor, responses, context = actor_runtime.step(actor, view, seed=seed)
     world = world.with_actor(new_actor)
 
-    validated = env.validate(intent, world)
+    # The environment is authoritative about what an actor may actually do at the
+    # current stage. A live LLM actor can emit a well-formed but stage-infeasible
+    # intent (e.g. voting before the ballot is open); rather than abort the whole
+    # simulation, the environment coerces it to a stage-appropriate action and
+    # records the coercion in the audit trail. No outcome is ever fabricated.
+    validation_note = "ok"
+    try:
+        validated = env.validate(intent, world)
+    except IntentValidationError as exc:
+        intent = _coerce_infeasible_intent(intent, view, world)
+        validated = env.validate(intent, world)
+        validation_note = f"coerced:{exc}"
     events = env.execute(validated, world)
     world = world.apply(events)
     for ev in events:
@@ -269,7 +310,7 @@ def _actor_act(
                 "referenced_memory_ids": list(intent.referenced_memory_ids),
                 "referenced_observation_ids": list(intent.referenced_observation_ids),
             },
-            validation="ok",
+            validation=validation_note,
             event_ids=[e.event_id for e in events],
             prompt_hash=responses[-1].prompt_hash,
             model=responses[-1].model,

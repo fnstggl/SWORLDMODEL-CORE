@@ -136,6 +136,52 @@ def test_waiting_creates_a_pending_need_then_a_vote_when_info_arrives() -> None:
     assert intent2.kind == IntentKind.CAST_VOTE
 
 
+def test_canonical_kind_normalizes_live_model_synonyms() -> None:
+    from sworldmodel.actors import _canonical_kind
+
+    # Canonical values pass through untouched.
+    assert _canonical_kind("cast_vote") == IntentKind.CAST_VOTE
+    assert _canonical_kind("make_statement") == IntentKind.MAKE_STATEMENT
+    # Common natural shorthands a live LLM emits are canonicalized (label only).
+    assert _canonical_kind("vote") == IntentKind.CAST_VOTE
+    assert _canonical_kind("Vote") == IntentKind.CAST_VOTE
+    assert _canonical_kind("cast a vote") == IntentKind.CAST_VOTE
+    assert _canonical_kind("statement") == IntentKind.MAKE_STATEMENT
+    assert _canonical_kind("hold") == IntentKind.WAIT
+    assert _canonical_kind("abstain") == IntentKind.WAIT
+    # A genuinely unknown label is left unchanged, so _to_intent still rejects it.
+    assert _canonical_kind("coalition_formed") == "coalition_formed"
+
+
+def test_live_synonym_vote_becomes_a_cast_vote_intent() -> None:
+    class SynonymGateway(DeterministicGateway):
+        def _generate(self, request: GatewayRequest) -> GatewayResponse:
+            if request.task_kind == "actor_decision":
+                stage = request.context.get("stage")
+                if stage == "decision":
+                    return GatewayResponse(
+                        task_kind=request.task_kind,
+                        data={"kind": "vote", "vote_option": "hold", "rationale": "steady"},
+                        raw_text="{}",
+                        model=self.model_id,
+                        params={},
+                        seed=request.seed,
+                        prompt_hash="x",
+                        tokens_in=1,
+                        tokens_out=1,
+                    )
+            return super()._generate(request)
+
+    compiled = _compiled()
+    world = compiled.base_world
+    world, _ = _open_decision(world, "a", "hold")
+    world = world.with_stage("decision")
+    rt = ActorRuntime(SynonymGateway())
+    intent, _, _, _ = rt.step(world.actors["a"], world.view_for("a"), seed=0)
+    assert intent.kind == IntentKind.CAST_VOTE
+    assert intent.payload_dict.get("option") == "hold"
+
+
 def test_actor_output_cannot_mark_another_actor_persuaded() -> None:
     class ConsequenceGateway(DeterministicGateway):
         def _generate(self, request: GatewayRequest) -> GatewayResponse:
