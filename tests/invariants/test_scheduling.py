@@ -596,6 +596,43 @@ def test_a_budget_stop_leaves_the_branch_honest_not_finished() -> None:
     assert not outcome.resolved and outcome.outcome is None
 
 
+def test_a_cut_short_trajectory_cannot_report_a_resolved_outcome() -> None:
+    """Stopping early must not look like watching the process finish.
+
+    The compiled terminal here has `unresolved_when: false`, so a naive evaluation of a
+    truncated world would resolve it to NO. It must not.
+    """
+
+    data = single_response_world()
+    data["world_spec"]["terminal"]["unresolved_when"] = {"op": "const", "args": [False]}
+    # A long tail of scheduled work the branch will not get to.
+    data["world_spec"]["external_processes"] = [
+        {
+            "process_id": "drumbeat",
+            "description": "many scheduled events before the horizon",
+            "occurrences": [
+                {
+                    "at": f"2026-06-{day:02d}T09:00:00+00:00",
+                    "description": f"tick {day}",
+                    "effects": [
+                        {"op": "deliver_information", "to": ["recipient"], "text": f"tick {day}"}
+                    ],
+                }
+                for day in range(1, 21)
+            ],
+        }
+    ]
+    gw = _gateway(lambda ctx: wait_decision("thinking"))
+    compiled = _compile(data, gw)
+    result = run(compiled, gw, seed=0, budget=RunBudget(max_batches=6))
+
+    diag = next(iter(result.diagnostics.values()))
+    assert diag.unfired_in_horizon > 0
+    outcome = result.branch_outcomes[0]
+    assert not outcome.resolved
+    assert "cut short" in (outcome.unresolved_reason or "")
+
+
 def test_opportunity_is_the_wake_reason_for_a_process_node() -> None:
     data = single_response_world()
     gw = _gateway(lambda ctx: wait_decision())

@@ -220,8 +220,16 @@ def run(
         try:
             world = _seed_branch(world, compiled.spec, scenario, effects, ledger)
             world = _event_loop(
-                world, compiled.spec, effects, action_exec, actor_runtime, seed,
-                decisions, ledger, budget, diag,
+                world,
+                compiled.spec,
+                effects,
+                action_exec,
+                actor_runtime,
+                seed,
+                decisions,
+                ledger,
+                budget,
+                diag,
             )
             world = _finalize(world, compiled.spec.terminal, effects, ledger, diag)
         except GatewayError as exc:
@@ -1170,6 +1178,22 @@ def _finalize(
     # horizon. This is the end of the question's window, not a jump over live events.
     world = world.with_time(world.contract.horizon)
     evaluation = evaluate_terminal(world, terminal)
+
+    # A branch that stopped with things still due to happen did not reach its end; it
+    # was cut short. Reporting a resolved outcome for it would claim we watched the
+    # process finish when we stopped watching, which is forced completion wearing the
+    # terminal evaluator's clothes. The mass stays unresolved and widens the bounds.
+    if diag.unfired_in_horizon > 0 and evaluation.resolved:
+        evaluation = TerminalEvaluation(
+            resolved=False,
+            outcome=None,
+            reason=(
+                f"trajectory cut short with {diag.unfired_in_horizon} scheduled events "
+                f"still due before the horizon ({diag.stop_reason}); the process did not "
+                "run to its end, so its outcome is not known"
+            ),
+            highlights=evaluation.highlights,
+        )
     world = world.set_terminal(evaluation)
     ev = effects.raw_event(
         world,

@@ -30,6 +30,7 @@ import ipaddress
 import os
 import socket
 import ssl
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -272,9 +273,14 @@ class UrllibTransport:
             urllib.request.HTTPSHandler(context=_ssl_context()), _NoRedirect()
         )
         self.calls: list[HttpCall] = []
+        # Branches are simulated concurrently, so the call log is written from several
+        # threads. It is an audit record: losing an entry would understate what the run
+        # actually did on the wire.
+        self._lock = threading.Lock()
 
     def _record(self, call: HttpCall) -> None:
-        self.calls.append(call)
+        with self._lock:
+            self.calls.append(call)
 
     def get(
         self, url: str, *, headers: dict[str, str] | None = None, timeout: float = 30.0
@@ -424,6 +430,10 @@ class FakeTransport:
     def __init__(self) -> None:
         self.routes: list[Route] = []
         self.calls: list[HttpCall] = []
+        # Branches are simulated concurrently, so the call log is written from several
+        # threads. It is an audit record: losing an entry would understate what the run
+        # actually did on the wire.
+        self._lock = threading.Lock()
 
     def add(self, predicate: Callable[[str], bool], response: object) -> FakeTransport:
         self.routes.append((predicate, response))
