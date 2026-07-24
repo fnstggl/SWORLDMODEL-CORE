@@ -272,7 +272,11 @@ class ActorRuntime:
             # (e.g. "hold" when the options read "unanimous_hold"). Map it to the closest
             # valid option instead of aborting the whole simulation; the environment,
             # not the actor's wording, is authoritative about the option space.
-            option = raw_option if raw_option in view.options else _closest_option(raw_option, view.options)
+            option = (
+                raw_option
+                if raw_option in view.options
+                else _closest_option(raw_option, view.options)
+            )
             if option is None:
                 raise IntentValidationError(
                     f"Actor {actor_id} voted for {raw_option!r} with no match in {view.options}"
