@@ -182,7 +182,11 @@ EVIDENCE (id | proposition = value):
 {evidence}
 
 Return JSON with keys:
-- options: the full set of mutually exclusive choices the deciders pick among.
+- options: the mutually exclusive choices an INDIVIDUAL decision-maker picks between at
+  the decision (e.g. the concrete policy actions each member can vote for). These are
+  per-actor ballot choices, NOT the yes/no resolution of the question and NOT aggregate
+  outcomes — never encode "unanimous_X" or "majority_X" as an option; unanimity/majority
+  is decided by the terminal from the individual votes.
 - signals: [ {{"name":"snake_case","baseline":0.0,"description":"...","evidence_claim_ids":[...]}} ]
 - reaction_rules: [ {{"trigger_signal":"<a signal name>","direction":"above"|"below","threshold":<float>,"moves_to_option":"<an option>","rationale":"...","evidence_claim_ids":[...]}} ]
 - guidance_option: the newly-established common position (an option) or null.

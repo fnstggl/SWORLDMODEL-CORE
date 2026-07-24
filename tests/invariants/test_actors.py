@@ -153,6 +153,20 @@ def test_canonical_kind_normalizes_live_model_synonyms() -> None:
     assert _canonical_kind("coalition_formed") == "coalition_formed"
 
 
+def test_closest_option_maps_loose_votes_without_crashing() -> None:
+    from sworldmodel.actors import _closest_option
+
+    opts = ("unanimous_hold", "non_unanimous_hold", "cut")
+    # Substring containment -> the tightest containing option.
+    assert _closest_option("hold", opts) == "unanimous_hold"
+    assert _closest_option("cut", ("hold", "cut", "hike")) == "cut"
+    # Token overlap when there is no containment.
+    assert _closest_option("rate hike", ("hold", "cut", "hike")) == "hike"
+    # No match at all -> None (the caller then rejects the vote rather than guessing).
+    assert _closest_option("teleport", ("hold", "cut")) is None
+    assert _closest_option("hold", ()) is None
+
+
 def test_live_synonym_vote_becomes_a_cast_vote_intent() -> None:
     class SynonymGateway(DeterministicGateway):
         def _generate(self, request: GatewayRequest) -> GatewayResponse:

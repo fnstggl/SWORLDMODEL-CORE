@@ -12,6 +12,7 @@ emit intent.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, replace
 from datetime import datetime
 
@@ -29,6 +30,8 @@ from .prompts import render_decision_prompt, render_reflect_prompt
 
 # Importance accumulated (sum of observation poignancy) that triggers a reflection.
 REFLECTION_TRIGGER = 1.5
+
+_WORD = re.compile(r"[a-z0-9]+")
 
 
 @dataclass(frozen=True)
@@ -264,10 +267,15 @@ class ActorRuntime:
             raise IntentValidationError(f"Actor {actor_id} emitted unknown intent kind {kind!r}")
         payload: dict[str, object] = {}
         if kind == IntentKind.CAST_VOTE:
-            option = str(data.get("vote_option", "")).strip()
-            if option not in view.options:
+            raw_option = str(data.get("vote_option", "")).strip()
+            # A live actor may phrase its vote slightly off the compiled option set
+            # (e.g. "hold" when the options read "unanimous_hold"). Map it to the closest
+            # valid option instead of aborting the whole simulation; the environment,
+            # not the actor's wording, is authoritative about the option space.
+            option = raw_option if raw_option in view.options else _closest_option(raw_option, view.options)
+            if option is None:
                 raise IntentValidationError(
-                    f"Actor {actor_id} voted for {option!r} not in options {view.options}"
+                    f"Actor {actor_id} voted for {raw_option!r} with no match in {view.options}"
                 )
             payload["option"] = option
         if kind == IntentKind.MAKE_STATEMENT:
@@ -334,6 +342,26 @@ def _canonical_kind(raw: str) -> str:
     if key in IntentKind.ALL:
         return key
     return _KIND_SYNONYMS.get(key, key)
+
+
+def _closest_option(raw: str, options: tuple[str, ...]) -> str | None:
+    """Map a loosely-worded vote to the closest compiled option, or None if the option
+    set is empty. Prefers case-insensitive equality, then substring containment, then
+    the largest shared-token overlap."""
+
+    if not options:
+        return None
+    low = raw.lower()
+    for o in options:
+        if o.lower() == low:
+            return o
+    contained = [o for o in options if low and (low in o.lower() or o.lower() in low)]
+    if contained:
+        return min(contained, key=len)  # the tightest containing option
+    raw_tokens = set(_WORD.findall(low))
+    scored = [(len(raw_tokens & set(_WORD.findall(o.lower()))), o) for o in options]
+    best_overlap, best = max(scored, key=lambda p: p[0])
+    return best if best_overlap > 0 else None
 
 
 def _as_dict(value: object) -> dict[str, object]:
