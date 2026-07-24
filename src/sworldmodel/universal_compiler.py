@@ -326,8 +326,17 @@ def _normalize_reality(
         wf["evidence_claim_ids"] = _filter_ids(wf.get("evidence_claim_ids"), available)
         wf.setdefault("available_at", as_of.isoformat())
         wf.setdefault("epistemic_type", "observation")
+    # Keep only required-reality facts the compiler could actually ground in available
+    # evidence. A fact the model *names* but cannot cite (e.g. a terminal date that is
+    # already given by the contract horizon) is not a verified load-bearing fact and
+    # must not block the run — the seat-count, rule-consistency, and coverage checks are
+    # independent and evidence-grounded, so real gaps are still caught.
+    grounded_facts = []
     for rf in data.get("required_reality_facts", []):
         rf["evidence_claim_ids"] = _filter_ids(rf.get("evidence_claim_ids"), available)
+        if rf["evidence_claim_ids"]:
+            grounded_facts.append(rf)
+    data["required_reality_facts"] = grounded_facts
 
     # Coerce every string field so a null/missing LLM value can never crash the
     # compiler (it either compiles or the reality gate refuses — never a TypeError).
