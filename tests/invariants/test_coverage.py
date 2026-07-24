@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+
 from _helpers import AS_OF, HORIZON, ROSTER_PUB, base_corpus, compile_dict, synthetic_corpus
 from sworldmodel.api import _build_contract
 from sworldmodel.coverage import (
@@ -489,6 +490,55 @@ def test_case9_coverage_runs_for_every_process_type() -> None:
 # --------------------------------------------------------------------------- #
 # 10. No production candidate is ever silently dropped: one disposition each.
 # --------------------------------------------------------------------------- #
+
+
+class _RepairBackend:
+    """A backend whose first research drops three members, but whose targeted
+    follow-up research (augment_for_coverage) returns the complete roster."""
+
+    is_live = False
+
+    def __init__(self, incomplete: dict[str, Any], full: dict[str, Any]) -> None:
+        self._incomplete = incomplete
+        self._full = full
+        self.augmented_with: list[str] | None = None
+
+    def research(self, question: str, as_of: Any, horizon: Any) -> Any:
+        return build_bundle_from_dict(self._incomplete)
+
+    def augment_for_coverage(
+        self, question: str, as_of: Any, horizon: Any, missing: list[str], prior: Any
+    ) -> Any:
+        self.augmented_with = missing
+        return build_bundle_from_dict(self._full)
+
+
+def test_repair_loop_recovers_via_targeted_research() -> None:
+    from sworldmodel import DeterministicGateway, ForecastConfig, run_forecast
+
+    people = ["Vera Nolan", "Jon Alder", "Gala Reyes", "Omar Castel", "Gabriel Cuadra"]
+    incomplete = named_committee(people, represented=people[:2])
+    full = named_committee(people, represented=people)
+    backend = _RepairBackend(incomplete, full)
+    config = ForecastConfig(gateway=DeterministicGateway(), research_backend=backend, max_branches=4)
+    result, ctx = run_forecast("q", _dt(AS_OF), _dt(HORIZON), config)
+    # The gate forced a targeted follow-up, and the recompiled world is complete.
+    assert backend.augmented_with is not None
+    assert any("Gala Reyes" in m for m in backend.augmented_with)
+    assert ctx.compiled.coverage_report.is_complete
+    assert result.integrity_manifest.represented_voting_seats == 5
+
+
+def test_repair_loop_blocks_when_augmentation_cannot_help() -> None:
+    # A backend that keeps returning the incomplete world must still be refused.
+    from sworldmodel import DeterministicGateway, ForecastConfig, run_forecast
+
+    people = ["Vera Nolan", "Jon Alder", "Gala Reyes"]
+    incomplete = named_committee(people, represented=people[:1])
+    backend = _RepairBackend(incomplete, incomplete)  # augment returns the same gap
+    config = ForecastConfig(gateway=DeterministicGateway(), research_backend=backend, max_branches=4)
+    with pytest.raises(WorldIntegrityError):
+        run_forecast("q", _dt(AS_OF), _dt(HORIZON), config)
 
 
 def test_case10_every_candidate_gets_exactly_one_disposition() -> None:

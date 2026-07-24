@@ -192,6 +192,52 @@ class CompilationCoverageReport:
                 return d
         return None
 
+    def to_dict(self) -> dict[str, object]:
+        """Full audit serialization: every candidate, its disposition, and the reason —
+        so a live run can report what research found, what entered the world, what was
+        merged, excluded, uncertain, or missing, and whether the gate passed."""
+
+        disp = {d.candidate_id: d for d in self.dispositions}
+        return {
+            "coverage_verdict": self.coverage_verdict.value,
+            "totals": {
+                "total": self.total_candidates,
+                "material": self.material_candidates,
+                "included": self.included_candidates,
+                "excluded": self.excluded_candidates,
+                "merged": self.merged_candidates,
+                "uncertain": self.uncertain_candidates,
+                "unresolved": self.unresolved_candidates,
+            },
+            "missing_material_candidates": list(self.missing_material_candidates),
+            "candidates": [
+                {
+                    "candidate_id": c.candidate_id,
+                    "kind": c.kind.value,
+                    "identity": c.canonical_identity,
+                    "materiality": c.materiality.value,
+                    "is_inference": c.is_inference,
+                    "claim_ids": list(c.claim_ids),
+                    "lineage_ids": list(c.lineage_ids),
+                    "inferred_from": list(c.inferred_from),
+                    "disposition": (
+                        disp[c.candidate_id].disposition.value if c.candidate_id in disp else None
+                    ),
+                    "reason": (disp[c.candidate_id].reason if c.candidate_id in disp else ""),
+                    "compiled_object_ids": (
+                        list(disp[c.candidate_id].compiled_object_ids)
+                        if c.candidate_id in disp
+                        else []
+                    ),
+                    "causal_uses": (
+                        list(disp[c.candidate_id].causal_uses) if c.candidate_id in disp else []
+                    ),
+                }
+                for c in self.candidates
+            ],
+            "notes": list(self.notes),
+        }
+
 
 # ---------------------------------------------------------------------------
 # Keyword lexicons for deterministic extraction (broad, not scenario-specific)
@@ -300,31 +346,97 @@ def build_candidate_inventory(
     the model itself judged it outcome-relevant.
     """
 
-    claims = view.available()
-    body_norm = _norm(contract.decision_body)
-    subject_norm = _norm(contract.subject_entity)
-    required_fact_ids = frozenset(
-        cid for f in contract.required_reality_facts for cid in f.evidence_claim_ids
-    )
     ctx = _MaterialityContext(
-        body_norm=body_norm,
-        subject_norm=subject_norm,
+        body_norm=_norm(contract.decision_body),
+        subject_norm=_norm(contract.subject_entity),
         signal_claim_ids=signal_claim_ids,
-        required_fact_ids=required_fact_ids,
+        required_fact_ids=frozenset(
+            cid for f in contract.required_reality_facts for cid in f.evidence_claim_ids
+        ),
         as_of=contract.as_of,
         horizon=contract.horizon,
         rule_kind=contract.decision_rule.kind,
     )
+    return _inventory(view, ctx, contract)
 
+
+def build_inventory_from(
+    view: EvidenceView,
+    *,
+    decision_body: str = "",
+    subject_entity: str = "",
+    as_of: datetime,
+    horizon: datetime,
+    rule_kind: str = "majority",
+    required_fact_ids: frozenset[str] = frozenset(),
+    signal_claim_ids: frozenset[str] = frozenset(),
+) -> tuple[EvidenceCandidate, ...]:
+    """Build the inventory from loose parameters, before a full contract exists.
+
+    Used by the live compiler to enumerate candidates *and hand them to the LLM* so it
+    cannot silently forget a verified item during compilation.
+    """
+
+    ctx = _MaterialityContext(
+        body_norm=_norm(decision_body),
+        subject_norm=_norm(subject_entity),
+        signal_claim_ids=signal_claim_ids,
+        required_fact_ids=required_fact_ids,
+        as_of=as_of,
+        horizon=horizon,
+        rule_kind=rule_kind,
+    )
+    return _inventory(view, ctx, None)
+
+
+def _inventory(
+    view: EvidenceView, ctx: _MaterialityContext, contract: ResolutionContract | None
+) -> tuple[EvidenceCandidate, ...]:
+    claims = view.available()
     direct = _entity_candidates(claims, ctx)
     direct += _claim_kind_candidates(claims, ctx)
     derived = _derived_candidates(direct, ctx)
-    resolution = _resolution_requirements(contract)
+    resolution = _resolution_requirements(contract) if contract is not None else []
 
     everything = direct + derived + resolution
     # Stable order: material first, then by kind then identity.
     everything.sort(key=lambda c: (not c.is_material, c.kind.value, c.canonical_identity))
     return tuple(everything)
+
+
+def evidence_checklist(
+    view: EvidenceView,
+    *,
+    decision_body: str = "",
+    subject_entity: str = "",
+    as_of: datetime,
+    horizon: datetime,
+    max_items: int = 80,
+) -> str:
+    """A compact, kind-grouped enumeration of the *material* evidence candidates, for
+    injection into an LLM compile prompt so the model is handed an explicit inventory
+    of what verified reality contains rather than being trusted to recall it."""
+
+    candidates = build_inventory_from(
+        view,
+        decision_body=decision_body,
+        subject_entity=subject_entity,
+        as_of=as_of,
+        horizon=horizon,
+    )
+    material = [c for c in candidates if c.is_material][:max_items]
+    if not material:
+        return "(no material candidates detected)"
+    by_kind: dict[str, list[EvidenceCandidate]] = {}
+    for c in material:
+        by_kind.setdefault(c.kind.value, []).append(c)
+    lines: list[str] = []
+    for kind in sorted(by_kind):
+        items = "; ".join(
+            f"{c.canonical_identity} [{','.join(c.claim_ids[:4])}]" for c in by_kind[kind]
+        )
+        lines.append(f"- {kind}: {items}")
+    return "\n".join(lines)
 
 
 @dataclass(frozen=True)

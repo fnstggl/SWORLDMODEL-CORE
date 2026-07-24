@@ -29,7 +29,8 @@ from .config import ForecastConfig
 from .ids import canonical_json, sha256_hex
 from .live_research import ResearchBudget
 from .models import ForecastResult
-from .research import CorpusResearchBackend, ResearchBundle
+from .research import CorpusResearchBackend
+from .tracing import TraceContext
 
 # --- Banxico evaluation harness constants (NOT core) -----------------------------
 BANXICO_AS_OF = datetime.fromisoformat("2026-05-14T23:59:59-06:00")
@@ -82,8 +83,9 @@ def _print_summary(result: ForecastResult, forecast_hash: str, out_dir: Path | N
             print(f"Forecast SHA-256: {forecast_hash}")
 
 
-def _live_audit(config: ForecastConfig, bundle: ResearchBundle) -> dict[str, Any]:
+def _live_audit(config: ForecastConfig, ctx: TraceContext) -> dict[str, Any]:
     gw = config.gateway
+    bundle = ctx.bundle
     transport = getattr(config.research_backend, "transport", None)
     http_calls = getattr(transport, "calls", [])
     lat = gw.latencies_ms
@@ -102,6 +104,7 @@ def _live_audit(config: ForecastConfig, bundle: ResearchBundle) -> dict[str, Any
         "max_latency_ms": max(lat) if lat else 0,
         "http_requests": len(http_calls),
         "research": bundle.live_trace,
+        "coverage": ctx.compiled.coverage_report.to_dict(),
     }
 
 
@@ -122,6 +125,29 @@ def _print_live_audit(audit: dict[str, Any]) -> None:
         f"{len(r.get('sources_rejected', []))} rejected, "
         f"{r.get('claim_count', 0)} claims; stop: {r.get('stop_reason', '')}"
     )
+    _print_coverage(audit.get("coverage") or {})
+
+
+def _print_coverage(cov: dict[str, Any]) -> None:
+    if not cov:
+        return
+    t = cov.get("totals", {})
+    print(
+        f"coverage: {cov.get('coverage_verdict', '?')} — "
+        f"{t.get('material', 0)}/{t.get('total', 0)} material; "
+        f"included {t.get('included', 0)}, merged {t.get('merged', 0)}, "
+        f"excluded {t.get('excluded', 0)}, uncertain {t.get('uncertain', 0)}, "
+        f"unresolved {t.get('unresolved', 0)}"
+    )
+    for miss in cov.get("missing_material_candidates", []):
+        print(f"  MISSING: {miss}")
+    # Show what verified reality entered the world, was merged, or excluded and why.
+    for c in cov.get("candidates", []):
+        disp = c.get("disposition")
+        if disp in ("included", "merged"):
+            print(f"  [{disp}] {c['kind']}: {c['identity']} -> {','.join(c['causal_uses']) or '—'}")
+        elif disp in ("excluded_irrelevant", "uncertain", "required_but_unresolved"):
+            print(f"  [{disp}] {c['kind']}: {c['identity']} — {c['reason']}")
 
 
 # ---------------------------------------------------------------------------
@@ -178,7 +204,7 @@ def _run_live(
         raise RuntimeError("live command requires a live gateway + live research backend")
     result, ctx = run_forecast(question, as_of, horizon, config)
     forecast_hash = ""
-    audit = _live_audit(config, ctx.bundle)
+    audit = _live_audit(config, ctx)
     if out_dir is not None:
         forecast_hash = ctx.write(out_dir, sealed_names=sealed, gateway_calls=config.gateway.calls)
         (out_dir / "live_audit.json").write_text(canonical_json(audit) + "\n")

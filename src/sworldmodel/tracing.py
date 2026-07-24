@@ -142,6 +142,12 @@ class TraceContext:
             ],
         }
 
+    def coverage_manifest(self) -> dict[str, Any]:
+        """The evidence-to-world coverage report: what verified reality contained and
+        what became of every candidate during compilation."""
+
+        return self.compiled.coverage_report.to_dict()
+
     def event_ledger_lines(self) -> list[str]:
         return [
             canonical_json(
@@ -219,6 +225,9 @@ class TraceContext:
             canonical_json(self.evidence_manifest()) + "\n"
         )
         (out_dir / "world_manifest.json").write_text(canonical_json(self.world_manifest()) + "\n")
+        (out_dir / "coverage_report.json").write_text(
+            canonical_json(self.coverage_manifest()) + "\n"
+        )
         (out_dir / "event_ledger.jsonl").write_text("\n".join(self.event_ledger_lines()) + "\n")
         (out_dir / "llm_calls.jsonl").write_text("\n".join(self.llm_call_lines()) + "\n")
         (out_dir / "actor_decisions.jsonl").write_text(

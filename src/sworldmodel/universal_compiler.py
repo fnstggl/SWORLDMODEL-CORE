@@ -16,6 +16,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+from .coverage import evidence_checklist
 from .evidence import EvidenceStore, EvidenceView
 from .gateway import GatewayRequest, ModelGateway
 from .ids import prompt_hash
@@ -56,12 +57,18 @@ def compile_reality(
     gateway: ModelGateway, question: str, as_of: datetime, horizon: datetime, view: EvidenceView
 ) -> dict[str, Any]:
     evidence = _render_evidence(view)
+    checklist = evidence_checklist(view, as_of=as_of, horizon=horizon)
     prompt = f"""Compile the VERIFIED reality for this forecasting question from the
 evidence below. Cite ONLY claim ids that appear in the evidence list. Do not invent
 members, offices, rules, or citations.
 
 QUESTION: {question}
 as_of: {as_of.isoformat()}   horizon: {horizon.isoformat()}
+
+MATERIAL EVIDENCE CANDIDATES (a deterministic inventory of what verified reality
+contains — every material person, organization, rule, and event below MUST be
+represented in your output or it will be rejected; do not drop any):
+{checklist}
 
 EVIDENCE (id | proposition = value [meta]):
 {evidence}
@@ -92,7 +99,11 @@ Give the chair/leader authority ["vote","introduce_proposal","chair"]."""
 
 
 def compile_roster(
-    gateway: ModelGateway, question: str, view: EvidenceView, reality: dict[str, Any]
+    gateway: ModelGateway,
+    question: str,
+    view: EvidenceView,
+    reality: dict[str, Any],
+    horizon: datetime,
 ) -> list[dict[str, Any]]:
     """A focused call that enumerates every decision-maker named in the evidence.
 
@@ -102,6 +113,13 @@ def compile_roster(
 
     evidence = _render_evidence(view)
     candidates = _candidate_persons(view)
+    checklist = evidence_checklist(
+        view,
+        decision_body=str(reality.get("decision_body") or ""),
+        subject_entity=str(reality.get("subject_entity") or ""),
+        as_of=view.as_of,
+        horizon=horizon,
+    )
     prompt = f"""From the evidence below, ENUMERATE EVERY individual decision-maker
 (board/committee member, voting seat, or the focal actor) NAMED in the evidence and
 relevant to the question. List ALL of them — do not summarize or omit any. A person
@@ -113,6 +131,8 @@ QUESTION: {question}
 DECISION BODY: {reality.get("decision_body")}
 The body has approximately {reality.get("expected_voting_seats")} decision-makers.
 INDIVIDUALS NAMED IN THE EVIDENCE (include every one who is a decision-maker): {candidates}
+MATERIAL EVIDENCE CANDIDATES (deterministic inventory — represent every person here):
+{checklist}
 
 EVIDENCE (id | proposition = value):
 {evidence}
@@ -195,7 +215,7 @@ def build_live_bundle(
     reality = compile_reality(gateway, question, as_of, horizon, view)
     # A dedicated roster call enumerates the named decision-makers reliably; use it
     # when it names at least as many actors as the structural compile did.
-    roster = compile_roster(gateway, question, view, reality)
+    roster = compile_roster(gateway, question, view, reality, horizon)
     if len(roster) >= len(reality.get("members") or []):
         reality["members"] = roster
     frame = compile_frame(gateway, question, view, reality)

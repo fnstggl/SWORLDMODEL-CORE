@@ -94,7 +94,14 @@ class LiveResearchBackend:
         self.budget = budget or ResearchBudget()
         self._now = now  # injectable for tests; else datetime.now(tz) at call time
 
-    def research(self, question: str, as_of: datetime, horizon: datetime) -> ResearchBundle:
+    def research(
+        self,
+        question: str,
+        as_of: datetime,
+        horizon: datetime,
+        *,
+        extra_queries: tuple[str, ...] = (),
+    ) -> ResearchBundle:
         now = self._now or datetime.now(as_of.tzinfo)
         t0 = time.monotonic()
         plan = plan_research(self.gateway, question, as_of, horizon)
@@ -104,6 +111,9 @@ class LiveResearchBackend:
         seen_hashes: set[str] = set()
 
         queries: deque[str] = deque(plan.initial_queries[: self.budget.max_queries])
+        # Targeted queries (coverage repair) go first so they run even under a budget.
+        for q in extra_queries:
+            queries.appendleft(q[:120])
         # Per-decision-maker queries surface articles that name each individual actor.
         for maker in plan.decision_makers[:6]:
             queries.append(f"{maker} {plan.resolution_event or question}"[:120])
@@ -152,6 +162,23 @@ class LiveResearchBackend:
 
         bundle = build_live_bundle(self.gateway, question, as_of, horizon, store, plan)
         return replace(bundle, live_trace=trace.to_dict(plan))
+
+    def augment_for_coverage(
+        self,
+        question: str,
+        as_of: datetime,
+        horizon: datetime,
+        missing: list[str],
+        prior: ResearchBundle,
+    ) -> ResearchBundle | None:
+        """Targeted follow-up research when the coverage gate finds a material item
+        absent. Each missing candidate becomes an explicit query so the follow-up
+        research goes looking for exactly what the world was missing."""
+
+        queries = tuple(_missing_query(m) for m in missing if _missing_query(m))
+        if not queries:
+            return None
+        return self.research(question, as_of, horizon, extra_queries=queries)
 
     # -- research loop helpers --------------------------------------------------
 
@@ -279,6 +306,14 @@ class LiveResearchBackend:
 
     def _time_up(self, t0: float) -> bool:
         return (time.monotonic() - t0) > self.budget.max_seconds
+
+
+def _missing_query(label: str) -> str:
+    """Extract the identity from a coverage 'missing' label ('[kind] identity — why')
+    so it can be researched directly."""
+
+    text = label.split("]", 1)[1] if "]" in label else label
+    return text.split("—", 1)[0].strip()
 
 
 def _topic(proposition: str) -> str:
