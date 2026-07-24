@@ -404,8 +404,12 @@ def _inventory(
     resolution = _resolution_requirements(contract) if contract is not None else []
 
     everything = direct + derived + resolution
-    # Stable order: material first, then by kind then identity.
-    everything.sort(key=lambda c: (not c.is_material, c.kind.value, c.canonical_identity))
+    # Stable order: material first, then directly-observed candidates before derived
+    # inferences (so a person takes the INCLUDED slot and its inferred membership
+    # MERGES into it, not the reverse), then by kind and identity.
+    everything.sort(
+        key=lambda c: (not c.is_material, c.is_inference, c.kind.value, c.canonical_identity)
+    )
     return tuple(everything)
 
 
