@@ -34,6 +34,7 @@ class HttpResponse:
     headers: dict[str, str]
     text: str
     elapsed_ms: int
+    content: bytes = b""  # raw (decompressed) body, needed to read binary formats (PDF)
 
     @property
     def ok(self) -> bool:
@@ -133,6 +134,7 @@ class UrllibTransport:
                 headers={k.lower(): v for k, v in resp.headers.items()},
                 text=text,
                 elapsed_ms=elapsed,
+                content=raw,
             )
             self._record(HttpCall(method, url, hr.final_url, hr.status, elapsed, len(raw)))
             return hr
@@ -202,3 +204,17 @@ def html_response(
     url: str, text: str, *, status: int = 200, final_url: str | None = None
 ) -> HttpResponse:
     return HttpResponse(url, final_url or url, status, {"content-type": "text/html"}, text, 1)
+
+
+def pdf_response(url: str, content: bytes, *, status: int = 200) -> HttpResponse:
+    # `text` is the lossy decode a real server body would produce for binary bytes;
+    # the PDF path reads `content` instead.
+    return HttpResponse(
+        url,
+        url,
+        status,
+        {"content-type": "application/pdf"},
+        content.decode("latin-1"),
+        1,
+        content=content,
+    )

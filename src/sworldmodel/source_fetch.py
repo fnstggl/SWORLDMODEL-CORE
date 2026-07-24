@@ -15,6 +15,7 @@ from datetime import datetime
 
 from .http import HttpError, HttpTransport
 from .ids import sha256_hex
+from .pdf_text import looks_like_pdf, pdf_metadata_date, pdf_to_text
 
 _SCRIPT_STYLE = re.compile(r"<(script|style)[^>]*>.*?</\1>", re.IGNORECASE | re.DOTALL)
 _TAG = re.compile(r"<[^>]+>")
@@ -58,16 +59,25 @@ def fetch_source(
         resp = transport.get(url, timeout=timeout)
     except HttpError:
         return FetchedSource(url, url, 0, False, "", "", _publisher(url), None, now, "", 0)
-    text = extract_text(resp.text) if _looks_textual(resp.text) else ""
+    # A PDF (many authoritative minutes/filings) is read from its raw bytes; HTML from
+    # its decoded text. A binary body that is neither yields no text.
+    if looks_like_pdf(resp.content, content_type=resp.headers.get("content-type", ""), url=url):
+        text = pdf_to_text(resp.content)
+        title = ""
+        published = pdf_metadata_date(resp.content)
+    else:
+        text = extract_text(resp.text) if _looks_textual(resp.text) else ""
+        title = extract_title(resp.text)
+        published = extract_published(resp.text)
     return FetchedSource(
         url=url,
         final_url=resp.final_url,
         status=resp.status,
         reachable=True,
-        title=extract_title(resp.text),
+        title=title,
         text=text,
         publisher=_publisher(resp.final_url),
-        published_at=extract_published(resp.text),
+        published_at=published,
         fetched_at=now,
         content_hash=sha256_hex(text)[:16] if text else "",
         elapsed_ms=resp.elapsed_ms,
