@@ -455,6 +455,21 @@ def _world_spec_view(
         )
     )
 
+    # Guidance is a first-class part of the world: it anchors every actor's initial
+    # inclination, so the evidence behind it is causally wired (focal anchoring).
+    if frame.guidance_evidence_ids:
+        accessible.update(frame.guidance_evidence_ids)
+        objects.append(
+            WorldObject(
+                object_id="guidance",
+                kind="guidance",
+                name=f"guidance:{frame.guidance_option or ''}",
+                claim_ids=frame.guidance_evidence_ids,
+                wired=True,
+                uses=("focal_anchoring", "actor_view"),
+            )
+        )
+
     reaction_signals = {r.trigger_signal for r in frame.reaction_rules}
     uncertainty_signals = {u.signal for u in frame.uncertainty}
     signal_claim_ids: set[str] = set(frame.guidance_evidence_ids)
