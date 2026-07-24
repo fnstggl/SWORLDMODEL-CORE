@@ -70,6 +70,11 @@ class StructuralAssessment:
     reason: str
     primary_weight: float
     alternatives: tuple[StructuralAlternative, ...] = ()
+    # Weight the model assigned to a structure it did not describe well enough to
+    # compile. It is doubt about which world we are in, and it stays unresolved rather
+    # than being shared out among the structures we could build.
+    undescribed_mass: float = 0.0
+    undescribed_reason: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -77,6 +82,8 @@ class StructuralAssessment:
             "reason": self.reason,
             "primary_weight": self.primary_weight,
             "alternatives": [a.as_dict() for a in self.alternatives],
+            "undescribed_mass": self.undescribed_mass,
+            "undescribed_reason": self.undescribed_reason,
         }
 
     @classmethod
@@ -159,12 +166,21 @@ def assess_structure(
         )
 
     alternatives: list[StructuralAlternative] = []
-    for raw in list(data.get("alternatives") or [])[:max_alternatives]:
+    undescribed = 0.0
+    undescribed_notes: list[str] = []
+    raw_alternatives = list(data.get("alternatives") or [])
+    for raw in raw_alternatives[:max_alternatives]:
         if not isinstance(raw, dict):
             continue
         differs = str(raw.get("what_differs", "")).strip()
         if not differs:
-            continue  # an alternative we cannot compile from is not an alternative
+            # Named as a possibility but not described concretely enough to build. Its
+            # weight is doubt we cannot resolve, not weight the others have earned.
+            undescribed += max(0.0, float(raw.get("weight", 0.0) or 0.0))
+            undescribed_notes.append(
+                str(raw.get("structure_id", "unnamed")) + ": no compilable description"
+            )
+            continue
         prov = str(raw.get("provenance", ""))
         alternatives.append(
             StructuralAlternative(
@@ -183,8 +199,14 @@ def assess_structure(
                 evidence_claim_ids=tuple(str(c) for c in (raw.get("evidence_claim_ids") or [])),
             )
         )
+    for raw in raw_alternatives[max_alternatives:]:
+        if isinstance(raw, dict):
+            undescribed += max(0.0, float(raw.get("weight", 0.0) or 0.0))
+            undescribed_notes.append(
+                str(raw.get("structure_id", "unnamed")) + ": beyond the structure budget"
+            )
     alternatives = [a for a in alternatives if a.weight > 0]
-    if not alternatives:
+    if not alternatives and undescribed <= 0:
         return (
             StructuralAssessment.certain(
                 "structural uncertainty was claimed but no compilable alternative was given"
@@ -193,7 +215,7 @@ def assess_structure(
         )
 
     primary = float(data.get("primary_weight", 0.0) or 0.0)
-    total = primary + sum(a.weight for a in alternatives)
+    total = primary + sum(a.weight for a in alternatives) + undescribed
     if total <= 0:
         return StructuralAssessment.certain("structural weights were not usable"), resp
     return (
@@ -201,6 +223,8 @@ def assess_structure(
             is_material=True,
             reason=str(data.get("reason", "")),
             primary_weight=primary / total,
+            undescribed_mass=undescribed / total,
+            undescribed_reason="; ".join(undescribed_notes),
             alternatives=tuple(
                 StructuralAlternative(
                     structure_id=a.structure_id,

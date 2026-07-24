@@ -136,7 +136,14 @@ def enumerate_scenarios(
                 levels[fld] = lvl
             conditions.append((name, outcome.value))
         sid = "sc_" + "_".join(f"{n}:{v}" for n, v in conditions)
-        releases = [s.release_at for s in specs if s.release_at is not None]
+        # A release date belongs to the uncertainty that has one. Borrowing the
+        # earliest across all of them would give a branch a date for a value whose
+        # timing the evidence never established.
+        releases = [
+            spec.release_at
+            for spec, outcome in zip(specs, combo, strict=True)
+            if spec.release_at is not None and outcome.field_effects
+        ]
         raw.append(
             Scenario(
                 scenario_id=sid,

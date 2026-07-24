@@ -392,11 +392,22 @@ class ActorState:
 
 
 def _memory_seeds(spec: ActorSpec) -> tuple[Any, ...]:
+    """The actor's starting memories — the *cited* ones only.
+
+    An uncited seed is withheld from the grounding block, and it must be withheld here
+    too: a memory is rendered to the actor under "RETRIEVED MEMORIES", where it reads
+    exactly like something the actor knows. Excluding it from one prompt section and
+    admitting it through another would put the same invented fact in front of the same
+    actor by a different door.
+    """
+
     from .models import MemorySeed
 
     seeds: list[MemorySeed] = []
     for raw in spec.memory_seeds:
         d = dict(raw)
+        if not (d.get("evidence_claim_ids") or ()):
+            continue
         vt = d.get("valid_time")
         seeds.append(
             MemorySeed(

@@ -335,7 +335,7 @@ def run_forecast(
         )
 
     run_result = _merge(runs)
-    unrepresentable_mass = sum(a.weight for a, _ in unrepresentable)
+    unrepresentable_mass = sum(a.weight for a, _ in unrepresentable) + assessment.undescribed_mass
 
     trace_location = str(config.trace_dir) if config.trace_dir else "(not written)"
     result = aggregate(
