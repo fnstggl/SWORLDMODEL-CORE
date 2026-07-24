@@ -157,17 +157,12 @@ since grounding was integrated:
 | same, after prompt hardening | reality gate | the compiled world contained no actors at all |
 | Fed cuts at the Sept 2026 FOMC | reality gate | claimed 12 participants, represented 5 |
 
-The gates are behaving as designed: each refusal is a world that would have been false
-if simulated, and the last run shows the compile prompt is getting closer (12/1 → 12/5)
-without getting there. The underlying defect is that the live compiler under-enumerates
-a large roster while self-reporting the true size.
+The gates were behaving as designed: each refusal was a world that would have been false
+if simulated. Every one of these was subsequently diagnosed and fixed on the follow-up
+branch (see below), and a green live run is now confirmed.
 
-The clear next step is to route the reality gate's roster mismatch into the existing
-repair loop. Today `api._compile_with_repair` only reacts to the coverage gate's
-`missing_material_candidates`; a roster shortfall raises `WorldIntegrityError` without
-that key and therefore propagates immediately, even though "find the other seven
-members" is exactly the kind of gap `augment_for_coverage` exists to close. That change
-was **not** made here because it could not be verified live within this session.
+That work was done on `claude/post-merge-live-validation` (PR #1), not in this
+checkpoint.
 
 A full green live run *was* confirmed on the pre-grounding merge commit (`91ec5a9`):
 5 queries, 9 sources fetched, 4 unsupported claims rejected, 4 verified claims, coverage
@@ -197,6 +192,28 @@ semantic coercion:
    whole forecast. It now raises a typed `UndeterminedExpressionError`; the engine turns
    that into an *unresolved branch* and the executor into "action not currently
    feasible". Unknown stays unknown — never rendered as NO.
+
+### Green live run confirmed
+
+After the three fixes, the same question ran end to end through the merged pipeline:
+
+```
+question : "Will the Federal Reserve announce a reduction in the federal funds target
+            range at its September 2026 FOMC meeting?"   (as_of 2026-07-24, horizon 2026-09-30)
+research : 5 queries, 11 sources fetched, 4 unsupported claims rejected, 8 verified claims
+coverage : complete, assessed against the exact compiled WorldSpec
+world    : entity fomc (organization-as-actor), action announce_rate_reduction,
+           process node meeting/decision, declarative terminal
+actors   : 2 invocations, both event-driven (trigger: information)
+forecast : resolved, p = 0.5, source weighted_simulated_trajectories
+provider : 28 DeepSeek calls, 71 718 tokens, 1 retry, 0 failures,
+           7.0 s average / 39.7 s max latency, 249 s wall, 74 HTTP requests
+```
+
+Note the world the compiler produced: an **organization acting as a unit**, with a
+compiled action and a declarative terminal — no committee, no roster, no vote. The same
+runtime that resolves this also resolves the Banxico five-seat decision, the negotiation
+and the population world.
 
 ## Remaining limitations
 
