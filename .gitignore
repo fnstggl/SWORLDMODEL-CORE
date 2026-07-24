@@ -1,0 +1,38 @@
+# Generated run artifacts — never committed to source control.
+# Keep the empty directory (via .gitkeep) but ignore everything generated inside it.
+artifacts/*
+!artifacts/.gitkeep
+
+# Raw model responses, research downloads, caches
+.cache/
+*.raw.json
+raw_responses/
+research_downloads/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+*.egg
+
+# Virtualenvs
+.venv/
+venv/
+env/
+
+# Secrets — never commit credentials
+.env
+.env.*
+!.env.example
+
+# Editor
+.idea/
+.vscode/
+*.swp
+.DS_Store
