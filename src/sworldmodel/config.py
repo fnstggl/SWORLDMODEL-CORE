@@ -39,6 +39,12 @@ class ForecastConfig:
     # from outside with nothing written. Reaching this stops repairing and refuses with
     # the last gate's own diagnosis, which is a result; being killed is not.
     max_compile_seconds: float = 900.0
+    # Which compiler builds the world from the evidence. "direct": one model call
+    # authors the executable WorldSpec. "semantic": the model authors a semantic causal
+    # plan, an independent call reviews it, and deterministic code lowers it into the
+    # same WorldSpec. Both feed the identical gates and runtime; the mode is recorded in
+    # every trace.
+    compiler_mode: str = "direct"
 
     @classmethod
     def live(
@@ -54,6 +60,7 @@ class ForecastConfig:
         now: datetime | None = None,
         model: str | None = None,
         budget: RunBudget | None = None,
+        compiler_mode: str = "direct",
     ) -> ForecastConfig:
         """The production configuration: live DeepSeek + live research, one transport."""
 
@@ -68,6 +75,7 @@ class ForecastConfig:
             shared_transport,  # type: ignore[arg-type]
             budget=research_budget or ResearchBudget(),  # type: ignore[arg-type]
             now=now,
+            compiler_mode=compiler_mode,
         )
         return cls(
             gateway=gateway,
@@ -78,6 +86,7 @@ class ForecastConfig:
             max_structures=max_structures,
             max_compile_seconds=max_compile_seconds,
             budget=budget or RunBudget(),
+            compiler_mode=compiler_mode,
         )
 
     @property

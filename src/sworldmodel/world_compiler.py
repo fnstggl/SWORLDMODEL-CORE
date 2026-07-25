@@ -1247,8 +1247,6 @@ def enforce_outcome_is_produced(
     action must be able to move at least one term the terminal reads.
     """
 
-    terminal_fields = _expr_fields(spec.terminal.yes_when)
-    terminal_colls = _expr_collections(spec.terminal.yes_when)
     if not spec.actions and not spec.external_processes:
         # Whether the world has actors changes what is wrong and what the repair is. A
         # world with actors but no actions compiled people and gave them nothing to do —
@@ -1411,10 +1409,18 @@ def enforce_outcome_is_produced(
         # node fires when enough have been recorded and writes the outcome. Their
         # influence runs through that node's gate, and demanding a direct write refused
         # exactly the world this gate's own docstring calls right.
-        reaches = (
-            (terminal_fields & written_fields)
-            or (terminal_colls & written_colls)
-            or _actions_gate_a_producer(spec, set(producers))
+        #
+        # Reach is judged over every namespaced term the terminal reads — fields,
+        # collections, events, documents, resources — not fields and collections alone.
+        # A terminal that asks whether an event exists, produced by the actor's own
+        # action emitting exactly that event, is the most direct causation there is,
+        # and the earlier field/collection-only test refused it.
+        action_terms: set[str] = set()
+        for action in spec.actions:
+            for eff in action.effects:
+                action_terms |= _effect_produces(eff)
+        reaches = bool(action_terms & set(producers)) or _actions_gate_a_producer(
+            spec, set(producers)
         )
         if spec.actors and not reaches:
             raise WorldIntegrityError(

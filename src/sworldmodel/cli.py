@@ -228,6 +228,7 @@ def cmd_forecast(args: argparse.Namespace) -> int:
             max_events=args.max_events,
             max_actor_calls=args.max_actor_calls,
         ),
+        compiler_mode=args.compiler,
     )
     if not config.is_live:  # the only gate: a "forecast" that is not live is not one
         print("forecast requires a live gateway and live research backend", file=sys.stderr)
@@ -460,6 +461,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=3,
         help="how many competing causal structures to simulate when the evidence "
         "leaves the structure open (1 takes the compiled structure as given)",
+    )
+    fc.add_argument(
+        "--compiler",
+        choices=("direct", "semantic"),
+        default="direct",
+        help="world compiler: 'direct' (one call authors the WorldSpec) or 'semantic' "
+        "(plan → independent review → deterministic lowering into the same WorldSpec)",
     )
     fc.add_argument("--max-queries", type=int, default=14)
     fc.add_argument("--research-rounds", type=int, default=3)

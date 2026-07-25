@@ -288,20 +288,39 @@ def _recompile(
     if not getattr(config.gateway, "is_live", False):
         return None
     try:
-        data, _ = compile_world_spec_live(
-            config.gateway,
-            question,
-            as_of,
-            horizon,
-            bundle.evidence_store.view(as_of),
-            extra_instruction=(
-                "A previous compilation of this question was rejected. Fix exactly this "
-                "and change nothing else about how you read the evidence:\n"
-                f"{reason}\n"
-                "Do not invent support for anything."
-            ),
-            structure_id="primary",
+        instruction = (
+            "A previous compilation of this question was rejected. Fix exactly this "
+            "and change nothing else about how you read the evidence:\n"
+            f"{reason}\n"
+            "Do not invent support for anything."
         )
+        # The same repair loop drives both compiler modes: the instruction names a
+        # world-meaning defect, and each mode re-reads the same evidence its own way —
+        # the direct compiler re-authors the WorldSpec, the semantic path re-plans and
+        # re-lowers. Neither mode gets a private repair mechanism, which keeps the A/B
+        # comparison honest.
+        if getattr(config, "compiler_mode", "direct") == "semantic":
+            from .semantic_compile import semantic_compile_live
+
+            data, _ = semantic_compile_live(
+                config.gateway,
+                question,
+                as_of,
+                horizon,
+                bundle.evidence_store.view(as_of),
+                extra_instruction=instruction,
+                structure_id="primary",
+            )
+        else:
+            data, _ = compile_world_spec_live(
+                config.gateway,
+                question,
+                as_of,
+                horizon,
+                bundle.evidence_store.view(as_of),
+                extra_instruction=instruction,
+                structure_id="primary",
+            )
         # Carry the research record forward. A compiler-only repair does no new
         # research, so `assemble_bundle` has no trace to build — and without this the
         # record of every query, source and rejection made before the repair was dropped

@@ -459,6 +459,25 @@ class RunDiagnosis:
                     "why": "an actor was compiled with no entity behind it",
                 }
             )
+        if gate in ("semantic_plan_invalid", "lowering_gap"):
+            # The semantic compiler's own refusals. An invalid plan after revision is
+            # the planner failing to describe a coherent world; a lowering gap is a
+            # meaning the universal change mapping cannot yet represent. Both are
+            # compile-boundary defects, not facts about the world.
+            out.append(
+                {
+                    "cause": "compiler_omission",
+                    "why": f"the semantic compiler stopped at the {gate} gate",
+                }
+            )
+        if gate == "semantic_review_abstained":
+            out.append(
+                {
+                    "cause": "authoritative_source_starvation",
+                    "why": "the independent reality review judged the evidence unable to "
+                    "support any faithful world for this question",
+                }
+            )
         if gate == "required_facts_unverified":
             out.append(
                 {

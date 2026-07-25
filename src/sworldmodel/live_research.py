@@ -265,10 +265,12 @@ class LiveResearchBackend:
         *,
         budget: ResearchBudget | None = None,
         now: datetime | None = None,
+        compiler_mode: str = "direct",
     ) -> None:
         self.gateway = gateway
         self.transport = transport or UrllibTransport()
         self.budget = budget or ResearchBudget()
+        self.compiler_mode = compiler_mode
         self._now = now  # injectable for tests; else datetime.now(tz) at call time
         # Per-question retrieval state, shared across the opening pass and every repair
         # round: the health ledger circuit-breaks a blocked provider once for the whole
@@ -1238,9 +1240,16 @@ Return JSON {{"reconcilable": true|false, "reading": "<one line: how both are tr
         trace.claim_count = len(store.all())
         trace.admissible_claim_count = len(store.view(as_of).available())
         trace.contradictions = [f"{a}<>{b}" for a, b in store.contradictions()]
-        compilation, resp = compile_world_spec_live(
-            self.gateway, question, as_of, horizon, store.view(as_of)
-        )
+        if self.compiler_mode == "semantic":
+            from .semantic_compile import semantic_compile_live
+
+            compilation, resp = semantic_compile_live(
+                self.gateway, question, as_of, horizon, store.view(as_of)
+            )
+        else:
+            compilation, resp = compile_world_spec_live(
+                self.gateway, question, as_of, horizon, store.view(as_of)
+            )
         data = {
             "world_spec": compilation["world_spec"],
             "uncertainties": compilation.get("uncertainties", []),
@@ -1274,7 +1283,14 @@ Return JSON {{"reconcilable": true|false, "reading": "<one line: how both are tr
                     "parser_error": f"{type(exc).__name__}: {exc}",
                 },
             ) from exc
-        return replace(bundle, live_trace=trace.to_dict(plan, store))
+        live_trace = trace.to_dict(plan, store)
+        if "_semantic" in compilation:
+            # The semantic plan, its independent review and the semantic→runtime mapping
+            # are part of this run's record: they land in research_trace.json beside the
+            # queries and sources, so a lowered world is always auditable back to the
+            # meaning it lowered from.
+            live_trace["semantic_compilation"] = compilation["_semantic"]
+        return replace(bundle, live_trace=live_trace)
 
     def _time_up(self, t0: float) -> bool:
         return (time.monotonic() - t0) > self.budget.max_seconds

@@ -34,6 +34,8 @@ DEFAULT_TEMPERATURES: dict[str, float] = {
     "extract_claims": 0.1,
     "contradiction": 0.1,
     "compile_world_spec": 0.3,
+    "semantic_plan": 0.3,
+    "semantic_review": 0.2,
     "interpret_novel": 0.2,
     "exclusion_challenge": 0.1,
     "world_review": 0.2,
@@ -50,6 +52,12 @@ DEFAULT_MAX_TOKENS: dict[str, int] = {
     # plans, actions with timing and effects, a dated process graph, external
     # processes, wake rules, uncertainties and a terminal expression.
     "compile_world_spec": 16000,
+    # The semantic plan is meaning without syntax — smaller than a WorldSpec, but it
+    # still enumerates entities, states, affordances, processes and uncertainties, and
+    # the provider's reasoning tokens count against the same budget.
+    "semantic_plan": 12000,
+    # One verdict plus per-finding reasons and exact corrections.
+    "semantic_review": 4000,
     "interpret_novel": 2000,
     "exclusion_challenge": 800,
     # Fourteen adversarial findings with a sentence of attack and a sentence of
