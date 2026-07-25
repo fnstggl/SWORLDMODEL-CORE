@@ -155,6 +155,29 @@ def test_a_lone_argument_is_a_one_argument_list() -> None:
     assert nested.op == "equals" and nested.args[1] == 3
 
 
+def test_the_runtime_survives_compiler_drift_too() -> None:
+    """The parsers were not the only place a near-miss could kill a run.
+
+    Sweeping the *runtime* with the same kind of drift — an effect op outside the
+    universal set, an action writing an undeclared field, a node dated "soon", a
+    wake rule naming an entity that does not exist, a cost written as a one-element
+    list — every case must either run or be refused. Only the malformed cost crashed,
+    with IndexError from a tuple unpack inside the parser.
+    """
+
+    from sworldmodel.worldspec import parse_action
+
+    action = parse_action(
+        {
+            "action_id": "act",
+            "meaning": "m",
+            "resource_costs": [["only_one"], ["votes", 2], ["bad", "amount"], "junk"],
+        }
+    )
+    # Only the entries that are genuinely (resource, amount) pairs survive.
+    assert action.resource_costs == (("votes", 2.0),)
+
+
 def test_coercion_never_invents_content() -> None:
     """The line this robustness must not cross."""
 

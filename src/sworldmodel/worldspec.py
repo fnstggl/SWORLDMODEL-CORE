@@ -532,6 +532,25 @@ def _strs(v: Any) -> tuple[str, ...]:
     return ()
 
 
+def _pairs(value: Any) -> tuple[tuple[str, float], ...]:
+    """``[[resource, amount], ...]`` — keeping only the entries that are actually pairs.
+
+    A half-written cost names no amount, and unpacking it raised IndexError from inside
+    the parser. Dropping it is safe and visible: an action whose cost was dropped is
+    cheaper than intended, and the executor still refuses it if the resource is absent.
+    """
+
+    out: list[tuple[str, float]] = []
+    for item in value if isinstance(value, (list, tuple)) else ():
+        if not isinstance(item, (list, tuple)) or len(item) != 2:
+            continue
+        try:
+            out.append((str(item[0]), float(item[1])))
+        except (TypeError, ValueError):
+            continue
+    return tuple(out)
+
+
 def as_objects(value: Any) -> list[dict[str, Any]]:
     """Read a list-of-objects field however the compiler happened to write it.
 
@@ -601,7 +620,7 @@ def parse_action(d: dict[str, Any]) -> ActionDefinition:
             for p in (d.get("parameters") or [])
         ),
         preconditions=parse_expr(d["preconditions"]) if d.get("preconditions") else true_expr(),
-        resource_costs=tuple((str(rc[0]), float(rc[1])) for rc in (d.get("resource_costs") or [])),
+        resource_costs=_pairs(d.get("resource_costs")),
         stages=_strs(d.get("stages")),
         not_before=d.get("not_before"),
         not_after=d.get("not_after"),
