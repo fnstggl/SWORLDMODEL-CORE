@@ -30,14 +30,32 @@ the name before a seat is demanded (`coverage._near`), and that a name represent
 through an organization it belongs to is covered rather than absent. A place named in
 role terms right next to the name would still be owed a seat.
 
-**The search channel degrades under repeated use, and the run cannot route around it.**
-Four full acceptance passes inside three hours, each making roughly five hundred HTTP
-requests, ended with most queries returning "empty result set, block, or challenge": one
-case saw four URLs from five queries and compiled an empty world. It is recorded per
-query in `diagnosis.discovery.search_failures` and now names itself as the root cause
-rather than being reported as an actor-discovery failure, but nothing retries against a
-different channel or backs off, so a throttled window is a window in which this system
-cannot answer.
+**Both discovery channels can be externally unavailable at once, and then nothing can be
+researched.** Probed directly at the end of this run:
+
+* `lite.duckduckgo.com` — the web-search channel, used for both general and `site:`
+  queries — returned `Connection reset by peer` on one query and "empty result set, block,
+  or challenge" on the rest. Four acceptance passes inside three hours, each making around
+  five hundred HTTP requests, is enough to earn that.
+* Google News RSS answered normally: 54–100 items per query. Every one of them carried an
+  opaque `CBMi…` article id, which encodes a server-side reference rather than the
+  destination, so `rss.resolve_item_url` recovered **zero** publisher URLs. Following the
+  redirect returns a 581 KB JavaScript interstitial with no publisher link in it. That is
+  a permanent change on Google's side, not a throttle.
+
+The system reports this correctly — `diagnosis.discovery.search_failures` per query,
+`rss_requests.unresolvable_redirects` per feed, and a `discovery_failure` root cause when
+half or more of the searches come back empty — but it cannot route around it. A window in
+which both channels are unavailable is a window in which this system cannot answer, and
+the runs in it refuse for the right reason with an empty evidence store.
+
+A recovery path was built and then removed: the RSS items still name their publisher in
+`<source url="...">`, and a publisher's own feed does list real article URLs. Measured, it
+recovered 3–6 candidates per query where there had been none, but a publisher's feed is
+what it published lately rather than an answer to the query, so requiring a headline match
+returned nothing for three of four questions and false positives for the fourth — "2026 Q2
+results earnings call" shares words with a Tesla deliveries headline. It was not worth the
+fetch and extraction budget it spent, so it is not in the tree.
 
 **Some domains block this network outright.** `consilium.europa.eu` and `opec.org`
 returned HTTP 403 to every request, with a browser user-agent as well as ours. That is an
