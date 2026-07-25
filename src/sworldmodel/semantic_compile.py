@@ -19,6 +19,7 @@ import json
 from datetime import datetime
 from typing import Any
 
+from .coverage import evidence_checklist
 from .errors import GatewayError, WorldIntegrityError
 from .evidence import EvidenceView
 from .gateway import GatewayRequest, ModelGateway
@@ -216,6 +217,7 @@ def _plan_prompt(
     horizon: datetime,
     evidence: str,
     *,
+    checklist: str = "",
     extra_instruction: str = "",
     prior_plan: dict[str, Any] | None = None,
     corrections: list[str] | None = None,
@@ -229,6 +231,14 @@ def _plan_prompt(
         f"QUESTION: {question}",
         f"as_of: {as_of.isoformat()}   horizon: {horizon.isoformat()}",
         f"EVIDENCE (id | proposition = value [meta]):\n{evidence}",
+        (
+            "WHAT VERIFIED EVIDENCE CONTAINS. Every causally material item below must "
+            "appear in the plan — as an entity, state, process, uncertainty, or a "
+            "world_facts entry citing its claim ids. The coverage gate checks the "
+            "compiled world against exactly this inventory:\n" + checklist
+        )
+        if checklist
+        else "",
         _PLAN_RULES,
         SEMANTIC_SCHEMA,
     ]
@@ -301,6 +311,7 @@ def _call_planner(
     horizon: datetime,
     evidence: str,
     *,
+    checklist: str = "",
     extra_instruction: str,
     prior: dict[str, Any] | None,
     corrections: list[str] | None,
@@ -314,6 +325,7 @@ def _call_planner(
                 as_of,
                 horizon,
                 evidence,
+                checklist=checklist,
                 extra_instruction=extra_instruction,
                 prior_plan=prior,
                 corrections=corrections,
@@ -373,6 +385,7 @@ def semantic_compile_live(
     the two modes are interchangeable at every call site."""
 
     evidence = render_evidence(view)
+    checklist = evidence_checklist(view, as_of=as_of, horizon=horizon)
     known = frozenset(c.id for c in view.available())
     responses: list[Any] = []
 
@@ -385,6 +398,7 @@ def semantic_compile_live(
             as_of,
             horizon,
             evidence,
+            checklist=checklist,
             extra_instruction=extra_instruction,
             prior=prior,
             corrections=corrections,
@@ -402,6 +416,7 @@ def semantic_compile_live(
                 as_of,
                 horizon,
                 evidence,
+                checklist=checklist,
                 extra_instruction=extra_instruction,
                 prior=raw,
                 corrections=[f"fix the plan's shape: {e}" for e in exc.errors[:12]],
@@ -414,21 +429,24 @@ def semantic_compile_live(
 
     plan, raw = build(None, None, 0)
     errors = validate_semantic_plan(plan, as_of=as_of, horizon=horizon, known_claim_ids=known)
-    if errors:
+    validator_rounds = 0
+    while errors and validator_rounds < 2:
         # Mechanical inconsistencies first, so the reviewer always judges a coherent
-        # plan: one validator-only round, with every finding named.
-        plan, raw = build(raw, [f"validator: {e}" for e in errors[:16]], 1)
+        # plan. Two bounded rounds, every finding named each time: the error list
+        # shrinks monotonically when the fixes land, and a plan still broken after two
+        # precise rounds has a real coherence problem.
+        validator_rounds += 1
+        plan, raw = build(raw, [f"validator: {e}" for e in errors[:16]], validator_rounds)
         errors = validate_semantic_plan(plan, as_of=as_of, horizon=horizon, known_claim_ids=known)
-        if errors:
-            raise WorldIntegrityError(
-                "the semantic plan is invalid after a validator round: "
-                + "; ".join(errors[:6]),
-                details={
-                    "failure": "semantic_plan_invalid",
-                    "recompilable": True,
-                    "semantic_errors": errors,
-                },
-            )
+    if errors:
+        raise WorldIntegrityError(
+            "the semantic plan is invalid after validator rounds: " + "; ".join(errors[:6]),
+            details={
+                "failure": "semantic_plan_invalid",
+                "recompilable": True,
+                "semantic_errors": errors,
+            },
+        )
 
     # The independent review judges every plan that will be lowered — including one
     # the validator round produced. No plan reaches lowering unreviewed.

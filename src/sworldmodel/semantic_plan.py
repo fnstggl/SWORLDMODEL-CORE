@@ -16,7 +16,7 @@ support for a further cut" is an event *meaning*, never a hardcoded mechanism.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 # The single sentinel for a value the evidence does not establish. It survives to the
@@ -606,9 +606,15 @@ def _parse_when(value: str | None) -> datetime | None:
     if not value:
         return None
     try:
-        return datetime.fromisoformat(value)
+        when = datetime.fromisoformat(value)
     except ValueError:
         return None
+    if when.tzinfo is None:
+        # A planner that omits the offset means the moment, not a different one per
+        # server timezone; naive reads as UTC so it can be compared with the contract's
+        # aware cutoff and horizon instead of raising mid-validation.
+        when = when.replace(tzinfo=UTC)
+    return when
 
 
 def validate_semantic_plan(
