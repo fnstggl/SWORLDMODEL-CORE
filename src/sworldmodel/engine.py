@@ -1363,6 +1363,61 @@ def _finalize(
     return world
 
 
+def terminal_lineage(
+    world: WorldState, terminal: TerminalExpression
+) -> tuple[dict[str, object], ...]:
+    """For each term the terminal reads, what actually wrote it in *this* trajectory.
+
+    The compile-time gate asks whether something *could* produce each term. This is the
+    other half, and the one that cannot be satisfied by a plausible-looking world spec:
+    it walks the branch's own event ledger and names the event, the actor and the causal
+    parents behind every terminal term. A term with no writer here was not produced by
+    anything that happened — whatever the spec promised.
+    """
+
+    from .world_compiler import _expr_collections, _expr_fields
+
+    terms = sorted(_expr_fields(terminal.yes_when) | _expr_collections(terminal.yes_when))
+    writers: dict[str, list[Event]] = {t: [] for t in terms}
+    for ev in world.event_history:
+        payload = ev.payload_dict
+        touched: set[str] = set()
+        for key in ("field", "collection"):
+            name = payload.get(key)
+            if isinstance(name, str):
+                touched.add(name)
+        for key in ("fields", "data", "levels"):
+            sub = payload.get(key)
+            if isinstance(sub, dict):
+                touched.update(str(k) for k in sub)
+        for term in touched & set(terms):
+            writers[term].append(ev)
+
+    out: list[dict[str, object]] = []
+    for term in terms:
+        evs = writers[term]
+        out.append(
+            {
+                "terminal_term": term,
+                "written_by": [
+                    {
+                        "event_id": e.event_id,
+                        "kind": e.kind,
+                        "at": e.time.isoformat(),
+                        "actor_id": e.actor_id,
+                        "caused_by": list(e.parent_event_ids),
+                        "evidence_claim_ids": list(e.evidence_claim_ids),
+                    }
+                    for e in evs
+                ],
+                "writer_count": len(evs),
+                "produced_by_an_actor": any(e.actor_id for e in evs),
+                "unproduced": not evs,
+            }
+        )
+    return tuple(out)
+
+
 def evaluate_terminal(world: WorldState, terminal: TerminalExpression) -> TerminalEvaluation:
     """The single place YES/NO/unresolved is decided — deterministic, from world state,
     through the universal operators only. No LLM, no mechanism family, no default."""

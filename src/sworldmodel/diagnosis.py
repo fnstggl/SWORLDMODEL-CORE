@@ -282,6 +282,7 @@ class RunDiagnosis:
             "unresolved_mass": round(sum(b.weight for b in r.branch_outcomes if not b.resolved), 6),
             "truncated_mass": r.truncated_mass,
             "truncated_reason": r.truncated_reason,
+            "terminal_producer_lineage": self._lineage(),
             "per_branch": {
                 bid: {
                     "stop_reason": d.stop_reason,
@@ -291,6 +292,18 @@ class RunDiagnosis:
                 }
                 for bid, d in r.diagnostics.items()
             },
+        }
+
+    def _lineage(self) -> dict[str, Any]:
+        """What actually wrote each terminal term, per branch."""
+
+        if self.run_result is None or self.compiled is None:
+            return {}
+        from .engine import terminal_lineage
+
+        return {
+            bid: [dict(x) for x in terminal_lineage(w, self.compiled.spec.terminal)]
+            for bid, w in self.run_result.final_worlds.items()
         }
 
     def as_dict(self) -> dict[str, Any]:

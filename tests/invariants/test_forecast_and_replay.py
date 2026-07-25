@@ -390,3 +390,28 @@ def test_the_environment_may_not_announce_the_answer_before_anyone_acts() -> Non
     assert "the environment writes the answer" in str(exc.value)
     assert exc.value.details["terms preset by the environment"] == ["signal_given"]
     assert exc.value.details.get("recompilable") is True
+
+
+def test_every_terminal_term_names_what_actually_wrote_it() -> None:
+    """The runtime half of producer lineage.
+
+    The compile-time gate asks whether something *could* write each terminal term. This
+    walks the branch's own ledger and names what did: the event, the actor behind it and
+    its causal parents. A world spec cannot satisfy this by looking plausible.
+    """
+
+    from sworldmodel.engine import terminal_lineage
+
+    gw = _gateway(_signal_sensitive)
+    contract, compiled = _compile(_split_world(), gw)
+    result = run(compiled, gw, seed=0)
+
+    for branch_id, world in result.final_worlds.items():
+        lineage = terminal_lineage(world, compiled.spec.terminal)
+        assert lineage, branch_id
+        for term in lineage:
+            assert not term["unproduced"], (branch_id, term["terminal_term"])
+            # The positions the terminal counts were written by the actors themselves.
+            assert term["produced_by_an_actor"], (branch_id, term["terminal_term"])
+            for writer in term["written_by"]:
+                assert writer["event_id"] and writer["kind"]
