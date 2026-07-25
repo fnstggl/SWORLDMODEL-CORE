@@ -613,45 +613,148 @@ def terminal_producers(spec: WorldSpec) -> dict[str, tuple[str, ...]]:
     return {k: tuple(v) for k, v in producers.items()}
 
 
-def _environment_preset_terminal_terms(spec: WorldSpec, terminal_fields: set[str]) -> set[str]:
-    """Terminal terms a scheduled non-agent effect writes to a literal, unconditionally.
+# The runtime's binding prefixes: a value starting with one of these is resolved from
+# the world when the effect executes. Anything else beginning with "$" is an unknown
+# string the executor will treat as a literal, so it must not be read as "computed".
+_BINDINGS = ("$actor", "$target", "$self.", "$param.", "$now", "$event", "$record")
 
-    "Unconditionally" is the load-bearing part. A process node whose entry condition
-    reads a field an action can write is a *consequence* of what actors did — a session
-    that tallies the votes cast into it is exactly right. A node with no such condition,
-    writing a constant, is the compiler putting the answer on the calendar.
+# Operators whose truth cannot depend on world state.
+_ALWAYS_TRUE_OPS = frozenset({"const"})
+
+
+def _is_trivially_true(expr: Any) -> bool:
+    """Whether a condition is true no matter what happens in the world.
+
+    A gate that names an action-written field is supposed to mean "this fires because of
+    what the actors did". ``or(field("deal_signed"), const(true))`` names one and is
+    identically true, which is a one-line way to walk past the check while looking like
+    it satisfies it.
     """
 
-    action_writes, _ = _action_writes(spec)
-    preset: set[str] = set()
+    from .worldspec import Expr
 
-    def literal_targets(effects: Any) -> set[str]:
-        out: set[str] = set()
-        for eff in effects:
-            # Only `set_field` counts. `adjust_field` accumulates, and accumulation with
-            # a fixed step is exactly how an honest operational process models
-            # throughput — a line that builds so many units per shift is production, not
-            # an announcement. Declaring the term to *be* a value is the defect.
-            if eff.op != "set_field":
-                continue
-            params = eff.params_dict
-            name = params.get("field")
-            value = params.get("value")
-            # A value that references a parameter or another field is computed from the
-            # world; only a bare literal is the environment asserting an outcome.
-            if isinstance(name, str) and not (isinstance(value, str) and value.startswith("$")):
-                out.add(name)
-        return out
+    if not isinstance(expr, Expr):
+        return False
+    if expr.op in _ALWAYS_TRUE_OPS:
+        return bool(expr.args and expr.args[0])
+    if expr.op in ("or", "any"):
+        return any(_is_trivially_true(a) for a in expr.args)
+    if expr.op == "and":
+        return bool(expr.args) and all(_is_trivially_true(a) for a in expr.args)
+    return False
+
+
+def _threshold_for(expr: Any, term: str) -> float | None:
+    """The constant a terminal comparison holds ``term`` against, if there is one."""
+
+    from .worldspec import Expr
+
+    if not isinstance(expr, Expr):
+        return None
+    if expr.op in ("greater_than", "greater_or_equal", "less_than", "less_or_equal", "equals"):
+        args = list(expr.args)
+        if len(args) == 2:
+            left, right = args
+            names = _expr_fields(left) if isinstance(left, Expr) else set()
+            if term in names and isinstance(right, (int, float)) and not isinstance(right, bool):
+                return float(right)
+    for arg in getattr(expr, "args", ()):
+        found = _threshold_for(arg, term)
+        if found is not None:
+            return found
+    return None
+
+
+def _actions_gate_a_producer(spec: WorldSpec, terminal_terms: set[str]) -> bool:
+    """Whether what the actors do decides *whether* a producer of the outcome fires.
+
+    Indirect causation is still causation, and it is the normal shape for a decision
+    body: nobody writes "the motion carried", they cast votes, and the session that
+    counts them records the result.
+    """
+
+    action_fields, action_collections = _action_writes(spec)
+    actionable = action_fields | action_collections
+    if not actionable:
+        return False
+
+    def gate_reads(condition: Any) -> set[str]:
+        return _expr_fields(condition) | _expr_collections(condition)
 
     for node in spec.process.nodes:
-        if _expr_fields(node.entry_condition) & action_writes:
-            continue  # gated on something actors do
-        preset |= literal_targets(node.effects) & terminal_fields
+        written, coll = _effect_writes(node.effects)
+        if (written | coll) & terminal_terms and gate_reads(node.entry_condition) & actionable:
+            return True
     for proc in spec.external_processes:
         for occ in proc.occurrences:
-            if _expr_fields(occ.condition) & action_writes:
+            written, coll = _effect_writes(occ.effects)
+            if (written | coll) & terminal_terms and gate_reads(occ.condition) & actionable:
+                return True
+    return False
+
+
+def _environment_preset_terminal_terms(spec: WorldSpec, terminal_terms: set[str]) -> set[str]:
+    """Terminal terms a scheduled non-agent effect decides on its own.
+
+    "On its own" is the load-bearing part, and it has two halves.
+
+    A node is *gated* when its entry condition reads something the actors can change —
+    a field an action writes, or a record collection an action appends to. A session
+    that fires once enough votes have been cast into it is exactly right, and it must
+    pass: that is the canonical committee world. Reading only ``field`` ops missed it
+    entirely, because votes are a collection, and the gate refused the very world its
+    own docstring endorses.
+
+    A condition also has to be able to be false. ``or(field("x"), const(true))`` names an
+    action-written field and is identically true; a check that accepts it is a check with
+    a one-line bypass.
+
+    Then, for an ungated node: setting a terminal term to a literal is the environment
+    announcing the answer. Adding to one is usually production — a line that builds so
+    many units per shift — but not when a single step is enough to cross the terminal's
+    own threshold by itself. ``adjust_field(votes_for, +99)`` against ``votes_for >= 3``
+    is an announcement wearing an increment's clothes.
+    """
+
+    action_fields, action_collections = _action_writes(spec)
+    actionable = action_fields | action_collections
+    preset: set[str] = set()
+
+    def decided_here(effects: Any) -> set[str]:
+        out: set[str] = set()
+        for eff in effects:
+            params = eff.params_dict
+            name = params.get("field")
+            if not isinstance(name, str) or name not in terminal_terms:
                 continue
-            preset |= literal_targets(occ.effects) & terminal_fields
+            if eff.op == "set_field":
+                value = params.get("value")
+                computed = isinstance(value, str) and value.startswith(_BINDINGS)
+                if not computed:
+                    out.add(name)
+            elif eff.op == "adjust_field":
+                amount = params.get("amount", params.get("value"))
+                threshold = _threshold_for(spec.terminal.yes_when, name)
+                if (
+                    isinstance(amount, (int, float))
+                    and not isinstance(amount, bool)
+                    and threshold is not None
+                    and abs(float(amount)) >= abs(threshold)
+                ):
+                    out.add(name)
+        return out
+
+    def ungated(condition: Any) -> bool:
+        gate = _expr_fields(condition) | _expr_collections(condition)
+        return not (gate & actionable) or _is_trivially_true(condition)
+
+    for node in spec.process.nodes:
+        if ungated(node.entry_condition):
+            preset |= decided_here(node.effects)
+    for proc in spec.external_processes:
+        for occ in proc.occurrences:
+            if ungated(occ.condition):
+                preset |= decided_here(occ.effects)
     return preset
 
 
@@ -710,7 +813,7 @@ def enforce_outcome_is_produced(
         # this gate passed it because *some* action could in principle have written the
         # term. In a world with actors, a term the terminal reads may not be set to a
         # constant by the scenery.
-        preset = _environment_preset_terminal_terms(spec, terminal_fields)
+        preset = _environment_preset_terminal_terms(spec, terminal_fields | terminal_colls)
         if spec.actors and preset:
             raise WorldIntegrityError(
                 f"the environment writes the answer: {sorted(preset)} is set to a fixed "
@@ -731,9 +834,18 @@ def enforce_outcome_is_produced(
         # terminal term is written only by processes while people deliberate over
         # fields the terminal never reads, the deliberation is decoration — the same
         # defect as an uncertainty writing the answer, one layer further out.
-        if spec.actors and not (
-            (terminal_fields & written_fields) or (terminal_colls & written_colls)
-        ):
+        #
+        # Reaching the outcome need not be direct. In the canonical committee world the
+        # members do not write the result at all: they record positions, and a session
+        # node fires when enough have been recorded and writes the outcome. Their
+        # influence runs through that node's gate, and demanding a direct write refused
+        # exactly the world this gate's own docstring calls right.
+        reaches = (
+            (terminal_fields & written_fields)
+            or (terminal_colls & written_colls)
+            or _actions_gate_a_producer(spec, terminal_fields | terminal_colls)
+        )
+        if spec.actors and not reaches:
             raise WorldIntegrityError(
                 "this world compiled actors who cannot affect the outcome: every "
                 "terminal term is written by a process, and no action any actor can "

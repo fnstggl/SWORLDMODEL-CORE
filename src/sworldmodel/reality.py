@@ -20,6 +20,8 @@ than reporting a check that did not happen.
 
 from __future__ import annotations
 
+import re
+
 from .actors import ActorState
 from .coverage import evidence_named_participants, participants_absent_from
 from .errors import EvidenceError, WorldIntegrityError
@@ -104,7 +106,7 @@ def verify_reality(
         # for at all, so the association has to come from the evidence: some claim that
         # names the person must also name a compiled entity.
         if absent:
-            covered, absent = _covered_by_an_organization(absent, evidence, entity_names)
+            covered, absent = _covered_by_an_organization(absent, evidence, entity_names, spec)
             if covered:
                 notes.append(
                     "represented through their institution: "
@@ -217,7 +219,10 @@ def verify_reality(
 
 
 def _covered_by_an_organization(
-    absent: tuple[str, ...], evidence: EvidenceView, entity_names: tuple[str, ...]
+    absent: tuple[str, ...],
+    evidence: EvidenceView,
+    entity_names: tuple[str, ...],
+    spec: WorldSpec,
 ) -> tuple[list[tuple[str, str]], tuple[str, ...]]:
     """Split the absent people into those an included body speaks for, and the rest.
 
@@ -231,16 +236,26 @@ def _covered_by_an_organization(
     claims = list(evidence.available())
     covered: list[tuple[str, str]] = []
     still_absent: list[str] = []
+    bodies = {
+        e.name.strip().lower()
+        for e in spec.entities
+        # Only a *body* can speak for a person. A document, an object or a channel that
+        # happens to be mentioned in the same sentence cannot, and unanchored substring
+        # matching let one do exactly that.
+        if e.kind in ("organization", "person") or e.representation_scale in _BODY_SCALES
+    }
     for person in absent:
         key = person.strip().lower()
         org = next(
             (
                 name
                 for claim in claims
-                if key in claim.proposition.lower()
+                if _mentions(claim.proposition, key)
                 or any(key == e.strip().lower() for e in claim.entities)
                 for name in entity_names
-                if name.strip().lower() != key and name.strip().lower() in claim.proposition.lower()
+                if name.strip().lower() != key
+                and name.strip().lower() in bodies
+                and _mentions(claim.proposition, name.strip().lower())
             ),
             None,
         )
@@ -249,6 +264,17 @@ def _covered_by_an_organization(
         else:
             still_absent.append(person)
     return covered, tuple(still_absent)
+
+
+# Representation scales that can act on a person's behalf.
+_BODY_SCALES = frozenset({"organization", "subunit", "network", "population_stratum"})
+
+
+def _mentions(text: str, name: str) -> bool:
+    """Whole-name occurrence, so "Ada" does not match inside "Adams" and a two-word
+    entity name is not found by half of it."""
+
+    return re.search(rf"(?<![a-z0-9]){re.escape(name)}(?![a-z0-9])", text.lower()) is not None
 
 
 def _coverage(contract: ResolutionContract, available_ids: set[str]) -> tuple[float, str]:

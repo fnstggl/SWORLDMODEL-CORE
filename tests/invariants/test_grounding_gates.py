@@ -196,22 +196,59 @@ def test_a_cited_record_that_is_not_the_actors_own_does_not_ground_it_as_its_own
     removed from the world, which is how live runs ended up with nobody in them.
     """
 
-    ambient = profile_from_member(
-        actor_id="ada",
-        name="Ada North",
-        role="member",
-        authority=("decide",),
-        previous_action=None,
-        memory_seeds=((f"{BOARD} met on Tuesday.", ("k_ada",)),),
+    from dataclasses import replace as _replace
+
+    ambient = _replace(
+        profile_from_member(
+            actor_id="ada",
+            name="Ada North",
+            role="member",
+            authority=("decide",),
+            previous_action=None,
+            memory_seeds=((f"{BOARD} met on Tuesday.", ("k_ada",)),),
+        ),
+        # What the compiler attaches to a real entity: the claims that establish it.
+        claim_ids=("k_ada",),
     )
     assert not ambient.has_own_cited_record
     assessment = ambient.grounding_assessment()
-    assert assessment.level is GroundingLevel.ROLE_LEVEL_BEHAVIOR
-    assert assessment.disposition_class is EpistemicClass.HYPOTHETICAL
+    # A cited office with cited authority is level 2, and that is the right answer: what
+    # is *not* established is the actor's own position, which becomes an inference.
+    assert assessment.level is GroundingLevel.OFFICIAL_ROLE
+    assert assessment.disposition_class is EpistemicClass.INFERRED
     assert assessment.admissible
     assert assess_actor_grounding((ambient,)).is_complete
-    # And the actor is told, in its own prompt, that its position is not established.
-    assert "role-level or institution-level" in ambient.render_grounding()
+    assert "verified office" in ambient.render_grounding()
+
+    # The same person with no authority recorded falls to role level, and their position
+    # becomes an open alternative rather than an inference.
+    role_only = _replace(ambient, authority=())
+    weaker = role_only.grounding_assessment()
+    assert weaker.level is GroundingLevel.ROLE_LEVEL_BEHAVIOR
+    assert weaker.disposition_class is EpistemicClass.HYPOTHETICAL
+    assert weaker.admissible
+    assert "role-level or institution-level" in role_only.render_grounding()
+
+
+def test_role_level_grounding_still_needs_the_entity_itself_to_be_cited() -> None:
+    """The floor under the weakest admissible level.
+
+    Without this, one irrelevant claim id hung on an invented person's memory seed —
+    plus any non-empty role string — was enough to admit an actor that nothing in the
+    evidence refers to. The entity must carry a surviving citation of its own.
+    """
+
+    uncited_entity = profile_from_member(
+        actor_id="ghost",
+        name="A. Person",
+        role="member",  # a role string proves nothing on its own
+        authority=(),
+        previous_action=None,
+        memory_seeds=(("The meeting took place.", ("k_ada",)),),  # cited, but not about them
+    )
+    assessment = uncited_entity.grounding_assessment()
+    assert assessment.level is GroundingLevel.NONE
+    assert not assessment.admissible
 
 
 def test_a_verified_office_is_enough_to_model_a_real_decision_maker() -> None:

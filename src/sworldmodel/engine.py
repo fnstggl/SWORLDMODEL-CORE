@@ -431,7 +431,8 @@ def _event_loop(
 ) -> WorldState:
     horizon = world.contract.horizon
     stale_batches = 0
-    last_digest = (world.state_digest(), world.time)
+    last_digest = (world.state_digest(), world.time, world.information_digest())
+    last_queued_here = world.schedule.pending_at(world.time)
 
     while True:
         if diag.batches >= budget.max_batches:
@@ -482,13 +483,27 @@ def _event_loop(
         # than the event count: honest runs do reach streaks of nine or ten batches that
         # emit nothing while time advances, and they are distinguished by the state
         # having changed, not by their silence.
-        # The clock is the other half. An actor that legitimately waits changes nothing
-        # for several batches while time moves between real events, and that is progress
-        # — the world is advancing through its calendar. What is not progress is an
-        # unchanged state at an unmoving instant, which is precisely the cascade: 798
-        # batches, one digest, one timestamp.
-        digest = (world.state_digest(), world.time)
-        if digest == last_digest:
+        # Progress has three faces, and a run is stale only when none of them moves:
+        # the world state changed, the clock advanced, or somebody learned something
+        # they had not already been told. The third was missing, and without it a world
+        # whose actors correspond without writing world state looks frozen — three
+        # rounds of ordinary pre-meeting correspondence were enough to kill a branch
+        # before it reached its own scheduled session. Counting deliveries would undo
+        # the cascade fix; keying on their *content* does not, because the cascade's
+        # defining property is that it delivers the same thing four hundred times.
+        # A finite burst of simultaneous work is not a stall. Everyone reading the
+        # notes that were just circulated produces batch after batch that changes no
+        # world state and teaches nobody anything new — and it *drains*, strictly, until
+        # the clock moves on to the next real event. A cascade does the opposite: every
+        # item it handles schedules another at the same instant, so the queue at that
+        # instant holds or grows. Requiring the queue to have stopped draining is what
+        # separates them, and without it the guard killed branches four rounds of
+        # ordinary correspondence before their own scheduled session.
+        queued_here = world.schedule.pending_at(world.time)
+        digest = (world.state_digest(), world.time, world.information_digest())
+        draining = queued_here < last_queued_here
+        last_queued_here = queued_here
+        if digest == last_digest and not draining:
             stale_batches += 1
             if stale_batches >= budget.no_progress_batches:
                 diag.stop_reason = (

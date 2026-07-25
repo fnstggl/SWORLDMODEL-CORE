@@ -329,8 +329,12 @@ class ActorGroundingProfile:
                 named,
             )
 
+        # Role level still requires the *entity* to be cited. Without that, one
+        # irrelevant claim id attached to an invented person's memory seed, plus any
+        # non-empty role string, was enough to admit an actor nothing in the evidence
+        # refers to.
         role_level = tuple(i for i in self.all_items() if i.is_supported)
-        if role_level and self.role.strip():
+        if role_level and self.role.strip() and self.claim_ids:
             return self._assess(
                 GroundingLevel.ROLE_LEVEL_BEHAVIOR,
                 f"grounded only at the level of the role {self.role!r}, not the individual",

@@ -811,3 +811,50 @@ def test_no_progress_is_reachable_when_events_fire_but_nothing_changes() -> None
     # advances is. Neither may run to the batch ceiling.
     for diag in result.diagnostics.values():
         assert diag.batches < 200, diag.stop_reason
+
+
+def test_correspondence_that_drains_is_progress_and_a_refilling_cascade_is_not() -> None:
+    """The watchdog must not decide the forecast.
+
+    `state_digest` covers fields, records and documents — not knowledge — so a world
+    whose actors correspond without writing world state looked frozen, and three rounds
+    of ordinary pre-meeting correspondence were enough to kill a branch before it
+    reached its own scheduled session. That is a forecast changed by a watchdog.
+
+    Two things distinguish that from the runaway cascade this guard exists for. Novel
+    information is progress, keyed on *content* — the cascade's defining property is
+    that it delivers the same thing hundreds of times. And a finite burst of
+    simultaneous work drains: everyone reading the notes just circulated empties the
+    queue at that instant, while a cascade refills it, because each item it handles
+    schedules another at the same moment.
+    """
+
+    from _worlds import scheduled_multiparty_world
+
+    def correspond(rounds: int):
+        sent: dict[str, int] = {}
+
+        def decide(ctx: dict) -> dict:
+            who = ctx["actor_id"]
+            n = sent.get(who, 0)
+            if ctx["stage"] != "session" and n < rounds:
+                sent[who] = n + 1
+                return act("circulate_note", {"note": f"note {n} from {who} on the outlook"})
+            if ctx["stage"] == "session":
+                return act("record_position", {"position": "hold"})
+            return wait_decision("waiting for the session")
+
+        gw = _gateway(decide)
+        result = run(
+            _compile(scheduled_multiparty_world(members=3, threshold=3), gw),
+            gw,
+            seed=0,
+            budget=RunBudget(max_batches=300),
+        )
+        reached = any(d.stage == "session" for d in result.actor_decisions)
+        return reached, next(iter(result.diagnostics.values()))
+
+    for rounds in (1, 2, 3, 4):
+        reached, diag = correspond(rounds)
+        assert reached, f"{rounds} rounds of correspondence never reached the session: {diag.stop_reason}"
+        assert "no progress" not in diag.stop_reason, (rounds, diag.stop_reason)

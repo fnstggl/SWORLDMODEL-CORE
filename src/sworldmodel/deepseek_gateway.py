@@ -162,15 +162,26 @@ class DeepSeekGateway(ModelGateway):
             if data is None or not self._schema_ok(data, request.expected_keys):
                 truncated = self._looks_truncated(resp.text, content)
                 if truncated:
-                    # Salvage before retrying. A world compilation is the largest object
-                    # this system asks for, and a reply cut off in its final field still
-                    # contains the entities, actors and actions the run needs. Discarding
-                    # it and rerolling was how a truncated compile became "no actors were
-                    # compiled" — a provider limit reported as a fact about the world.
+                    # Salvage is the LAST resort, not the first.
+                    #
+                    # A recovered prefix is a real world with pieces missing — nine
+                    # entities become five, the `actors` key disappears entirely — and it
+                    # satisfies the schema check just as well as a complete one. Using it
+                    # while a larger budget is still available would silently simulate a
+                    # truncated roster. So retry with more room first, and fall back to
+                    # the prefix only when there is no room left; that still beats
+                    # discarding everything, which is how a provider limit came to be
+                    # reported as "no actors were compiled".
+                    room_left = body["max_tokens"] < self.max_output_tokens
                     salvaged = salvage_json(content)
-                    if salvaged is not None and self._schema_ok(salvaged, request.expected_keys):
+                    if (
+                        not room_left
+                        and salvaged is not None
+                        and self._schema_ok(salvaged, request.expected_keys)
+                    ):
                         validation_failures.append(
-                            f"truncated on attempt {attempt}; recovered the parsable prefix"
+                            f"truncated on attempt {attempt} with no output budget "
+                            "left; recovered the parsable prefix, which may be incomplete"
                         )
                         return GatewayResponse(
                             task_kind=request.task_kind,

@@ -432,6 +432,32 @@ class WorldState:
             actors=new_actors,
         )
 
+    def information_digest(self) -> str:
+        """A content hash of *what the actors have been told*, keyed on content.
+
+        The other half of progress. ``state_digest`` covers fields, records, documents,
+        resources, commitments and stage — not knowledge — so a world in which people
+        correspond without writing world state looks frozen. Three rounds of ordinary
+        pre-meeting correspondence were enough to have a branch killed by the watchdog
+        before it reached its own scheduled session.
+
+        Counting deliveries instead would undo the fix it exists beside: a runaway
+        cascade delivers constantly, and its whole problem is that it delivers *the same
+        thing* — four hundred notices reading "action_rejected", one hundred and
+        ninety-nine reading the same sentence. Keying on content rather than on event
+        ids separates them exactly: novel information grows this set, repetition does
+        not.
+        """
+
+        by_event = {e.event_id: e for e in self.event_history}
+        signatures = set()
+        for d in self.deliveries:
+            ev = by_event.get(d.event_id)
+            if ev is None:
+                continue
+            signatures.add(f"{d.actor_id}|{ev.kind}|{ev.payload!r}")
+        return content_id("winfo", *sorted(signatures))
+
     def state_digest(self) -> str:
         """A content hash of the decision-relevant world state, used to detect that a
         trajectory has stopped making progress. Time is excluded on purpose: a world

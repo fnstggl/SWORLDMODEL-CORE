@@ -164,7 +164,21 @@ def _compile_with_repair(
             if not (new_evidence or new_diagnosis):
                 raise
             bundle = repaired
-    raise AssertionError("unreachable")  # pragma: no cover
+    # Reachable: twelve alternating diagnoses, each new the first time it appears. It
+    # must arrive as a refusal like any other — an AssertionError is not a
+    # SWorldModelError, so it would escape the ForecastRefused wrapper and leave the run
+    # with a traceback and no diagnosis, which is the failure mode this whole run exists
+    # to remove.
+    raise WorldIntegrityError(
+        f"repair did not converge after {_REPAIR_CEILING} attempts — each attempt "
+        "changed the diagnosis without ever producing a compilable world",
+        details={
+            "failure": "repair_did_not_converge",
+            "recompilable": False,
+            "diagnoses seen": sorted(seen_failures),
+            "attempts": _REPAIR_CEILING,
+        },
+    )
 
 
 def _repair_once(

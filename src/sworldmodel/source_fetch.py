@@ -36,17 +36,30 @@ _WS = re.compile(r"[ \t\r\f\v]+")
 _MULTINL = re.compile(r"\n{3,}")
 _TITLE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
 
-# Page furniture. These elements exist on every site and carry no claim about anything:
-# site navigation, headers and footers, sidebars, search forms, and the cookie and
-# consent dialogs that now open most institutional pages.
+# Page furniture: elements that exist on every site and carry no claim about anything.
+#
+# Deliberately a short list of well-formed tag pairs. Three things are *not* here, each
+# because it destroyed real pages:
+#
+#   `form`   — an ASP.NET WebForms page puts the entire <body> inside one <form>, which
+#              is the shape many government and central-bank sites still use. Stripping
+#              it under DOTALL extracted those pages to the empty string.
+#   `header` — a <header> inside an <article> is the headline and the dateline, and the
+#              dateline is exactly what the claim verifier looks for near a quote.
+#   role/class matching — those patterns closed on `</[a-z]+>`, which matches whatever
+#              closing tag comes first rather than the element's own. A cookie-policy
+#              wrapper therefore ran past its own heading and swallowed the document.
+#
+# What remains cannot span the body of a page, and :func:`extract_text` falls back to
+# the unfiltered text if this ever removes too much anyway.
 _CHROME = re.compile(
-    r"<(nav|header|footer|aside|form|noscript|svg|select|button)\b[^>]*>.*?</\1>"
-    r"|<[a-z]+\b[^>]*\brole=[\"'](?:navigation|banner|contentinfo|search|dialog|menu"
-    r"|menubar|complementary)[\"'][^>]*>.*?</[a-z]+>"
-    r"|<[a-z]+\b[^>]*\b(?:id|class)=[\"'][^\"']*(?:cookie|consent|gdpr|onetrust|skip-link"
-    r"|breadcrumb|site-nav|mega-menu|social-share)[^\"']*[\"'][^>]*>.*?</[a-z]+>",
+    r"<(nav|footer|aside|noscript|svg|select|button)\b[^>]*>.*?</\1>",
     re.IGNORECASE | re.DOTALL,
 )
+
+# If filtering leaves less than this share of the readable text, it removed the document
+# rather than its furniture, and the unfiltered text is used instead.
+_MIN_KEPT_SHARE = 0.35
 
 # Where a document's own content lives, most specific first. Non-greedy so a wrapper
 # does not swallow the footer, and checked for plausibility by the caller.
@@ -417,14 +430,27 @@ def extract_text(html: str) -> str:
     document rather than on the site around it.
     """
 
-    body = _SCRIPT_STYLE.sub(" ", html)
-    body = _CHROME.sub(" ", body)
+    stripped = _SCRIPT_STYLE.sub(" ", html)
+    unfiltered = _to_text(stripped)
+
+    body = _CHROME.sub(" ", stripped)
     main = _main_region(body)
     if main:
-        # Keep the rest: a date, a byline or a breadcrumb can sit outside the main
-        # region, and this text is also what the verifier checks excerpts against.
+        # Keep the rest as well: a date, a byline or a breadcrumb can sit outside the
+        # main region, and this text is also what the verifier checks excerpts against.
         body = main + "\n\n" + body
-    without_tags = _TAG.sub("\n", body)
+    text = _to_text(body)
+
+    # Filtering that removes most of the document removed the document. Falling back is
+    # not a heuristic about content — it is the difference between reading a page badly
+    # and reading nothing at all, and reading nothing is what produced zero claims.
+    if len(text) < len(unfiltered) * _MIN_KEPT_SHARE:
+        return unfiltered
+    return text
+
+
+def _to_text(html: str) -> str:
+    without_tags = _TAG.sub("\n", html)
     unescaped = _unescape(without_tags)
     lines = [_WS.sub(" ", line).strip() for line in unescaped.splitlines()]
     joined = "\n".join(line for line in lines if line)
