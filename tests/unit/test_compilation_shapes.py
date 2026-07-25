@@ -87,19 +87,43 @@ WS = ["world_spec"]
 
 # (name, path into the compilation, the drifted value a model actually writes)
 DRIFT: list[tuple[str, list[str], Any]] = [
-    ("terminal args written bare", [*WS, "terminal", "unresolved_when"], {"op": "const", "args": False}),
+    (
+        "terminal args written bare",
+        [*WS, "terminal", "unresolved_when"],
+        {"op": "const", "args": False},
+    ),
     ("terminal as a bare string", [*WS, "terminal", "yes_when"], "f == 1"),
     ("entities as one bare object", [*WS, "entities"], {"entity_id": "a", "name": "A"}),
     ("actors null", [*WS, "actors"], None),
-    ("authority as a string", [*WS, "entities"], [{"entity_id": "a", "name": "A", "authority": "decide"}]),
-    ("claim ids as a string", [*WS, "entities"], [{"entity_id": "a", "name": "A", "evidence_claim_ids": "c1"}]),
-    ("action effects null", [*WS, "actions"], [{"action_id": "act", "meaning": "m", "effects": None}]),
-    ("effect with no op", [*WS, "actions"], [{"action_id": "act", "meaning": "m", "effects": [{"field": "f", "value": 1}]}]),
+    (
+        "authority as a string",
+        [*WS, "entities"],
+        [{"entity_id": "a", "name": "A", "authority": "decide"}],
+    ),
+    (
+        "claim ids as a string",
+        [*WS, "entities"],
+        [{"entity_id": "a", "name": "A", "evidence_claim_ids": "c1"}],
+    ),
+    (
+        "action effects null",
+        [*WS, "actions"],
+        [{"action_id": "act", "meaning": "m", "effects": None}],
+    ),
+    (
+        "effect with no op",
+        [*WS, "actions"],
+        [{"action_id": "act", "meaning": "m", "effects": [{"field": "f", "value": 1}]}],
+    ),
     ("process as a bare node list", [*WS, "process"], [{"node_id": "n", "participants": ["*"]}]),
     ("process nodes null", [*WS, "process"], {"nodes": None}),
     ("uncertainties as one object", ["uncertainties"], {"variable": "f", "outcomes": []}),
     ("uncertainty outcomes null", ["uncertainties"], [{"variable": "f", "outcomes": None}]),
-    ("field_effects written flat", ["uncertainties"], [{"variable": "f", "outcomes": [{"value": "v", "weight": 1, "field_effects": ["f", 1]}]}]),
+    (
+        "field_effects written flat",
+        ["uncertainties"],
+        [{"variable": "f", "outcomes": [{"value": "v", "weight": 1, "field_effects": ["f", 1]}]}],
+    ),
     ("world_facts as a string", ["world_facts"], "nothing known"),
     ("required facts as one object", ["required_reality_facts"], {"key": "k"}),
     ("wake_rules as a string", [*WS], dict(BASE["world_spec"], wake_rules="none")),
