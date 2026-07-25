@@ -746,6 +746,49 @@ def test_a_question_the_record_has_already_answered_compiles_from_its_citations(
     assert exc.value.details["failure"] == "terminal_has_no_producer"
 
 
+def test_a_world_whose_initial_values_already_answer_yes_uncited_is_refused() -> None:
+    """The OPEC+ shape: the answer baked into an uncited initial value.
+
+    A live run compiled `quota_increase_announced` with initial True and no citation,
+    plus an action that could also write it. The per-term gate passed — the action is a
+    producer — and the branch resolved YES without one event firing: the runtime lineage
+    showed the term was never written. YES at t0 is legitimate only as a factual
+    resolution the cited record establishes; uncited, it is the compiler asserting the
+    outcome and letting the simulation take credit.
+    """
+
+    from sworldmodel.errors import WorldIntegrityError
+
+    data = _split_world()
+    data["world_spec"]["fields"].append(
+        {"field_id": "quota_increase_announced", "value_type": "bool", "initial": True}
+    )
+    data["world_spec"]["terminal"]["yes_when"] = {
+        "op": "equals",
+        "args": [{"op": "field", "args": ["quota_increase_announced"]}, True],
+    }
+    data["world_spec"]["terminal"]["unresolved_when"] = {"op": "const", "args": [False]}
+    data["world_spec"]["actions"].append(
+        {
+            "action_id": "announce_quota_increase",
+            "meaning": "announce it",
+            "eligible_actors": ["*"],
+            "effects": [{"op": "set_field", "field": "quota_increase_announced", "value": True}],
+            "evidence_claim_ids": [],
+        }
+    )
+    data["uncertainties"] = []
+
+    with pytest.raises(WorldIntegrityError) as exc:
+        _compile(data, _gateway(_signal_sensitive))
+    assert exc.value.details["failure"] == "terminal_preresolved_without_evidence"
+    assert exc.value.details["uncited terminal terms"] == ["quota_increase_announced"]
+
+    # The same world starting neutral is the normal open state and compiles.
+    data["world_spec"]["fields"][-1]["initial"] = False
+    _compile(data, _gateway(_signal_sensitive))  # must not raise
+
+
 def test_a_terminal_copied_from_an_ungrounded_uncertainty_is_refused() -> None:
     """The Tesla launder: an uncertainty draw copied one hop into the terminal term.
 

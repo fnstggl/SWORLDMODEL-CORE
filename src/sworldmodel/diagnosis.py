@@ -435,6 +435,7 @@ class RunDiagnosis:
             "environment_presets_terminal",
             "uncertainty_writes_terminal",
             "terminal_laundered_from_uncertainty",
+            "terminal_preresolved_without_evidence",
             "terminal_reads_no_world_state",
         ):
             out.append(

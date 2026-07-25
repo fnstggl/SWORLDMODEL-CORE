@@ -158,6 +158,11 @@ def compile_world(
     # Gate 4 — the outcome must be produced by what actors do, not supplied to them.
     enforce_outcome_is_produced(spec, uncertainties)
 
+    # Gate 4b — a world whose initial values already answer YES has decided the question
+    # before anything runs. That is legitimate exactly once: as a factual resolution the
+    # cited record establishes. Uncited, it is the compiler asserting the outcome.
+    enforce_terminal_not_preresolved(spec, base_world)
+
     # Gate 5 — evidence-to-world coverage against the exact compiled WorldSpec.
     view, signal_claim_ids = world_spec_view(spec, base_world, uncertainties, world_facts)
     inventory = build_candidate_inventory(
@@ -1445,6 +1450,51 @@ def enforce_outcome_is_produced(
             "terminal terms supplied by uncertainty instead": sorted(
                 {_display(t) for t in orphans} & uncertain
             ),
+            "producers by terminal term": {
+                _display(k): list(v) for k, v in sorted(producers.items())
+            },
+        },
+    )
+
+
+def enforce_terminal_not_preresolved(spec: WorldSpec, base_world: Any) -> None:
+    """Refuse a world whose initial values already answer YES on nobody's authority.
+
+    A live OPEC+ run compiled ``quota_increase_announced`` with an uncited initial value
+    of True and an action that could also write it. Every per-term gate passed — the
+    action was a producer — and the branch then resolved YES without a single event
+    firing: the answer was in the world before anything ran. The runtime's own evaluator
+    is the authority here: build the world exactly as the engine would seed it and ask it
+    the terminal. YES at t0 is legitimate only as a factual resolution, and what makes a
+    factual resolution honest is the citation — every term the terminal reads must be
+    established by an ``evidence:`` producer. Anything else is the compiler asserting the
+    outcome and letting the simulation take credit.
+
+    A world that starts NO or unresolved is the normal open state and passes untouched.
+    """
+
+    from .engine import evaluate_terminal
+
+    ev = evaluate_terminal(base_world, spec.terminal)
+    if not (ev.resolved and ev.outcome == "YES"):
+        return
+    producers = terminal_producers(spec)
+    uncited = sorted(
+        term
+        for term, who in producers.items()
+        if not any(str(w).startswith("evidence:") for w in who)
+    )
+    if not uncited:
+        return
+    raise WorldIntegrityError(
+        "the initial world already answers YES: the terminal is satisfied before "
+        f"anything runs, and {[_display(t) for t in uncited]} carries no evidence "
+        "citation, so the compiled world asserts the outcome instead of establishing "
+        "or producing it",
+        details={
+            "failure": "terminal_preresolved_without_evidence",
+            "recompilable": True,
+            "uncited terminal terms": [_display(t) for t in uncited],
             "producers by terminal term": {
                 _display(k): list(v) for k, v in sorted(producers.items())
             },

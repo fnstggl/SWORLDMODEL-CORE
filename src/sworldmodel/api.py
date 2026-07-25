@@ -24,6 +24,7 @@ not branch on the kind of question.
 
 from __future__ import annotations
 
+import hashlib
 import time
 from dataclasses import replace
 from datetime import datetime
@@ -166,7 +167,15 @@ def _compile_with_repair(
             # bailey_public_stance to bailey_vote. Same code, different world, and the
             # second attempt was never made. The ceiling above is what bounds a compiler
             # that cycles forever.
-            signature = f"{failure}|{_failure_signature(exc)}"
+            #
+            # The world that failed is part of the signature for the same reason. A live
+            # Tesla run was exhausted after two no_causal_producer refusals whose detail
+            # strings matched — but the compiler had emptied a different world each time,
+            # and the exception details cannot see that. Same code, same details, same
+            # WORLD is a reroll; the same refusal of a genuinely different world is the
+            # compiler exploring, and the ceiling and compile deadline bound it.
+            spec_hash = hashlib.sha256(repr(bundle.spec).encode()).hexdigest()[:16]
+            signature = f"{failure}|{_failure_signature(exc)}|world:{spec_hash}"
             new_evidence = after > before
             new_diagnosis = failure not in seen_failures or signature not in seen_signatures
             seen_failures.add(failure)
