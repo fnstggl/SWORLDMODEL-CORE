@@ -628,11 +628,15 @@ def _environment_preset_terminal_terms(spec: WorldSpec, terminal_fields: set[str
     def literal_targets(effects: Any) -> set[str]:
         out: set[str] = set()
         for eff in effects:
-            if eff.op not in ("set_field", "adjust_field"):
+            # Only `set_field` counts. `adjust_field` accumulates, and accumulation with
+            # a fixed step is exactly how an honest operational process models
+            # throughput — a line that builds so many units per shift is production, not
+            # an announcement. Declaring the term to *be* a value is the defect.
+            if eff.op != "set_field":
                 continue
             params = eff.params_dict
             name = params.get("field")
-            value = params.get("value", params.get("amount"))
+            value = params.get("value")
             # A value that references a parameter or another field is computed from the
             # world; only a bare literal is the environment asserting an outcome.
             if isinstance(name, str) and not (isinstance(value, str) and value.startswith("$")):

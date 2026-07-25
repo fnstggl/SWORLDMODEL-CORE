@@ -415,3 +415,52 @@ def test_every_terminal_term_names_what_actually_wrote_it() -> None:
             assert term["produced_by_an_actor"], (branch_id, term["terminal_term"])
             for writer in term["written_by"]:
                 assert writer["event_id"] and writer["kind"]
+
+
+def test_an_operational_process_that_accumulates_output_is_not_an_announcement() -> None:
+    """The gate above must not refuse the world it exists to permit.
+
+    A production line that adds units per shift writes the same terminal term as a
+    process node that declares the answer — but accumulating toward a threshold is how
+    throughput is honestly modelled, and the question is whether the quantity is
+    *reached* or *asserted*. Only `set_field` to a literal is an announcement.
+    """
+
+    data = _split_world()
+    data["world_spec"]["fields"].append(
+        {"field_id": "units_built", "value_type": "number", "initial": 0}
+    )
+    data["world_spec"]["terminal"]["yes_when"] = {
+        "op": "greater_than",
+        "args": [{"op": "field", "args": ["units_built"]}, 100],
+    }
+    data["world_spec"]["actions"].append(
+        {
+            "action_id": "authorize_overtime",
+            "meaning": "add a shift",
+            "eligible_actors": ["*"],
+            "required_authority": [],
+            "parameters": [],
+            "effects": [{"op": "adjust_field", "field": "units_built", "amount": 10}],
+            "evidence_claim_ids": [],
+        }
+    )
+    data["world_spec"]["external_processes"] = [
+        {
+            "process_id": "assembly_line",
+            "description": "the line builds a fixed number of units per shift",
+            "occurrences": [
+                {
+                    "at": "2026-06-01T00:00:00+00:00",
+                    "description": "a shift",
+                    "effects": [{"op": "adjust_field", "field": "units_built", "amount": 40}],
+                }
+            ],
+            "evidence_claim_ids": [],
+        }
+    ]
+
+    gw = _gateway(_signal_sensitive)
+    _, compiled = _compile(data, gw)  # must not raise
+    producers = compiled.spec.external_processes
+    assert producers and producers[0].process_id == "assembly_line"
