@@ -442,6 +442,49 @@ def test_roster_is_checked_against_the_participants_the_evidence_names() -> None
     assert manifest.represented_participants == 3
 
 
+def test_only_a_name_written_as_a_persons_name_can_be_owed_a_seat() -> None:
+    """A live EU-Mercosur run was refused for omitting "EU member states" — beside the
+    European Union and the European Council it had already compiled, which is where its
+    member states are. The same inventory called the "Mercosur Agreement" and the
+    "Signed Trade Agreement" people, and the world had compiled the second as a
+    document. A seat can only be owed to something written the way a person is written,
+    and nothing whose head noun is an instrument is a person."""
+
+    from sworldmodel.coverage import _entity_kind
+
+    props = "the european union and mercosur signed the mercosur agreement; states ratify."
+    assert _entity_kind("EU member states", props) is not CandidateKind.PERSON
+    assert _entity_kind("Mercosur Agreement", props) is CandidateKind.DOCUMENT
+    assert _entity_kind("Signed Trade Agreement", props) is CandidateKind.DOCUMENT
+    assert _entity_kind("September 2025 Minutes", props) is CandidateKind.DOCUMENT
+
+    # Real names, including the ones with lowercase particles, are untouched.
+    for name in ("Andrew Bailey", "Ada North", "Ursula von der Leyen", "Ludwig van Beethoven"):
+        assert _entity_kind(name, props) is CandidateKind.PERSON
+    assert _entity_kind("Andrew Bailey, Governor of the Bank of England", props) is (
+        CandidateKind.PERSON
+    )
+    assert _entity_kind("European Council", props) is CandidateKind.ORGANIZATION
+
+
+def test_a_role_word_anywhere_in_the_claim_does_not_attest_a_role() -> None:
+    """Demanding a seat is the strongest thing this inventory does, so the role word has
+    to sit next to the name. Read across a whole claim, "EU member states must ratify
+    what the board agreed" attests a role for every capitalized thing in it."""
+
+    from sworldmodel.coverage import _ROLE_WORDS, _near
+
+    assert _near("Andrew Bailey", "Andrew Bailey, Governor of the Bank.", _ROLE_WORDS, before=True)
+    assert _near("Andrew Bailey", "Governor Andrew Bailey spoke.", _ROLE_WORDS, before=True)
+    assert _near("Ada North", "Ada North is a voting member of the Board.", _ROLE_WORDS)
+    assert not _near(
+        "Saudi Arabia",
+        "The eight countries including Saudi Arabia will meet; the chair voted.",
+        _ROLE_WORDS,
+        before=True,
+    )
+
+
 def test_a_declared_roster_the_world_never_populated_is_refused() -> None:
     """The motivating failure: the compiler says nine seats and puts five people in the
     world. Counting what the world contains is what catches it."""

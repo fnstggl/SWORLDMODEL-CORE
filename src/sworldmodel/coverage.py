@@ -292,6 +292,17 @@ _ORG_WORDS = _lex(
     " institute administration coalition alliance panel"
 )
 _ORG_SUFFIX = ("inc", "ltd", "llc", "plc", "corp", "co", "sa", "ag", "nv", "gmbh")
+# Nouns that name an *instrument* — a thing drafted, signed, published or enacted. A
+# name ending in one of these is a document, not somebody. This is a fact about English
+# noun phrases, not about any subject area.
+_INSTRUMENT_NOUNS = _lex(
+    "agreement treaty accord protocol pact deal contract convention covenant memorandum"
+    " communique communiqué declaration statement report minutes bill act ordinance"
+    " decree resolution ruling judgment judgement opinion decision letter release note"
+    " paper review summary transcript filing prospectus"
+)
+# Lowercase particles that belong inside a personal name.
+_NAME_PARTICLES = _lex("van von de del della der den di da dos das du la le bin ibn al of and")
 _POPULATION_WORDS = _lex(
     "voters electorate population households respondents citizens consumers workers residents"
     " members constituents demographic public shareholders taxpayers"
@@ -347,21 +358,31 @@ _ACTION_WORDS = _lex(
 _BODY_CONTEXT = _ACTION_WORDS | _EVENT_WORDS | _ORG_WORDS | _RULE_PROCEDURE_WORDS
 
 
-def _acts_in(identity: str, propositions: str) -> bool:
-    """Whether the evidence shows this name *doing* something, close to the name itself.
+def _near(identity: str, text: str, lexicon: frozenset[str], *, before: bool = False) -> bool:
+    """Whether a word from ``lexicon`` appears next to this name, inside one clause.
 
     A bag-of-words test over the whole passage would call any capitalized token in a
     sentence about a decision an organization — including the month the decision falls
-    in and the country it happens in. Requiring the agency word to follow the name
-    within a short span is the difference between "Mercosur signed" and "signed in
-    Brazil".
+    in and the country it happens in. Requiring the word to sit within a short span of
+    the name is the difference between "Mercosur signed" and "signed in Brazil".
+
+    ``before`` also accepts the word preceding the name, which is where English puts a
+    title: "Governor Andrew Bailey" attests a role exactly as "Andrew Bailey, Governor
+    of the Bank of England" does.
     """
 
-    pattern = re.compile(
-        rf"(?<![a-z0-9]){re.escape(identity.lower())}(?![a-z0-9])[^.;]{{0,48}}?"
-        rf"\b(?:{'|'.join(sorted(_BODY_CONTEXT))})\b"
-    )
-    return pattern.search(propositions.lower()) is not None
+    name = rf"(?<![a-z0-9]){re.escape(identity.lower())}(?![a-z0-9])"
+    words = rf"\b(?:{'|'.join(sorted(lexicon))})\b"
+    low = text.lower()
+    if re.search(rf"{name}[^.;]{{0,48}}?{words}", low):
+        return True
+    return before and re.search(rf"{words}[^.;]{{0,48}}?{name}", low) is not None
+
+
+def _acts_in(identity: str, propositions: str) -> bool:
+    """Whether the evidence shows this name *doing* something, close to the name itself."""
+
+    return _near(identity, propositions, _BODY_CONTEXT)
 
 
 def _entity_kind(entity: str, propositions: str) -> CandidateKind | None:
@@ -402,9 +423,19 @@ def _entity_kind(entity: str, propositions: str) -> CandidateKind | None:
         and _acts_in(identity, propositions)
     ):
         return CandidateKind.ORGANIZATION
-    # A capitalized name of more than one token is person-like. The shape is the whole
-    # rule and there is no threshold to tune.
-    if len(words) > 1 and identity[:1].isupper():
+    # An instrument: a thing that is signed, published or enacted. Names ending in one
+    # of these are documents whatever else they look like, and reading them as people is
+    # how a live EU–Mercosur run came to demand a seat for the "Mercosur Agreement" and
+    # for the "Signed Trade Agreement" the world had already compiled as a document.
+    if low.split() and low.split()[-1] in _INSTRUMENT_NOUNS:
+        return CandidateKind.DOCUMENT
+    # A capitalized name of more than one token is person-like — but *every* token has
+    # to be capitalized. "EU member states" is a collective written the way collectives
+    # are written, and calling it a person made the reality gate demand a seat for it
+    # beside the European Union and the European Council, which is where its member
+    # states already were. Lowercase particles are part of how names are written and do
+    # not break the rule.
+    if len(words) > 1 and all(w[:1].isupper() or w.lower() in _NAME_PARTICLES for w in words):
         return CandidateKind.PERSON
     return None
 
@@ -627,8 +658,13 @@ def _entity_candidates(
                 group.role = True
                 # Attested in role or authority terms — a much stronger signal than
                 # merely appearing beside the subject, and the only one strong enough
-                # to demand a seat at the table.
-                group.role_attested = True
+                # to demand a seat at the table. Which is why the role word has to sit
+                # next to the name: read across a whole claim, "EU member states must
+                # ratify what the board agreed" attests a role for every capitalized
+                # thing in it.
+                group.role_attested = group.role_attested or _near(
+                    ent, prop, _ROLE_WORDS, before=True
+                )
             elif ctx.mentions_focal(prop):
                 group.role = True
 

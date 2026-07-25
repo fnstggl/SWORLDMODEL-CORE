@@ -51,6 +51,7 @@ ROOT_CAUSES = (
     "over_strict_grounding_gate",
     "under_strict_integrity_gate",
     "terminal_supplied_rather_than_produced",
+    "terminal_never_determined",
     "unexecutable_compilation",
     "repair_did_not_converge",
     "repeated_wake_up_loop",
@@ -484,6 +485,30 @@ class RunDiagnosis:
         rt = self.runtime()
         if rt.get("ran") and self.failure_stage == "simulation":
             out.append({"cause": "repeated_wake_up_loop", "why": "the event loop did not settle"})
+        # A completed run that resolved nothing is not a clean run. It exits zero and
+        # reports "unresolved", which is honest, and it is also the shape a live Tesla
+        # run took when an effect stored a formula instead of computing it — a world
+        # holding every number it needed, answering nothing. Whatever the reason, it
+        # belongs in the record with a name; a diagnosis of "none" reads as success.
+        if rt.get("ran") and self.failure is None and not rt.get("resolved_branches"):
+            lineage = rt.get("terminal_producer_lineage") or {}
+            written = sorted(
+                {
+                    str(rec.get("terminal_term"))
+                    for records in lineage.values()
+                    for rec in records
+                    if not rec.get("unproduced")
+                }
+            )
+            out.append(
+                {
+                    "cause": "terminal_never_determined",
+                    "why": "the simulation completed with every branch unresolved; "
+                    f"{rt.get('actor_invocations', 0)} actor invocation(s) and "
+                    f"{rt.get('event_count', 0)} event(s) ran, and the terminal terms "
+                    f"actually written were {written or 'none'}",
+                }
+            )
         if not out:
             out.append(
                 {
