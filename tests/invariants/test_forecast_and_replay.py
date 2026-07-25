@@ -225,12 +225,12 @@ def test_a_world_whose_outcome_is_an_input_is_refused() -> None:
     gw = _gateway(_signal_sensitive)
     with pytest.raises(WorldIntegrityError) as exc:
         _compile(data, gw)
-    assert "the outcome is an input" in str(exc.value)
+    # Diagnosed at its cause: the branch condition IS the answer.
+    assert "an uncertainty writes the answer" in str(exc.value)
     details = exc.value.details
-    # Nothing that runs can write the term the terminal reads.
-    assert details["terminal terms with no producer"] == ["rate_decision"]
+    assert details["failure"] == "uncertainty_writes_terminal"
+    assert details["terminal terms written by an uncertainty"] == ["rate_decision"]
     assert details["producers by terminal term"] == {"rate_decision": []}
-    assert details["terminal terms supplied by uncertainty instead"] == ["rate_decision"]
     assert exc.value.details.get("recompilable") is True
 
 
@@ -281,12 +281,10 @@ def test_a_world_full_of_actions_that_cannot_reach_the_outcome_is_refused() -> N
     gw = _gateway(_signal_sensitive)
     with pytest.raises(WorldIntegrityError) as exc:
         _compile(data, gw)
-    assert "the outcome is an input" in str(exc.value)
+    assert "an uncertainty writes the answer" in str(exc.value)
     details = exc.value.details
-    assert details["terminal reads"] == ["rate_decision"]
-    assert "rate_decision" not in details["fields any action can write"]
-    # The refusal names exactly which terms were supplied instead of produced.
-    assert details["terminal terms supplied by uncertainty instead"] == ["rate_decision"]
+    assert details["failure"] == "uncertainty_writes_terminal"
+    assert details["terminal terms written by an uncertainty"] == ["rate_decision"]
     assert details.get("recompilable") is True
 
 
@@ -577,3 +575,90 @@ def test_an_expression_the_evaluator_cannot_run_is_caught_at_compile_time() -> N
     assert exc.value.details["failure"] == "unknown_expression_operator"
     assert "approximately" in exc.value.details["unknown operators"]
     assert exc.value.details.get("recompilable") is True
+
+
+def test_an_uncertainty_may_not_write_a_term_the_terminal_reads() -> None:
+    """The gap a live Bank of England run walked straight through.
+
+    The compiler declared an uncertainty literally named `bailey_choice_to_signal` whose
+    branch effects set `bailey_signaled_support` — the same field the actor's own action
+    writes. Because the action wrote it too there was no orphan, so the earlier check,
+    which only fired for terms nothing else wrote, passed the world. Both branches then
+    resolved YES, including the one whose branch condition was "no", for a reported
+    probability of 1.0000 with bounds [1.0000, 1.0000]. The actor's own decision had
+    been modelled as an exogenous coin flip and then overruled by the actor.
+
+    An uncertainty sets what the world does TO the actors. It never writes the answer,
+    whether or not something else writes it as well.
+    """
+
+    from sworldmodel.errors import WorldIntegrityError
+
+    data = _split_world()
+    data["world_spec"]["fields"].append(
+        {"field_id": "signaled", "value_type": "bool", "initial": False}
+    )
+    data["world_spec"]["terminal"]["yes_when"] = {
+        "op": "equals",
+        "args": [{"op": "field", "args": ["signaled"]}, True],
+    }
+    # An action writes it — so the orphan check is satisfied ...
+    data["world_spec"]["actions"].append(
+        {
+            "action_id": "signal",
+            "meaning": "say it publicly",
+            "eligible_actors": ["*"],
+            "effects": [{"op": "set_field", "field": "signaled", "value": True}],
+            "evidence_claim_ids": [],
+        }
+    )
+    # ... and the branch condition writes it too, which is the defect.
+    data["uncertainties"] = [
+        {
+            "variable": "choice_to_signal",
+            "why_unknown": "he has not said",
+            "reversal_capable": True,
+            "outcomes": [
+                {
+                    "value": "yes",
+                    "weight": 0.7,
+                    "provenance": "symmetric_ignorance_assumption",
+                    "field_effects": [["signaled", True]],
+                },
+                {
+                    "value": "no",
+                    "weight": 0.3,
+                    "provenance": "symmetric_ignorance_assumption",
+                    "field_effects": [["signaled", False]],
+                },
+            ],
+        }
+    ]
+
+    gw = _gateway(_signal_sensitive)
+    with pytest.raises(WorldIntegrityError) as exc:
+        _compile(data, gw)
+    assert exc.value.details["failure"] == "uncertainty_writes_terminal"
+    assert exc.value.details["terminal terms written by an uncertainty"] == ["signaled"]
+
+
+def test_a_terminal_term_nothing_writes_at_all_is_still_reported_as_an_orphan() -> None:
+    """The stricter uncertainty rule must not hide the plainer defect beneath it."""
+
+    from sworldmodel.errors import WorldIntegrityError
+
+    data = _split_world()
+    data["world_spec"]["fields"].append(
+        {"field_id": "never_written", "value_type": "bool", "initial": False}
+    )
+    data["world_spec"]["terminal"]["yes_when"] = {
+        "op": "equals",
+        "args": [{"op": "field", "args": ["never_written"]}, True],
+    }
+    data["uncertainties"] = []  # nothing supplies it either
+
+    gw = _gateway(_signal_sensitive)
+    with pytest.raises(WorldIntegrityError) as exc:
+        _compile(data, gw)
+    assert "the outcome is an input" in str(exc.value)
+    assert exc.value.details["terminal terms with no producer"] == ["never_written"]

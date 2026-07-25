@@ -396,6 +396,7 @@ class RunDiagnosis:
             "terminal_has_no_producer",
             "actors_cannot_reach_terminal",
             "environment_presets_terminal",
+            "uncertainty_writes_terminal",
         ):
             out.append(
                 {

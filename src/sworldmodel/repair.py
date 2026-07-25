@@ -393,6 +393,26 @@ def _terminal_reads_no_world_state(exc: WorldIntegrityError, subject: str) -> Re
     )
 
 
+def _uncertainty_writes_terminal(exc: WorldIntegrityError, subject: str) -> RepairPlan:
+    encoded = _strings(exc.details.get("terminal terms written by an uncertainty"))
+    return RepairPlan(
+        failure="uncertainty_writes_terminal",
+        missing_element=f"an exogenous uncertainty instead of {encoded}",
+        queries=(),
+        instruction=(
+            f"Your uncertainty writes {encoded}, which the terminal reads. That makes the "
+            "branch weights the answer whatever anyone does — and if the same term is "
+            "also written by an action, the branch simply overrules the actor.\n"
+            "An uncertainty is for what the world does TO the actors: incoming data, a "
+            "release, demand, a delay, an interpretation, someone else's move. It is "
+            "never for what an actor decides, and never for the outcome itself.\n"
+            "So branch over the INPUT and let the decision follow from it. If the "
+            "uncertainty is really about whether someone will act, delete it: that is "
+            "precisely what the simulation is for."
+        ),
+    )
+
+
 def _orphan_actors(exc: WorldIntegrityError, subject: str) -> RepairPlan:
     orphans = _strings(exc.details.get("orphan_actors"))
     return RepairPlan(
@@ -449,6 +469,7 @@ _PLANS = {
     "nothing_can_act": _nothing_can_act,
     "nothing_scheduled": _nothing_scheduled,
     "orphan_actors": _orphan_actors,
+    "uncertainty_writes_terminal": _uncertainty_writes_terminal,
     "terminal_reads_no_world_state": _terminal_reads_no_world_state,
     "decisive_evidence_contradiction": _decisive_evidence_contradiction,
     "unknown_expression_operator": _unknown_expression_operator,

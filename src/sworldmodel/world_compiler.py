@@ -973,6 +973,38 @@ def enforce_outcome_is_produced(
             },
         )
 
+    # An uncertainty may set exogenous conditions. It may never write a term the
+    # terminal reads — not the decision, not whether an actor acted, not any other
+    # encoding of the answer.
+    #
+    # The earlier form of this check only fired for terms *nothing else* wrote, and a
+    # live Bank of England run walked straight through the gap: the compiler declared an
+    # uncertainty literally named `bailey_choice_to_signal` whose branch effects set
+    # `bailey_signaled_support`, the same field the actor's own action writes. Because
+    # the action wrote it too there was no orphan, so the world passed — and then both
+    # branches resolved YES, including the one whose branch condition was "no", for a
+    # reported probability of 1.0000 with bounds [1.0000, 1.0000]. The actor's own
+    # decision had been modelled as an exogenous coin flip that was then overruled.
+    uncertainty_written = {
+        f"field:{name}" for u in uncertainties for o in u.outcomes for name, _ in o.field_effects
+    } | {f"field:{u.variable}" for u in uncertainties}
+    encoded = sorted(uncertainty_written & set(producers))
+    if encoded:
+        raise WorldIntegrityError(
+            f"an uncertainty writes the answer: {[_display(t) for t in encoded]} is both "
+            "read by the terminal and set by a branch condition, so the outcome is "
+            "decided by the branch weights whatever anyone does",
+            details={
+                "failure": "uncertainty_writes_terminal",
+                "recompilable": True,
+                "terminal terms written by an uncertainty": [_display(t) for t in encoded],
+                "uncertainties": [u.variable for u in uncertainties],
+                "producers by terminal term": {
+                    _display(k): list(v) for k, v in sorted(producers.items())
+                },
+            },
+        )
+
     orphans = sorted(term for term, who in producers.items() if not who)
     uncertain = {u.variable for u in uncertainties} | {
         name for u in uncertainties for o in u.outcomes for name, _ in o.field_effects
