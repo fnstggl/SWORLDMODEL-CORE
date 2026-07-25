@@ -19,6 +19,9 @@ echo "dirty:  $(git status --porcelain | wc -l) file(s)" >> "$STATUS"
 
 run() {
   local name="$1" asof="$2" horizon="$3" q="$4"
+  # A case directory holds this run's record and nothing else. Artifacts left by an
+  # earlier run or by exploratory work read as this run's own once they are beside it.
+  rm -rf "artifacts/acceptance/$name"
   mkdir -p "artifacts/acceptance/$name"
   local t0=$SECONDS
   timeout 2400 python3 -u -m sworldmodel forecast \
