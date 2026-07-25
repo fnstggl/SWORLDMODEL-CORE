@@ -126,9 +126,31 @@ class Effect:
         return dict(self.params)
 
 
+# The canonical parameter name each effect op reads, and the synonyms a model reaches
+# for. The effect schema names the ops but cannot spell out every op's params, so the
+# compiler guesses — a live Bank of England run emitted `set_field` keyed on `field_id`
+# (the key it had just seen on field *definitions*) rather than `field`, so the effect
+# wrote nothing the gate could see and the world was refused for an action that did
+# nothing. Renaming a synonym to the canonical key is shape coercion, not content
+# invention: the field the effect names does not change, only the key it is under.
+_EFFECT_KEY_SYNONYMS: dict[str, dict[str, str]] = {
+    "set_field": {"field_id": "field", "target": "field", "name": "field", "key": "field"},
+    "adjust_field": {"field_id": "field", "target": "field", "name": "field", "key": "field"},
+    "append_record": {"record": "collection", "list": "collection"},
+    "create_event": {"type": "event_type", "kind": "event_type"},
+    "schedule_event": {"type": "event_type", "kind": "event_type"},
+}
+
+
 def parse_effect(obj: dict[str, Any]) -> Effect:
     op = str(obj.get("op", ""))
     params = {k: v for k, v in obj.items() if k != "op"}
+    synonyms = _EFFECT_KEY_SYNONYMS.get(op, {})
+    for alias, target in synonyms.items():
+        # Only fill in the canonical key from a synonym when it is genuinely absent, so
+        # an effect that already names it correctly is never disturbed.
+        if alias in params and target not in params:
+            params[target] = params.pop(alias)
     return Effect(op=op, params=tuple(sorted(params.items())))
 
 

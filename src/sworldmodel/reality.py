@@ -52,11 +52,20 @@ def verify_reality(
     #    how many cars get built, which is a less faithful world than one with no
     #    individuals in it at all. What may never be missing is a causal pathway: some
     #    modeled thing whose operation produces the answer.
-    if not actors and not spec.external_processes:
+    #
+    #    The verified record is the fourth kind of producer, and this gate must know it
+    #    too. A question the record has already settled — the EU and Mercosur signed
+    #    their agreement four months before the cutoff, established by cited claims — has
+    #    a world that is a document and its citations, with no actor and no process,
+    #    because nothing remains to happen. That is a faithful factual resolution, not an
+    #    empty world. This gate ran before the producer-lineage gate that already knows
+    #    this, and refused the honest world first; it now defers to the same rule.
+    if not actors and not spec.external_processes and not _terminal_established_by_evidence(spec):
         raise WorldIntegrityError(
             "the compiled world has no causal producer — no actor whose decisions and "
             "no external or operational process whose behavior could produce this "
-            "outcome, so there is nothing to simulate",
+            "outcome, and the record does not already establish it, so there is nothing "
+            "to simulate",
             details={
                 "failure": "no_causal_producer",
                 "verified and represented participants": 0,
@@ -272,6 +281,27 @@ def verify_reality(
             },
         )
     return manifest
+
+
+def _terminal_established_by_evidence(spec: WorldSpec) -> bool:
+    """Whether every term the terminal reads is already established by cited evidence.
+
+    A world can be a faithful factual resolution: the record settled the question before
+    the window opened, so nothing acts and nothing runs, and the terminal reads a field
+    or document whose initial value carries the claim ids that establish it. The
+    producer-lineage gate (``world_compiler.terminal_producers``) is the authority on
+    what counts as a producer; this asks it the same question, so the two gates cannot
+    disagree about whether a producerless world is honest or empty.
+    """
+
+    from .world_compiler import terminal_producers
+
+    producers = terminal_producers(spec)
+    if not producers:
+        return False
+    return all(
+        who and all(str(w).startswith("evidence:") for w in who) for who in producers.values()
+    )
 
 
 def represented_member_count(spec: WorldSpec) -> int:

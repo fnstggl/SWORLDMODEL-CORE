@@ -415,10 +415,18 @@ _WORLD_SCHEMA = """Return a SINGLE JSON object:
                "valid_targets":["*"|"role:X"|"<entity>"],"visibility":"public|private",
                "duration_seconds":0,"delivery_delay_seconds":0,"notice_delay_seconds":0,
                "completion_conditions":{"op":"...","args":[...]},
-               "effects":[{"op":"append_record|set_field|adjust_field|deliver_information|create_event|"
-               "schedule_event|update_commitment|transfer_resource|consume_resource|"
-               "create_or_update_document|release_data|advance_time","...":"..."}],
+               "effects":[{"op":"<one op below>", "<its params>":"..."}],
                "evidence_claim_ids":["..."]}],
+   // EFFECT OPS AND THEIR EXACT PARAMETER KEYS (use these keys verbatim):
+   //   set_field      {"field":"<field_id>","value":<v or an expression>}
+   //   adjust_field   {"field":"<field_id>","delta":<number>}
+   //   append_record  {"collection":"<name>","key":"...","value":<v>}
+   //   create_event   {"event_type":"<label>","text":"...","data":{...}}
+   //   schedule_event {"event_type":"<label>","text":"...","at":"<ISO>"}
+   //   release_data   {"fields":{"<field_id>":<v>}}
+   //   deliver_information {"text":"...","info_fields":{...},"to":["<actor>"]}
+   //   set the field the TERMINAL reads, spelled identically. A set_field whose "field"
+   //   is not a field the terminal reads writes nothing that matters.
    "process":{"nodes":[{"node_id":"snake","stage":"<label>","description":"...",
                "at":"<ISO datetime>","after_node":"<node id or ''>","delay_seconds":0,
                "entry_condition":{"op":"...","args":[...]},

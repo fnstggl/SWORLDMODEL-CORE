@@ -877,3 +877,47 @@ def test_an_aggregate_keeps_the_cardinality_it_represents() -> None:
         verify_reality(_contract(expected_participants=9), _view(), {"opec_plus": state}, thin)
     assert exc.value.details["failure"] == "declared_participants_not_represented"
     assert exc.value.details["represented in the world"] == 2
+
+
+def test_a_factual_resolution_world_is_not_refused_for_having_no_producer() -> None:
+    """A live EU-Mercosur run compiled the honest world for a question the record had
+    settled: the agreement was signed four months before the cutoff, established by two
+    cited claims, so the world is a document and its citations with no actor and no
+    process, because nothing remains to happen. The no-causal-producer gate ran before
+    the producer-lineage gate that knows evidence is the fourth producer, and refused
+    the honest world first."""
+
+    from dataclasses import replace
+
+    from sworldmodel.worldspec import DocumentSpec, FieldSpec, TerminalExpression
+
+    signed = FieldSpec(
+        field_id="agreement_signed",
+        value_type="bool",
+        initial=True,
+        evidence_claim_ids=("k_signed",),
+    )
+    doc = DocumentSpec(document_id="agreement", fields=(("signed", True),))
+    terminal = TerminalExpression(Expr("equals", (Expr("field", ("agreement_signed",)), True)))
+    spec = WorldSpec(
+        title="EU-Mercosur",
+        entities=(EntitySpec("agreement", "EU-Mercosur Agreement", "document"),),
+        actors=(),
+        fields=(signed,),
+        resources=(),
+        channels=(),
+        documents=(doc,),
+        actions=(),
+        process=ProcessGraph(()),
+        terminal=terminal,
+    )
+    view = _view(_claim("k_signed", "The agreement was signed on 17 January 2026.", ("EU",)))
+    # No actors, no external processes: accepted, because the terminal is established.
+    manifest = verify_reality(_contract(subject_entity="the agreement"), view, {}, spec)
+    assert manifest.integrity_verdict.value in ("verified", "provisional")
+
+    # Strip the citation and the same shape is a genuinely empty world, refused.
+    uncited = replace(spec, fields=(replace(signed, evidence_claim_ids=()),))
+    with pytest.raises(WorldIntegrityError) as exc:
+        verify_reality(_contract(subject_entity="the agreement"), view, {}, uncited)
+    assert exc.value.details["failure"] == "no_causal_producer"
