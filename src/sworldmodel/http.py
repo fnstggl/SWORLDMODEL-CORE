@@ -26,6 +26,7 @@ deliberately does not resolve hostnames; policy enforcement belongs at the socke
 
 from __future__ import annotations
 
+import http.client
 import ipaddress
 import os
 import socket
@@ -136,6 +137,15 @@ class HttpTransport(Protocol):
         self,
         url: str,
         body: dict[str, object],
+        *,
+        headers: dict[str, str] | None = None,
+        timeout: float = 60.0,
+    ) -> HttpResponse: ...
+
+    def post_form(
+        self,
+        url: str,
+        form: str,
         *,
         headers: dict[str, str] | None = None,
         timeout: float = 60.0,
@@ -301,6 +311,19 @@ class UrllibTransport:
         h = {"Content-Type": "application/json", **(headers or {})}
         return self._request("POST", url, data, h, timeout)
 
+    def post_form(
+        self,
+        url: str,
+        form: str,
+        *,
+        headers: dict[str, str] | None = None,
+        timeout: float = 60.0,
+    ) -> HttpResponse:
+        """An urlencoded POST — the shape Google's batchexecute endpoint requires."""
+
+        h = {"Content-Type": "application/x-www-form-urlencoded;charset=UTF-8", **(headers or {})}
+        return self._request("POST", url, form.encode("utf-8"), h, timeout)
+
     def _request(
         self,
         method: str,
@@ -330,6 +353,20 @@ class UrllibTransport:
             elapsed = int((time.monotonic() - start) * 1000)
             self._record(HttpCall(method, url, current, 0, elapsed, 0, error=str(exc)))
             raise HttpError(f"{method} {url} failed: {exc}") from exc
+        except (http.client.HTTPException, zlib.error) as exc:
+            # A truncated chunked body (IncompleteRead), a malformed status line, a
+            # corrupt gzip stream: protocol-level failures of ONE document. None of
+            # these is an OSError, so none was caught here — a live EU-Mercosur run
+            # died twenty minutes in when one page's chunked response ended 15 bytes
+            # short, and the raw http.client.IncompleteRead destroyed the entire run
+            # with no artifacts. One bad page is a rejected page, never a dead run.
+            elapsed = int((time.monotonic() - start) * 1000)
+            partial = len(getattr(exc, "partial", b"") or b"")
+            detail = f"{type(exc).__name__}: {exc}" + (
+                f" ({partial} bytes received before truncation)" if partial else ""
+            )
+            self._record(HttpCall(method, url, current, 0, elapsed, partial, error=detail))
+            raise HttpError(f"{method} {url} failed mid-body: {detail}") from exc
 
     def _single_hop(
         self,
@@ -470,6 +507,16 @@ class FakeTransport:
         timeout: float = 60.0,
     ) -> HttpResponse:
         return self._dispatch("POST", url, body)
+
+    def post_form(
+        self,
+        url: str,
+        form: str,
+        *,
+        headers: dict[str, str] | None = None,
+        timeout: float = 60.0,
+    ) -> HttpResponse:
+        return self._dispatch("POST", url, {"form": form})
 
 
 def html_response(
