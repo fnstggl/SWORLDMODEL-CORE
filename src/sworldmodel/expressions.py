@@ -234,8 +234,19 @@ def looks_like_expression(value: Any) -> bool:
         return True
     if len(value) == 1:
         (key,) = value
-        return key in UNIVERSAL_OPERATORS
+        return key in _SHORTHAND_OPERATORS
     return False
+
+
+# The single-key shorthand ``{"field": "x"}`` is only safe for operators that would not
+# also be a plausible payload key. ``count``, ``sum``, ``values``, ``min`` and ``max``
+# are all operators *and* ordinary names for a thing a document or an information
+# payload records, and reading ``{"count": 3}`` as the aggregate ``count(3)`` would
+# quietly turn a recorded number into nothing. Everything else stays writable in the
+# explicit ``{"op": ...}`` form, which cannot be confused with data.
+_SHORTHAND_OPERATORS = frozenset(
+    {"field", "const", "stage", "now", "horizon", "as_of", "document_field"}
+)
 
 
 def param_expressions(value: Any) -> list[Expr]:

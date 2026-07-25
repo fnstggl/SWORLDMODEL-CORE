@@ -204,3 +204,17 @@ def test_an_undeterminable_effect_value_is_no_value_never_a_coerced_zero() -> No
     ctx = _Ctx(fields={"known": 4})
     undetermined = {"op": "multiply", "args": [{"field": "known"}, {"field": "never_set"}]}
     assert _resolve(undetermined, {}, ctx) is None  # type: ignore[arg-type]
+
+
+def test_an_ordinary_payload_key_that_is_also_an_operator_stays_data() -> None:
+    """``count``, ``sum``, ``min`` and ``max`` are operators and also ordinary names for
+    a thing a document records. Reading ``{"count": 3}`` as the aggregate ``count(3)``
+    would quietly turn a recorded number into nothing."""
+
+    from sworldmodel.effects import _resolve
+
+    ctx = _Ctx(fields={"n": 7})
+    for key in ("count", "sum", "values", "min", "max", "exists", "contains"):
+        assert _resolve({key: 3}, {}, ctx) == {key: 3}  # type: ignore[arg-type]
+    # The explicit form is unambiguous and is still computed.
+    assert _resolve({"op": "add", "args": [{"field": "n"}, 1]}, {}, ctx) == 8  # type: ignore[arg-type]
