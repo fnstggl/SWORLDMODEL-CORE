@@ -237,6 +237,13 @@ class RunDiagnosis:
                     "meaning": a.meaning,
                     "eligible": list(a.eligible_actors),
                     "required_authority": list(a.required_authority),
+                    # What doing it actually changes. Without this a producer refusal is
+                    # unreadable: a live Bank of England world compiled two vote actions
+                    # and was refused for nothing writing the vote, and the record showed
+                    # the action names with no way to see that their effects wrote
+                    # nothing the terminal reads.
+                    "writes": sorted(t for e in a.effects for t in _effect_terms(e)),
+                    "effect_ops": [e.op for e in a.effects],
                 }
                 for a in spec.actions
             ],
@@ -529,6 +536,13 @@ class RunDiagnosis:
 
 
 # ---------------------------------------------------------------------------
+
+
+def _effect_terms(effect: Any) -> set[str]:
+    from .world_compiler import _effect_produces
+
+    produced: set[str] = _effect_produces(effect)
+    return produced
 
 
 def _counts(values: Any) -> dict[str, int]:

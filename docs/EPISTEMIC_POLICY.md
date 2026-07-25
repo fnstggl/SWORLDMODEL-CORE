@@ -97,3 +97,21 @@ answer. Three rules, all in `world_compiler.enforce_outcome_is_produced`:
 
 `engine.terminal_lineage` is the runtime half: it walks the branch's own ledger and names
 the event, actor and causal parents behind every terminal term.
+
+### Verified evidence is the fourth producer
+
+A question the record has already answered has no producer inside the window, because the
+world produced the answer before the window opened. Asked in July whether the EU and
+Mercosur would sign their trade agreement before October, a run found the European
+Commission's own page, Wikipedia and five other sources recording that they signed it on
+17 January. Requiring an in-window producer there means inventing a future signing for a
+signing that already happened; refusing means refusing the one question research had
+already answered.
+
+So an initial field or document value counts as a producer **when it cites the claims
+that establish it**. The citation is the whole rule: claim ids are pruned against the
+evidence store during normalization, so a value citing nothing — or citing something the
+store does not hold — is the compiler asserting an outcome and stays an orphan. When
+every terminal term is established this way, the actor-reachability and environment-preset
+checks are skipped: they exist to stop a world from *pretending* the answer was produced,
+and there is nothing left in such a world for anyone to produce.

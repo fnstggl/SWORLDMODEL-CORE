@@ -99,6 +99,7 @@ def _compile_with_repair(
 
     log = log if log is not None else RepairLog()
     seen_failures: set[str] = set()
+    seen_signatures: set[str] = set()
 
     for _ in range(_REPAIR_CEILING):
         # Every world this loop actually tried, in order, so a refusal can report the
@@ -148,12 +149,20 @@ def _compile_with_repair(
                 )
                 raise
 
-            # Progress means new evidence, or a failure we have not diagnosed before.
-            # Repeating a diagnosis with nothing new to read is the definition of a
-            # reroll, and it is where an honest run stops.
+            # Progress means new evidence, or a failure we have not diagnosed before,
+            # or the same kind of failure about something different. Repeating a
+            # diagnosis with nothing new to read is the definition of a reroll, and it
+            # is where an honest run stops — but a live Bank of England run was stopped
+            # after two rounds for "no new diagnosis" while the compiler was in fact
+            # changing the world each time: the orphan term moved from
+            # bailey_public_stance to bailey_vote. Same code, different world, and the
+            # second attempt was never made. The ceiling above is what bounds a compiler
+            # that cycles forever.
+            signature = f"{failure}|{_failure_signature(exc)}"
             new_evidence = after > before
-            new_diagnosis = failure not in seen_failures
+            new_diagnosis = failure not in seen_failures or signature not in seen_signatures
             seen_failures.add(failure)
+            seen_signatures.add(signature)
             log.record(
                 plan,
                 failure=failure,
@@ -184,6 +193,22 @@ def _compile_with_repair(
             "attempts": _REPAIR_CEILING,
         },
     )
+
+
+def _failure_signature(exc: WorldIntegrityError) -> str:
+    """What this refusal is *about*, so two refusals with the same code can be told apart.
+
+    Only the details that name world elements — the orphan terms, the absent
+    participants, the missing candidates — not counts or free text, which move for
+    reasons that are not a different world.
+    """
+
+    parts: list[str] = []
+    for key in sorted(exc.details):
+        value = exc.details[key]
+        if isinstance(value, (list, tuple)) and all(isinstance(v, str) for v in value):
+            parts.append(f"{key}={sorted(value)}")
+    return ";".join(parts)
 
 
 def _repair_once(

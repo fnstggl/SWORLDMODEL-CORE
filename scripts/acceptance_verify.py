@@ -18,6 +18,14 @@ from pathlib import Path
 from typing import Any
 
 CASES = ("geopolitical", "individual", "negotiation", "population", "committee")
+
+# Read from engine.WAKE_* so a reason the runtime gains is not reported here as unknown,
+# and a reason it never emits cannot be waved through.
+WAKE_REASONS = frozenset(
+    v
+    for k, v in vars(__import__("sworldmodel.engine", fromlist=["engine"])).items()
+    if k.startswith("WAKE_") and isinstance(v, str)
+)
 ROOT = Path(__file__).resolve().parent.parent / "artifacts" / "acceptance"
 
 
@@ -163,6 +171,34 @@ def checks(case: str) -> list[tuple[str, str, str]]:
         bool(ledger) and rt.get("event_count", 0) > 0,
         f"{rt['event_count']} events, {rt['actor_invocations']} actor invocation(s), "
         f"wake reasons {rt.get('wake_reasons')}",
+    )
+
+    # 9b. Every actor call happened for a reason the runtime can name. A turn taken
+    #     because it was somebody's turn is the thing this architecture does not have.
+    wake = rt.get("wake_reasons") or {}
+    unknown = sorted(set(wake) - set(WAKE_REASONS))
+    check(
+        "every actor call has a named wake reason",
+        not unknown and (rt.get("actor_invocations", 0) == 0 or bool(wake)),
+        f"{wake}" if not unknown else f"unrecognised wake reasons {unknown}",
+    )
+
+    # 9c. Branch uncertainty must not be the answer wearing a world's clothes.
+    producers = comp.get("terminal_producers") or {}
+    from_uncertainty = sorted(
+        {
+            f"{term} <- {who}"
+            for term, whos in producers.items()
+            for who in whos
+            if str(who).startswith("uncertainty:")
+        }
+    )
+    check(
+        "no terminal term is written by an uncertainty",
+        not from_uncertainty,
+        "every producer is an action, a process or cited evidence"
+        if not from_uncertainty
+        else f"{from_uncertainty}",
     )
 
     # 10. The answer is replayable: the ledger is present and the branches are recorded

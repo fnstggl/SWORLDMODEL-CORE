@@ -250,6 +250,27 @@ def _declared_participants_not_represented(exc: WorldIntegrityError, subject: st
 
 def _terminal_has_no_producer(exc: WorldIntegrityError, subject: str) -> RepairPlan:
     orphans = _strings(exc.details.get("terminal terms with no producer"))
+    writable_fields = _strings(exc.details.get("fields any action can write"))
+    writable_colls = _strings(exc.details.get("collections any action can write"))
+    connect = ""
+    if writable_fields or writable_colls:
+        connect = (
+            f"Your actions already write {writable_fields or 'no fields'} and "
+            f"{writable_colls or 'no collections'}, and the terminal reads {orphans}. "
+            "Those are different names, so this is a wiring mistake rather than a missing "
+            "mechanism: either give one of your actions an effect that writes exactly the "
+            "term the terminal reads, or write the terminal over the term your actions "
+            "actually produce. Namespaces are not interchangeable — a record appended to "
+            "a collection does not set a field of the same name, and a document field is "
+            "not a world field.\n"
+        )
+    elif exc.details.get("terminal reads"):
+        connect = (
+            "No action in your world writes any field or collection at all. An action "
+            "whose effects change nothing the terminal can read is a name, not a "
+            "mechanism: give each action the effect that records what doing it actually "
+            "changes in the world.\n"
+        )
     return RepairPlan(
         failure="terminal_has_no_producer",
         missing_element=f"a mechanism that produces {orphans}",
@@ -262,7 +283,8 @@ def _terminal_has_no_producer(exc: WorldIntegrityError, subject: str) -> RepairP
         instruction=(
             f"Nothing in your world writes {orphans}, so the terminal read values that "
             "only a branch weight supplied.\n"
-            "A common form of this mistake is modelling the ANNOUNCEMENT and omitting "
+            + connect
+            + "A common form of this mistake is modelling the ANNOUNCEMENT and omitting "
             "the PRODUCTION. A scheduled release that publishes a number does not "
             "produce that number; it reports whatever the operating world had already "
             "produced by then.\n"

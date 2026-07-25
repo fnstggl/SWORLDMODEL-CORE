@@ -328,7 +328,10 @@ THE TERMINAL IS AN EXPRESSION OVER WORLD STATE, AND SOMETHING MUST PRODUCE IT. W
 that makes the answer YES in terms of what will actually be true in the world, using only the
 universal operators. Every term it reads must be written by something that runs: an action an actor
 takes, a process node, or an external/operational process. Check each term before you finish — if
-nothing writes it, the world is incomplete. Use `unresolved_when` for states where the process
+nothing writes it, the world is incomplete. Check it by name: the effect has to name the same
+string the terminal reads. An action called vote_cut whose effects do not set the field the
+terminal reads is a name, not a mechanism, and the namespaces are separate — append_record to a
+collection does not set a field of the same name, and a document field is not a world field. Use `unresolved_when` for states where the process
 genuinely did not determine the answer — an undetermined world must report as unresolved, never be
 rounded to NO.
 

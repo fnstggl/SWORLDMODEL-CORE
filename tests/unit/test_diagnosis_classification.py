@@ -99,3 +99,37 @@ def test_a_completed_run_that_resolved_nothing_is_not_reported_as_clean() -> Non
 
     resolved = _for(None, ran=True, resolved_branches=2, branches=2, actor_invocations=4)
     assert resolved == ["none"]
+
+
+def test_the_same_failure_about_something_else_is_progress() -> None:
+    """A live Bank of England run was stopped after two repair rounds for "no new
+    diagnosis" while the compiler was in fact changing the world each time: the orphan
+    term moved from bailey_public_stance to bailey_vote. Same code, different world, and
+    the second attempt was never made."""
+
+    from sworldmodel.api import _failure_signature
+
+    def orphan(term: str) -> WorldIntegrityError:
+        return WorldIntegrityError(
+            "the outcome is an input",
+            details={
+                "failure": "terminal_has_no_producer",
+                "recompilable": True,
+                "terminal terms with no producer": [term],
+                "fields any action can write": [],
+            },
+        )
+
+    assert _failure_signature(orphan("bailey_vote")) != _failure_signature(
+        orphan("bailey_public_stance")
+    )
+    assert _failure_signature(orphan("bailey_vote")) == _failure_signature(orphan("bailey_vote"))
+
+    # Counts and free text move for reasons that are not a different world.
+    noisy = WorldIntegrityError(
+        "x", details={"failure": "coverage_incomplete", "material_candidates": 14, "note": "a"}
+    )
+    quieter = WorldIntegrityError(
+        "x", details={"failure": "coverage_incomplete", "material_candidates": 9, "note": "b"}
+    )
+    assert _failure_signature(noisy) == _failure_signature(quieter)
