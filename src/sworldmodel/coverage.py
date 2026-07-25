@@ -369,8 +369,11 @@ def _entity_kind(entity: str, propositions: str) -> CandidateKind | None:
 
     # "Andrew Bailey, Governor of the Bank of England" is a person with their office
     # appended. Classifying the whole string reads the office and calls the person an
-    # organization, so the identity is taken from before the appositive.
-    identity = entity.split(",")[0].strip() or entity
+    # organization, so the identity is taken from before the appositive — but only when
+    # what precedes the comma is already a full name. "Smith, John" is one name written
+    # backwards, and truncating it to "Smith" loses the person.
+    head = entity.split(",")[0].strip()
+    identity = head if len(head.split()) > 1 else entity
     words = identity.split()
     low = identity.lower()
     tokens = set(_WORD.findall(low))

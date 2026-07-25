@@ -242,7 +242,8 @@ def verify_claim(
     # scale. Widening to a bounded, contiguous region around the verbatim span is not the
     # same as accepting "the number appears somewhere on the page": the support has to sit
     # next to the sentence the claim was built from.
-    region = _supporting_region(doc, exc)
+    date_region = _supporting_region(doc, exc, _DATE_WINDOW_CHARS)
+    value_region = _value_region(document, excerpt)
 
     # Dates are compared as dates. A page that says "Brussels, 17 January 2026" supports
     # a claim about that day, but the ISO form 2026-01-17 decomposes into the tokens
@@ -251,7 +252,7 @@ def verify_claim(
     # the *dates* is both looser about notation and stricter about the day: a claim
     # asserting the wrong date still fails.
     asserted_dates = _dates(proposition) | _dates(normalized_value)
-    unsupported_dates = sorted(d.isoformat() for d in asserted_dates - _dates(region))
+    unsupported_dates = sorted(d.isoformat() for d in asserted_dates - _dates(date_region))
     if unsupported_dates:
         return (
             "the supporting span does not contain the date(s) the claim asserts: "
@@ -267,7 +268,7 @@ def verify_claim(
     asserted = (_numbers(proposition) | _numbers(normalized_value)) - (
         _date_component_numbers(proposition) | _date_component_numbers(normalized_value)
     )
-    unsupported = sorted(asserted - _numbers(region))
+    unsupported = sorted(asserted - _numbers(value_region))
     if unsupported:
         return (
             "the supporting span does not contain the value(s) the claim asserts: "
@@ -278,7 +279,7 @@ def verify_claim(
     # is usually the heading and the value is the cell beneath it, so demanding both
     # inside one quoted string rejects every table this system will ever read.
     subject_terms = [_norm(e) for e in entities] + _value_terms(normalized_value)
-    if not any(term and term in region for term in subject_terms):
+    if not any(term and term in date_region for term in subject_terms):
         return "the supporting span does not mention the claim's subject"
 
     missing = sorted(
@@ -289,21 +290,84 @@ def verify_claim(
     return ""
 
 
-# How far either side of the quoted span counts as "the same passage". About two
-# sentences: enough for a dateline, a table heading or the sentence that follows, and
-# far too small for an unrelated part of the page to wander in.
-_SUPPORT_WINDOW_CHARS = 320
+# How far either side of the quoted span counts as "the same passage", and it differs by
+# what is being supported.
+#
+# A *date* is routinely outside the sentence it dates: sources put it in a dateline
+# above, or a "published on" line below. Giving dates the wider reach is what lets a
+# Council page reading "Brussels, 17 January 2026 — the EU and Mercosur signed…" support
+# a claim about that day.
+#
+# A *quantity* is different. The model picks both the claim and the quote, having read
+# the whole page, so a wide window lets it quote one sentence and assert a number from
+# another — a staff headcount two sentences down, a cell in a neighbouring rate table, a
+# figure in a sidebar. Measured, a 320-character reach accepted a number 300 characters
+# past the quote. The tighter bound still covers the case it exists for: a table heading
+# and the value beneath it are a line apart, not a paragraph.
+_DATE_WINDOW_CHARS = 320
+_VALUE_WINDOW_CHARS = 150
 
 
-def _supporting_region(doc: str, excerpt: str) -> str:
-    """The excerpt plus the passage immediately around it, in normalized space."""
+def _supporting_region(doc: str, excerpt: str, window: int) -> str:
+    """The excerpt plus ``window`` characters either side, in normalized space."""
 
     start = doc.find(excerpt)
     if start < 0:  # pragma: no cover - callers check containment first
         return excerpt
-    lo = max(0, start - _SUPPORT_WINDOW_CHARS)
-    hi = min(len(doc), start + len(excerpt) + _SUPPORT_WINDOW_CHARS)
+    lo = max(0, start - window)
+    hi = min(len(doc), start + len(excerpt) + window)
     return doc[lo:hi]
+
+
+# A sentence ends at ., ! or ? followed by whitespace. Crude, and it does not need to be
+# better: it is used only to decide whether an asserted quantity sits in the sentence
+# that was quoted or in a different one.
+_SENTENCE_END = re.compile(r"[.!?](?=\s)")
+
+
+def _value_region(document: str, excerpt: str) -> str:
+    """Where a quantity the claim asserts is allowed to live.
+
+    The quoted sentence itself, and the lines immediately around it. Not a character
+    window: the model chooses both the claim and the quote after reading the whole page,
+    so any distance measured in characters lets it quote one sentence and assert a number
+    from another. Measured on a run-on paragraph, a 150-character reach still accepted a
+    staff headcount from four sentences away.
+
+    Lines are included whole because that is what a table is — a heading on one line and
+    its value on the next — and that case is why the region is wider than the excerpt at
+    all.
+
+    A limit worth stating: a document with no sentence punctuation near the quote is one
+    block, so a crafted sidebar wedged into it is still reachable. The subject and
+    proper-noun checks remain the defence there. This bounds ordinary sloppiness, which
+    is the realistic failure, not a hostile document.
+    """
+
+    lines = document.splitlines()
+    norm_lines = [_norm(line) for line in lines]
+    target = _norm(excerpt)
+
+    hit = next((i for i, line in enumerate(norm_lines) if target and target in line), None)
+    if hit is None:
+        # The excerpt spans lines; fall back to the bounded character window.
+        return _supporting_region(_norm(document), target, _VALUE_WINDOW_CHARS)
+
+    own = norm_lines[hit]
+    pieces: list[str] = []
+    # Within the quoted line, only the sentences the excerpt actually touches.
+    start = own.find(target)
+    end = start + len(target)
+    bounds = [0, *[m.end() for m in _SENTENCE_END.finditer(own)], len(own)]
+    for lo, hi in zip(bounds, bounds[1:], strict=False):
+        if lo < end and hi > start:
+            pieces.append(own[lo:hi])
+    # Plus the adjacent lines, whole.
+    if hit > 0:
+        pieces.append(norm_lines[hit - 1])
+    if hit + 1 < len(norm_lines):
+        pieces.append(norm_lines[hit + 1])
+    return " ".join(pieces)
 
 
 def distinctive_terms(text: str) -> frozenset[str]:

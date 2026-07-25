@@ -63,15 +63,13 @@ _MIN_KEPT_SHARE = 0.35
 
 # Where a document's own content lives, most specific first. Non-greedy so a wrapper
 # does not swallow the footer, and checked for plausibility by the caller.
+# Only well-formed tag pairs. The role- and class-based variants terminated on
+# `</[a-z]+>`, which matches whichever closing tag comes first rather than the element's
+# own, so a "main content" region routinely turned out to be its first paragraph — and
+# hoisting one paragraph is worse than hoisting nothing.
 _MAIN_REGIONS = (
     re.compile(r"<main\b[^>]*>.*?</main>", re.IGNORECASE | re.DOTALL),
-    re.compile(r"<[a-z]+\b[^>]*\brole=[\"']main[\"'][^>]*>.*?</[a-z]+>", re.IGNORECASE | re.DOTALL),
     re.compile(r"<article\b[^>]*>.*?</article>", re.IGNORECASE | re.DOTALL),
-    re.compile(
-        r"<[a-z]+\b[^>]*\b(?:id|class)=[\"'][^\"']*(?:main-content|page-content|article-body"
-        r"|content-block|rich-text)[^\"']*[\"'][^>]*>.*?</[a-z]+>",
-        re.IGNORECASE | re.DOTALL,
-    ),
 )
 _META_TIME = re.compile(
     r'<meta[^>]+(?:property|name)=["\'](?:article:published_time|datePublished|pubdate|date)["\'][^>]*content=["\']([^"\']+)["\']',
@@ -436,9 +434,12 @@ def extract_text(html: str) -> str:
     body = _CHROME.sub(" ", stripped)
     main = _main_region(body)
     if main:
-        # Keep the rest as well: a date, a byline or a breadcrumb can sit outside the
-        # main region, and this text is also what the verifier checks excerpts against.
-        body = main + "\n\n" + body
+        # Move it, do not copy it. The extractor reads a bounded window of this text,
+        # so duplicating a long article spends more than half that window on the same
+        # words twice and pushes the tail out — the opposite of what hoisting is for.
+        # The remainder is kept after it, because a date, a byline or a breadcrumb can
+        # sit outside the main region and the verifier checks excerpts against all of it.
+        body = main + "\n\n" + body.replace(main, " ", 1)
     text = _to_text(body)
 
     # Filtering that removes most of the document removed the document. Falling back is

@@ -525,3 +525,42 @@ def test_an_unparsable_compilation_is_a_refusal_the_repair_loop_can_act_on() -> 
     assert not plan.needs_research  # nothing is missing from the evidence
     assert "could not be parsed" in plan.instruction
     assert "args" in plan.instruction  # it names the shape to fix
+
+
+def test_a_quantity_must_come_from_the_quoted_sentence_or_an_adjacent_line() -> None:
+    """The model picks both the claim and the quote, having read the whole page, so any
+    reach measured in characters lets it quote one sentence and assert a number from
+    another. A 150-character window still accepted a staff headcount four sentences on.
+
+    The boundary that works is linguistic: the sentence that was quoted, plus the lines
+    around it — which is what a table is, a heading on one line and its value beneath.
+    """
+
+    from sworldmodel.source_extract import verify_claim
+
+    borrowed = verify_claim(
+        proposition="The Committee voted 4750 to maintain Bank Rate",
+        normalized_value="4750",
+        entities=("Committee",),
+        excerpt="The Committee voted to maintain Bank Rate",
+        document=(
+            "The Committee voted to maintain Bank Rate. Further discussion followed. "
+            "More talk. Then more. The Bank employs 4750 staff across its sites."
+        ),
+    )
+    assert "value" in borrowed, "a number from an unrelated sentence was accepted"
+
+    # A table heading and the value on the next line is the case the region exists for.
+    assert (
+        verify_claim(
+            proposition="Tesla delivered 389407 vehicles in Q2 2026",
+            normalized_value="389407",
+            entities=("Tesla",),
+            excerpt="Q2 2026 total vehicle deliveries",
+            document=(
+                "Quarterly deliveries\nTesla Q2 2026 total vehicle deliveries\n"
+                "389,407 units delivered"
+            ),
+        )
+        == ""
+    )
