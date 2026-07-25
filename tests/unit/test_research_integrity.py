@@ -489,11 +489,15 @@ def _channels(max_queries: int) -> list[str]:
 
 
 def test_general_discovery_cannot_consume_the_authoritative_share() -> None:
-    # Under a budget too small for both channels, the authoritative queries are the ones
-    # that run. This is the defect exactly: they used to be enqueued last and never ran.
+    # Under a tight budget the authoritative queries take the majority — they used to be
+    # enqueued last and never run at all — but they do not take everything. Exclusivity
+    # was the opposite starvation, and it was just as real: a live run spent all twenty
+    # of its queries on official domains, was blocked or 403'd on most of them, and
+    # never issued any of its eleven queued news queries.
     channels, queries = _channels(max_queries=3)
-    assert set(channels) == {"authoritative"}
-    assert all(q.startswith("site:") or "Registrar" in q for q in queries)
+    assert channels.count("authoritative") == 2
+    assert channels.count("general") == 1
+    assert any(q.startswith("site:") or "Registrar" in q for q in queries)
 
     # With room for both, authoritative still goes first, and general is held to the
     # unreserved half while authoritative work remains.

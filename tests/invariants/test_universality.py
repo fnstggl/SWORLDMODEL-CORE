@@ -342,3 +342,42 @@ def test_the_runtime_carries_no_notion_of_representation_scale_behavior() -> Non
     entity = compiled.base_world.entities[0]
     assert entity.representation_scale == "organization"
     assert entity.represents_count == 4200
+
+
+def test_both_discovery_channels_get_their_share_of_the_query_budget() -> None:
+    """Authoritative discovery holds a reserve; it does not hold everything.
+
+    The reserve was documented as protecting official-domain queries and implemented as
+    an elif chain that drained them first, which made the general branch's cap
+    unreachable and starved the channel it was meant to bound. A live run spent all ten
+    of its queries on official domains, was blocked or 403'd on most, and never issued
+    any of its eleven queued news queries.
+    """
+
+    from collections import Counter, deque
+
+    from sworldmodel.live_research import (
+        LiveResearchBackend,
+        ResearchBudget,
+        _QueryQueues,
+        _Session,
+    )
+
+    backend = LiveResearchBackend.__new__(LiveResearchBackend)
+    backend.budget = ResearchBudget(max_queries=20, max_queries_per_round=20)
+
+    queues = _QueryQueues()
+    queues.authoritative = deque(f"auth{i}" for i in range(12))
+    queues.general = deque(f"gen{i}" for i in range(12))
+    picked = backend._next_queries(_Session(queues=queues, seen_urls=set(), seen_hashes=set()))
+    channels = Counter(channel for channel, _ in picked)
+    assert channels["authoritative"] == 10
+    assert channels["general"] == 10, "the general channel was starved"
+
+    # Whichever channel has no work leaves its share to the other.
+    only_general = _QueryQueues()
+    only_general.general = deque(f"gen{i}" for i in range(20))
+    picked = backend._next_queries(
+        _Session(queues=only_general, seen_urls=set(), seen_hashes=set())
+    )
+    assert Counter(c for c, _ in picked)["general"] == 20

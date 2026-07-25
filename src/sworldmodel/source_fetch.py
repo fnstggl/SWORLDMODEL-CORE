@@ -197,9 +197,9 @@ class RetrievalMode:
         return "current pages, fetched live; claims published after the cutoff stay inadmissible"
 
     def describe(self) -> str:
-        lag = self.lag_seconds
+        lag = self.lag_seconds  # positive when the run started AFTER the cutoff
         when = (
-            f"{abs(lag) / 3600:.1f}h {'before' if lag > 0 else 'after'} the cutoff"
+            f"{abs(lag) / 3600:.1f}h {'after' if lag > 0 else 'before'} the cutoff"
             if abs(lag) >= 60
             else "at the cutoff"
         )

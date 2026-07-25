@@ -88,12 +88,19 @@ class ResearchBudget:
         """The share of the query budget general discovery may not consume.
 
         Discovery has two channels — authoritative/official and general — and this is an
-        even split between them while both have work queued. It is a division of a
-        budget between channels, not a tuned preference: whenever the authoritative
-        queue empties, general discovery may use the whole remaining cap.
+        even split between them while both have work queued, with the odd query going to
+        the authoritative side. It is a division of a budget between channels, not a
+        tuned preference: whenever either queue empties, the other may use the whole
+        remaining cap.
+
+        Both directions of starvation have actually happened here. Authoritative queries
+        were once enqueued last and never ran; then the fix gave them unconditional
+        priority, and a live run spent all twenty queries on official domains — most of
+        which blocked or returned 403 — while eleven queued news queries never issued.
+        A share is a floor for one channel and a ceiling for it at the same time.
         """
 
-        return self.max_queries // 2
+        return (self.max_queries + 1) // 2
 
 
 @dataclass
@@ -438,17 +445,39 @@ class LiveResearchBackend:
 
         queues = session.queues
         picked: list[tuple[str, str]] = []
-        general_cap = self.budget.max_queries - self.budget.authoritative_query_reserve
+        reserve = self.budget.authoritative_query_reserve
+        general_cap = self.budget.max_queries - reserve
         while (
             len(picked) < self.budget.max_queries_per_round
             and session.queries_used + len(picked) < self.budget.max_queries
         ):
+            # Targeted repair queries are the caller naming exactly what is missing, so
+            # they always go first.
             if queues.targeted:
                 picked.append(("targeted", queues.targeted.popleft()))
-            elif queues.authoritative:
+                continue
+            # Then the two channels *share* the budget, each bounded by its own half.
+            #
+            # This used to be an elif chain that drained the authoritative queue
+            # completely before general discovery was reached, so the general branch's
+            # cap was unreachable and the general channel was the one starved — the
+            # opposite of the stated design. A live run spent all ten of its queries on
+            # official domains, was blocked or 403'd on most of them, and never issued
+            # any of its eleven queued news queries.
+            want_authoritative = queues.authoritative and queues.authoritative_used < reserve
+            want_general = queues.general and queues.general_used < general_cap
+            if want_authoritative:
                 queues.authoritative_used += 1
                 picked.append(("authoritative", queues.authoritative.popleft()))
-            elif queues.general and (queues.general_used < general_cap or not queues.authoritative):
+            elif want_general:
+                queues.general_used += 1
+                picked.append(("general", queues.general.popleft()))
+            elif queues.authoritative:
+                # The other channel is exhausted or over its share; the whole remaining
+                # cap belongs to whichever still has work.
+                queues.authoritative_used += 1
+                picked.append(("authoritative", queues.authoritative.popleft()))
+            elif queues.general:
                 queues.general_used += 1
                 picked.append(("general", queues.general.popleft()))
             else:
