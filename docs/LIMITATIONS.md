@@ -22,6 +22,14 @@ organization depends on whether the claims about it use agency language near the
 different evidence. Recognition can only ever *add* an organization candidate, never a
 person, so it cannot manufacture a participant the reality gate then demands.
 
+**A multi-token capitalized name that is a place is still classified as a person.**
+Every token being capitalized separates "EU member states" from "Andrew Bailey", and a
+head noun that is an instrument separates "Mercosur Agreement" from both. Neither
+separates "Saudi Arabia". The remaining defences are that the role word must sit next to
+the name before a seat is demanded (`coverage._near`), and that a name represented
+through an organization it belongs to is covered rather than absent. A place named in
+role terms right next to the name would still be owed a seat.
+
 **Some domains block this network outright.** `consilium.europa.eu` and `opec.org`
 returned HTTP 403 to every request, with a browser user-agent as well as ours. That is an
 external constraint and it is recorded per-URL in `diagnosis.json → fetching`; it is not
@@ -33,6 +41,20 @@ worked around.
 under a reduced budget (`live_research._followup_budget`), but the total across many
 repairs is bounded only by the outer `timeout`. A pathological question can spend a long
 time in repair before refusing.
+
+## Compilation
+
+**Arithmetic on an undetermined operand makes the whole expression undetermined, and
+the branch carries that as unresolved.** That is the honest outcome and it is also
+indistinguishable, in the result, from a world whose process never fired. The
+diagnosis separates them — `terminal_never_determined` names the terms actually
+written — but the forecast line does not.
+
+**Evidence as a producer is only as good as the citation the compiler attaches.** A
+terminal term whose initial value cites claims that do not in fact establish it will
+pass the producer gate. Claim ids are checked for existence against the evidence store,
+not for whether the claim supports the value. The pre-rollout review is the check that
+reads for support, and it is a model judgement, not a mechanical one.
 
 ## Runtime
 
