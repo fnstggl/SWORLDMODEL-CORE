@@ -37,7 +37,7 @@ from .semantic_plan import (
     parse_semantic_plan,
     validate_semantic_plan,
 )
-from .world_compiler import render_evidence
+from .world_compiler import _normalize_compilation, render_evidence
 
 # The exact output format, stated rather than guessed. Object types are universal world
 # structure; every real-world meaning inside them is open-ended natural language.
@@ -163,11 +163,17 @@ CONSISTENCY REQUIREMENTS (checked mechanically; a violation costs a revision rou
 - every entity with decides=true needs at least one affordance and cited evidence;
 - a precise initial number needs evidence_claim_ids, otherwise write "UNKNOWN";
 - the state the terminal reads must be written by an affordance or process occurrence,
-  or carry a cited initial value — and must never be set by an uncertainty or set to a
-  bare copy of an uncertainty's state;
+  or carry a cited initial value — and must never be set by an uncertainty, nor set
+  from uncertainty draws alone (bare copy OR arithmetic over only-uncertain states):
+  production needs at least one evidence-grounded input;
 - only actor_moment processes have participants, and every actor with an affordance
   must be a participant of at least one actor_moment — that dated occasion is the only
-  thing that ever invokes them."""
+  thing that ever invokes them;
+- every causally material item the EVIDENCE contains must appear somewhere in the plan:
+  as an entity, a state, a process, an uncertainty — or, when it is verified context
+  that shapes the world without being part of the mechanism, as a world_facts entry
+  citing its claim ids. A verified claim the plan silently omits is a coverage refusal;
+  this applies just as much when the record already settles the question."""
 
 _PLAN_RULES = """RULES FOR THE CAUSAL WORLD (they are about meaning, not syntax):
 
@@ -408,38 +414,46 @@ def semantic_compile_live(
 
     plan, raw = build(None, None, 0)
     errors = validate_semantic_plan(plan, as_of=as_of, horizon=horizon, known_claim_ids=known)
-    verdict = ""
-    reasons: list[str] = []
-    corrections: list[str] = []
-    if not errors:
-        verdict, reasons, corrections, rresp = _call_reviewer(
-            gateway, question, as_of, horizon, evidence, raw
-        )
-        if rresp is not None:
-            responses.append(rresp)
-        if verdict == "ABSTAIN":
+    if errors:
+        # Mechanical inconsistencies first, so the reviewer always judges a coherent
+        # plan: one validator-only round, with every finding named.
+        plan, raw = build(raw, [f"validator: {e}" for e in errors[:16]], 1)
+        errors = validate_semantic_plan(plan, as_of=as_of, horizon=horizon, known_claim_ids=known)
+        if errors:
             raise WorldIntegrityError(
-                "the independent reality review abstained: the evidence cannot support "
-                "a faithful causal world for this question",
+                "the semantic plan is invalid after a validator round: "
+                + "; ".join(errors[:6]),
                 details={
-                    "failure": "semantic_review_abstained",
-                    "recompilable": False,
-                    "reasons": reasons,
+                    "failure": "semantic_plan_invalid",
+                    "recompilable": True,
+                    "semantic_errors": errors,
                 },
             )
 
-    # One targeted revision, for validator errors and review corrections together.
-    fixes = [f"validator: {e}" for e in errors] + [f"reviewer: {c}" for c in corrections]
-    if fixes:
-        plan, raw = build(raw, fixes[:16], 1)
+    # The independent review judges every plan that will be lowered — including one
+    # the validator round produced. No plan reaches lowering unreviewed.
+    verdict, reasons, corrections, rresp = _call_reviewer(
+        gateway, question, as_of, horizon, evidence, raw
+    )
+    if rresp is not None:
+        responses.append(rresp)
+    if verdict == "ABSTAIN":
+        raise WorldIntegrityError(
+            "the independent reality review abstained: the evidence cannot support "
+            "a faithful causal world for this question",
+            details={
+                "failure": "semantic_review_abstained",
+                "recompilable": False,
+                "reasons": reasons,
+            },
+        )
+    if verdict == "REVISE" and corrections:
+        # One targeted revision on the reviewer's exact corrections, then one
+        # validator-only round if the revision broke a mechanical rule.
+        plan, raw = build(raw, [f"reviewer: {c}" for c in corrections[:16]], 2)
         errors = validate_semantic_plan(plan, as_of=as_of, horizon=horizon, known_claim_ids=known)
         if errors:
-            # The review revision may itself introduce a mechanical inconsistency (an
-            # undeclared name, a missing date). Those are validator findings, not
-            # reality findings, and they are cheap and precise — one validator-only
-            # round fixes them without reopening the review. A plan still invalid after
-            # that has a real coherence problem and refuses.
-            plan, raw = build(raw, [f"validator: {e}" for e in errors[:16]], 2)
+            plan, raw = build(raw, [f"validator: {e}" for e in errors[:16]], 3)
             errors = validate_semantic_plan(
                 plan, as_of=as_of, horizon=horizon, known_claim_ids=known
             )
@@ -454,8 +468,26 @@ def semantic_compile_live(
                 },
             )
 
+    def lower_guarded(p: SemanticPlan) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        # A lowering defect must surface as a named, recompilable refusal — never a
+        # bare KeyError/StopIteration escaping as an uncaught traceback past every
+        # diagnosis the run could have written.
+        try:
+            return lower_plan(p, structure_id=structure_id)
+        except (LoweringGap, WorldIntegrityError):
+            raise
+        except Exception as exc:  # noqa: BLE001 — see above
+            raise WorldIntegrityError(
+                f"the lowerer failed on a validated plan: {type(exc).__name__}: {exc}",
+                details={
+                    "failure": "semantic_lowering_error",
+                    "recompilable": True,
+                    "error": f"{type(exc).__name__}: {exc}",
+                },
+            ) from exc
+
     try:
-        compilation, mapping = lower_plan(plan)
+        compilation, mapping = lower_guarded(plan)
     except LoweringGap as gap:
         # One revision naming the gap, then the gap is real and refuses.
         plan, raw = build(
@@ -476,15 +508,21 @@ def semantic_compile_live(
                     "semantic_errors": errors,
                 },
             ) from gap
-        compilation, mapping = lower_plan(plan)
+        compilation, mapping = lower_guarded(plan)
 
-    spec = compilation.get("world_spec")
-    if isinstance(spec, dict):
-        spec.setdefault("structure_id", structure_id)
+    # One normalization boundary for both compiler modes: it synthesizes the `reality`
+    # block every consumer of a compilation reads (without it, `assemble_bundle` refuses
+    # and every repair round dies), and it strips any claim id not actually in this
+    # run's evidence — a fabricated citation must not survive to be read as grounding.
+    compilation = _normalize_compilation(compilation, view, as_of, horizon)
     compilation["_semantic"] = {
         "plan": raw,
         "mapping": mapping,
-        "review": {"verdict": verdict or "NOT_REVIEWED", "reasons": reasons},
+        "review": {
+            "verdict": verdict or "NOT_REVIEWED",
+            "reasons": reasons,
+            "revision_applied": bool(verdict == "REVISE" and corrections),
+        },
         "compiler_mode": "semantic",
     }
     return compilation, (responses[-1] if responses else None)

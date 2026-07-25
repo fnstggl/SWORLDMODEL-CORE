@@ -452,7 +452,7 @@ def test_a_bare_copy_of_an_uncertain_state_is_refused_at_the_semantic_level() ->
         }
     ]
     errors = _valid(data)
-    assert any("bare copy" in e for e in errors)
+    assert any("uncertainty draws alone" in e for e in errors)
 
 
 def test_unsupported_meaning_returns_a_named_lowering_gap() -> None:
@@ -515,6 +515,315 @@ def test_unreadable_shapes_raise_precise_field_errors() -> None:
     with pytest.raises(SemanticPlanError) as exc:
         parse_semantic_plan({"resolution": {}, "terminal": {"form": "no_such_form"}})
     assert any("unknown terminal form" in e for e in exc.value.errors)
+
+
+def test_a_chained_operational_process_actually_fires_through_the_real_engine() -> None:
+    """Dependency chains execute, and UNKNOWN stays unresolved — proven by running.
+
+    The runtime schedules successors from `next_nodes` alone; an earlier lowering
+    chained occurrences with `after_node` only, so every dependent occurrence was inert
+    while still counting as a terminal producer — the compile gates passed a world whose
+    deciding event could never happen. This lowers a two-stage accumulation (a dated
+    first run, a dependent second run carrying the crossing amount), executes it through
+    the REAL engine, and asserts the terminal resolved YES from the produced total. The
+    same run proves the honest-unresolved contract: a second world whose only producer
+    reads an UNKNOWN driver must report unresolved, never a manufactured NO.
+    """
+
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from _fakes import ProgrammableGateway, build_bundle
+
+    from sworldmodel.engine import run
+    from sworldmodel.models import ResolutionContract
+    from sworldmodel.world_compiler import compile_world
+
+    def chained(second_stage_changes: list[dict]) -> dict:
+        return {
+            "resolution": {
+                "question": "Will the canal system move more than 400 barges this season?",
+                "yes_condition": "Total barges moved exceeds 400.",
+                "subject_entity": "Canal Authority",
+                "resolution_units": "barges moved",
+                "target_outcome": "more than 400 barges moved",
+                "expected_participants": None,
+                "evidence_claim_ids": ["c-k1"],
+            },
+            "entities": [
+                {
+                    "name": "Canal Authority",
+                    "structural_type": "institution",
+                    "role": "operates the locks",
+                    "representation_scale": "organization",
+                    "decides": False,
+                    "authority": "operates the canal",
+                    "why_material": "its operations produce the total",
+                    "evidence_claim_ids": ["c-k1"],
+                }
+            ],
+            "states": [
+                {
+                    "name": "barges moved",
+                    "owner": "world",
+                    "state_type": "quantity",
+                    "unit": "barges",
+                    "initial": 0,
+                    "why_material": "the terminal reads it",
+                    "evidence_claim_ids": ["c-k1"],
+                }
+            ],
+            "events": [],
+            "affordances": [],
+            "processes": [
+                {
+                    "name": "early season locks",
+                    "meaning": "the first lock cycle moves a verified count",
+                    "kind": "operational",
+                    "occurrences": [
+                        {
+                            "description": "first cycle",
+                            "at": "2026-01-20T00:00:00+00:00",
+                            "changes": [
+                                {"op": "increase", "target": "barges moved", "amount": 150}
+                            ],
+                        }
+                    ],
+                    "evidence_claim_ids": ["c-k1"],
+                },
+                {
+                    "name": "late season locks",
+                    "meaning": "the second cycle follows the first",
+                    "kind": "operational",
+                    "occurrences": [
+                        {
+                            "description": "second cycle",
+                            "after_process": "early season locks",
+                            "delay_seconds": 3600,
+                            "changes": second_stage_changes,
+                        }
+                    ],
+                    "evidence_claim_ids": ["c-k1"],
+                },
+            ],
+            "uncertainties": [],
+            "terminal": {
+                "form": "quantity_comparison",
+                "state": "barges moved",
+                "comparison": "greater_than",
+                "threshold": 400,
+            },
+            "terminal_producer_note": "The total is produced by the two lock cycles; "
+            "nothing initializes it above zero and no uncertainty writes it.",
+            "world_facts": [],
+        }
+
+    def run_world(plan_dict: dict):
+        compilation, _ = lower_plan(parse_semantic_plan(plan_dict))
+        data = {
+            "world_spec": compilation["world_spec"],
+            "uncertainties": compilation["uncertainties"],
+            "world_facts": compilation["world_facts"],
+            "required_reality_facts": compilation["required_reality_facts"],
+            "reality": {
+                "subject_entity": compilation["subject_entity"],
+                "resolution_units": compilation["resolution_units"],
+                "target_outcome": compilation["target_outcome"],
+                "expected_participants": compilation["expected_participants"],
+                "as_of": AS_OF.isoformat(),
+                "horizon": HORIZON.isoformat(),
+            },
+            "claims": [
+                {
+                    "id": "c-k1",
+                    "proposition": "The Canal Authority operates two lock cycles per "
+                    "season, the first moving 150 barges",
+                    "value": "150 first cycle",
+                    "entities": ["Canal Authority"],
+                    "published_at": "2026-01-05T00:00:00+00:00",
+                }
+            ],
+        }
+        bundle = build_bundle(data)
+        contract = ResolutionContract(
+            question=str(plan_dict["resolution"]["question"]),
+            as_of=AS_OF,
+            horizon=HORIZON,
+            subject_entity=bundle.subject_entity,
+            resolution_units=bundle.resolution_units,
+            terminal=bundle.spec.terminal,
+            target_outcome=bundle.target_outcome,
+            expected_participants=bundle.expected_participants,
+        )
+        gw = ProgrammableGateway({"reflect": {"beliefs_update": [], "new_memories": []}})
+        compiled = compile_world(
+            contract,
+            bundle.evidence_store.view(AS_OF),
+            bundle.spec,
+            bundle.uncertainties,
+            bundle.world_facts,
+            gateway=gw,
+            seed=0,
+            max_branches=4,
+        )
+        return run(compiled, gw, seed=0)
+
+    # The dependent second cycle carries the crossing amount: if next_nodes chaining is
+    # broken it never fires, the total stays 150, and the terminal would resolve NO.
+    produced = run_world(chained([{"op": "increase", "target": "barges moved", "amount": 300}]))
+    outcomes = list(produced.branch_outcomes)
+    assert outcomes and all(o.resolved and o.outcome == "YES" for o in outcomes), outcomes
+
+    # An UNKNOWN driver must surface as honest unresolved, never a manufactured NO: the
+    # second cycle scales an UNKNOWN rate, so the total is undetermined at the terminal.
+    unknown_plan = chained(
+        [
+            {
+                "op": "increase",
+                "target": "barges moved",
+                "amount": {
+                    "kind": "product",
+                    "parts": [
+                        {"kind": "literal", "value": 300},
+                        {"kind": "state", "state": "late season throughput factor"},
+                    ],
+                },
+            }
+        ]
+    )
+    unknown_plan["states"].append(
+        {
+            "name": "late season throughput factor",
+            "owner": "world",
+            "state_type": "quantity",
+            "unit": "fraction",
+            "initial": "UNKNOWN",
+            "why_material": "scales the second cycle",
+            "evidence_claim_ids": [],
+        }
+    )
+    undetermined = run_world(unknown_plan)
+    outcomes = list(undetermined.branch_outcomes)
+    assert outcomes and all(not o.resolved for o in outcomes), outcomes
+
+
+def test_a_pure_factual_resolution_lowers_and_clears_the_gates() -> None:
+    """The sanctioned 'already settled' encoding: one cited state, no mechanism.
+
+    A live OPEC+ slice compiled exactly this — the record established the announcements
+    had already been made — and the nothing_can_act gate refused it for having no
+    actions, which is what a factual resolution deliberately has none of. The gate now
+    recognizes the pure record shape: every terminal term evidence-established, nothing
+    acting, no uncertainty near the terminal.
+    """
+
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from _fakes import ProgrammableGateway, build_bundle
+
+    from sworldmodel.models import ResolutionContract
+    from sworldmodel.world_compiler import compile_world
+
+    plan = {
+        "resolution": {
+            "question": "Did the reservoir authority publish its annual level report "
+            "before February 1?",
+            "yes_condition": "The report is already published, per the cited record.",
+            "subject_entity": "Reservoir Authority",
+            "resolution_units": "a published report",
+            "target_outcome": "the report is published",
+            "expected_participants": None,
+            "evidence_claim_ids": ["c-f1"],
+        },
+        "entities": [
+            {
+                "name": "Reservoir Authority",
+                "structural_type": "institution",
+                "role": "publishes the annual report",
+                "representation_scale": "organization",
+                "decides": False,
+                "authority": "publishes official reports",
+                "why_material": "its record settles the question",
+                "evidence_claim_ids": ["c-f1"],
+            }
+        ],
+        "states": [
+            {
+                "name": "annual report published",
+                "owner": "world",
+                "state_type": "boolean",
+                "initial": True,
+                "why_material": "the terminal reads it",
+                "evidence_claim_ids": ["c-f1"],
+            }
+        ],
+        "events": [],
+        "affordances": [],
+        "processes": [],
+        "uncertainties": [],
+        "terminal": {"form": "state_equals", "state": "annual report published", "value": True},
+        "terminal_producer_note": "The cited record establishes publication before the "
+        "window opened; nothing needs to act and nothing does.",
+        "world_facts": [],
+    }
+    assert _valid_with(plan, {"c-f1"}) == []
+    compilation, _ = lower_plan(parse_semantic_plan(plan))
+    data = {
+        "world_spec": compilation["world_spec"],
+        "uncertainties": compilation["uncertainties"],
+        "world_facts": compilation["world_facts"],
+        "required_reality_facts": compilation["required_reality_facts"],
+        "reality": {
+            "subject_entity": compilation["subject_entity"],
+            "resolution_units": compilation["resolution_units"],
+            "target_outcome": compilation["target_outcome"],
+            "expected_participants": compilation["expected_participants"],
+            "as_of": AS_OF.isoformat(),
+            "horizon": HORIZON.isoformat(),
+        },
+        "claims": [
+            {
+                "id": "c-f1",
+                "proposition": "The Reservoir Authority published its annual level "
+                "report on January 12",
+                "value": "published January 12",
+                "entities": ["Reservoir Authority"],
+                "published_at": "2026-01-12T00:00:00+00:00",
+            }
+        ],
+    }
+    bundle = build_bundle(data)
+    contract = ResolutionContract(
+        question=str(plan["resolution"]["question"]),  # type: ignore[index]
+        as_of=AS_OF,
+        horizon=HORIZON,
+        subject_entity=bundle.subject_entity,
+        resolution_units=bundle.resolution_units,
+        terminal=bundle.spec.terminal,
+        target_outcome=bundle.target_outcome,
+        expected_participants=bundle.expected_participants,
+    )
+    gw = ProgrammableGateway({"reflect": {"beliefs_update": [], "new_memories": []}})
+    compiled = compile_world(
+        contract,
+        bundle.evidence_store.view(AS_OF),
+        bundle.spec,
+        bundle.uncertainties,
+        bundle.world_facts,
+        gateway=gw,
+        seed=0,
+        max_branches=4,
+    )
+    assert not compiled.spec.actions and not compiled.spec.external_processes
+
+
+def _valid_with(data: dict, ids: set[str]) -> list[str]:
+    return validate_semantic_plan(
+        parse_semantic_plan(data), as_of=AS_OF, horizon=HORIZON, known_claim_ids=frozenset(ids)
+    )
 
 
 def test_the_lowered_world_clears_the_existing_gates_unchanged() -> None:

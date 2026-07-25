@@ -1240,16 +1240,26 @@ Return JSON {{"reconcilable": true|false, "reading": "<one line: how both are tr
         trace.claim_count = len(store.all())
         trace.admissible_claim_count = len(store.view(as_of).available())
         trace.contradictions = [f"{a}<>{b}" for a, b in store.contradictions()]
-        if self.compiler_mode == "semantic":
-            from .semantic_compile import semantic_compile_live
+        try:
+            if self.compiler_mode == "semantic":
+                from .semantic_compile import semantic_compile_live
 
-            compilation, resp = semantic_compile_live(
-                self.gateway, question, as_of, horizon, store.view(as_of)
-            )
-        else:
-            compilation, resp = compile_world_spec_live(
-                self.gateway, question, as_of, horizon, store.view(as_of)
-            )
+                compilation, resp = semantic_compile_live(
+                    self.gateway, question, as_of, horizon, store.view(as_of)
+                )
+            else:
+                compilation, resp = compile_world_spec_live(
+                    self.gateway, question, as_of, horizon, store.view(as_of)
+                )
+        except WorldIntegrityError as exc:
+            # The research preceding this refusal is COMPLETE — queries, sources,
+            # claims, the whole record. It rides on the exception so the caller can
+            # checkpoint it and name the true stage; without this, a compile-stage
+            # refusal erased the run's entire research record and its diagnosis read
+            # the zeros as a discovery failure.
+            exc.partial_live_trace = trace.to_dict(plan, store)  # type: ignore[attr-defined]
+            exc.partial_evidence_store = store  # type: ignore[attr-defined]
+            raise
         data = {
             "world_spec": compilation["world_spec"],
             "uncertainties": compilation.get("uncertainties", []),

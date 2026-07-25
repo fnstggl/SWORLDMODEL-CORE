@@ -389,9 +389,9 @@ def parse_semantic_plan(data: dict[str, Any]) -> SemanticPlan:
             continue
         st = _s(e, "structural_type", w, errors)
         scale = _s(e, "representation_scale", w, errors)
-        if st and st not in STRUCTURAL_TYPES:
+        if st not in STRUCTURAL_TYPES:
             errors.append(f"{w}: structural_type {st!r} not in {list(STRUCTURAL_TYPES)}")
-        if scale and scale not in REPRESENTATION_SCALES:
+        if scale not in REPRESENTATION_SCALES:
             errors.append(f"{w}: representation_scale {scale!r} not in {list(REPRESENTATION_SCALES)}")
         rc = e.get("represents_count")
         entities.append(
@@ -415,7 +415,7 @@ def parse_semantic_plan(data: dict[str, Any]) -> SemanticPlan:
             errors.append(f"{w}: must be an object")
             continue
         stype = _s(s, "state_type", w, errors)
-        if stype and stype not in STATE_TYPES:
+        if stype not in STATE_TYPES:
             errors.append(f"{w}: state_type {stype!r} not in {list(STATE_TYPES)}")
         states.append(
             SemanticState(
@@ -488,7 +488,7 @@ def parse_semantic_plan(data: dict[str, Any]) -> SemanticPlan:
             errors.append(f"{w}: must be an object")
             continue
         kind = _s(p, "kind", w, errors)
-        if kind and kind not in PROCESS_KINDS:
+        if kind not in PROCESS_KINDS:
             errors.append(f"{w}: kind {kind!r} not in {list(PROCESS_KINDS)}")
         occurrences: list[SemanticOccurrence] = []
         for j, o in enumerate(p.get("occurrences") or []):
@@ -694,6 +694,10 @@ def validate_semantic_plan(
                 if c.target not in event_names:
                     errors.append(f"{where}: records undeclared event {c.target!r}")
             elif c.op == "send":
+                if not c.recipients:
+                    # An audience-less delivery lowers to a public broadcast — the
+                    # opposite of what "send to named recipients" means.
+                    errors.append(f"{where}: send needs at least one recipient")
                 for r in c.recipients:
                     if r not in entity_names:
                         errors.append(f"{where}: sends to undeclared entity {r!r}")
@@ -822,6 +826,14 @@ def validate_semantic_plan(
                 if abs(total - 1.0) > 1e-6:
                     errors.append(f"uncertainty {u.name!r}: weights sum to {total}, not 1.0")
         for alt in u.alternatives:
+            if alt.weight is None and alt.provenance != "symmetric_ignorance_assumption":
+                # A null weight means "nothing supports a split" — code will mint the
+                # uniform one, and a code-minted weight cannot wear a grounded label.
+                errors.append(
+                    f"uncertainty {u.name!r}: an alternative with no weight must carry "
+                    "provenance symmetric_ignorance_assumption — a split nothing "
+                    f"supports cannot be labeled {alt.provenance!r}"
+                )
             if alt.weight is not None and alt.provenance == "symmetric_ignorance_assumption":
                 continue
             if alt.weight is not None and not (alt.grounding or alt.evidence_claim_ids):
@@ -882,6 +894,12 @@ def validate_semantic_plan(
         if not t.state or t.state not in state_names:
             errors.append(f"{where}: names undeclared state {t.state!r}")
             return
+        if t.form == "state_equals" and t.value is None:
+            errors.append(
+                f"{where}: state_equals over {t.state!r} needs a value — without one "
+                "the comparison is against nothing and the answer is manufactured by "
+                "an absent key"
+            )
         state = next(s for s in plan.states if s.name == t.state)
         established = state.initial not in (None, UNKNOWN) and cited(state.evidence_claim_ids)
         if t.state not in written_states and not established:
@@ -895,36 +913,37 @@ def validate_semantic_plan(
                 "branch weights would be the answer. Put the uncertainty on a driver "
                 "and let the world produce the resolving state"
             )
-        # The one-hop launder, at the semantic level: a producer that only copies an
-        # uncertain state into the terminal state.
+        # The launder, at the semantic level: a producer whose value for the terminal
+        # state reads nothing but uncertainty draws. A bare copy is the one-hop form; a
+        # product of two draws is the same defect in arithmetic clothing — a live Tesla
+        # slice computed deliveries as battery_packs × efficiency with both factors
+        # uncertain, so the "production model" was a pure function of the branch draw
+        # and the weights were still the whole answer. Production needs at least one
+        # grounded input.
+        def launders(value: SemanticValue | None) -> bool:
+            if value is None or value.kind == "literal":
+                return False
+            reads = value.states_read()
+            return bool(reads) and reads <= uncertain_states
+
         for a in plan.affordances:
             for c in a.changes:
-                if (
-                    c.op == "set"
-                    and c.target == t.state
-                    and c.value is not None
-                    and c.value.kind == "state"
-                    and c.value.state in uncertain_states
-                ):
+                if c.op == "set" and c.target == t.state and launders(c.value):
                     errors.append(
-                        f"{where}: affordance {a.name!r} sets {t.state!r} to a bare copy "
-                        f"of uncertain state {c.value.state!r} — model what produces the "
-                        "value, not a rubber stamp of the draw"
+                        f"{where}: affordance {a.name!r} sets {t.state!r} from "
+                        "uncertainty draws alone — model what produces the value with "
+                        "at least one evidence-grounded input (a cited base, rate or "
+                        "level), and keep the uncertainty on a driver"
                     )
         for p in plan.processes:
             for o in p.occurrences:
                 for c in o.changes:
-                    if (
-                        c.op == "set"
-                        and c.target == t.state
-                        and c.value is not None
-                        and c.value.kind == "state"
-                        and c.value.state in uncertain_states
-                    ):
+                    if c.op == "set" and c.target == t.state and launders(c.value):
                         errors.append(
-                            f"{where}: process {p.name!r} sets {t.state!r} to a bare copy "
-                            f"of uncertain state {c.value.state!r} — a copy is not "
-                            "production; put the uncertainty on a driver"
+                            f"{where}: process {p.name!r} sets {t.state!r} from "
+                            "uncertainty draws alone — a value computed only from draws "
+                            "is the branch weights wearing arithmetic; ground at least "
+                            "one input in cited evidence"
                         )
         if t.form == "quantity_comparison":
             if state.state_type != "quantity":

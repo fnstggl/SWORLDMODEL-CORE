@@ -251,6 +251,7 @@ def cmd_forecast(args: argparse.Namespace) -> int:
             failure_stage="interrupted",
             wall_seconds=wall,
             model_calls=config.gateway.call_count,
+            compiler_mode=config.compiler_mode,
         )
         if out is not None:
             out.mkdir(parents=True, exist_ok=True)
@@ -274,6 +275,7 @@ def cmd_forecast(args: argparse.Namespace) -> int:
             failure_stage=refusal.stage,
             wall_seconds=wall,
             model_calls=config.gateway.call_count,
+            compiler_mode=config.compiler_mode,
         )
         _write_diagnosis(out, diagnosis, refusal)
         print(f"REFUSED at {refusal.stage}: {refusal.__cause__ or refusal}", file=sys.stderr)
@@ -302,6 +304,7 @@ def cmd_forecast(args: argparse.Namespace) -> int:
             forecast_integrity=result.integrity,
             wall_seconds=wall,
             model_calls=config.gateway.call_count,
+            compiler_mode=config.compiler_mode,
         )
         (out / "diagnosis.json").write_text(canonical_json(diagnosis.as_dict()) + "\n")
         # The same three artifacts a refusal writes. A completed run is the one whose

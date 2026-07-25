@@ -102,6 +102,10 @@ class RunDiagnosis:
     wall_seconds: float = 0.0
     model_calls: int = 0
     notes: list[str] = field(default_factory=list)
+    # Which compiler built (or failed to build) this run's world. A property of the
+    # run's configuration, recorded unconditionally — a refused semantic run and a
+    # direct run must never be indistinguishable in their artifacts.
+    compiler_mode: str = "direct"
 
     # -- sections ------------------------------------------------------------
 
@@ -350,6 +354,7 @@ class RunDiagnosis:
             "root_cause": self.root_cause(),
             "root_cause_vocabulary": list(ROOT_CAUSES),
             "notes": self.notes,
+            "compiler_mode": self.compiler_mode,
         }
 
     # -- classification ------------------------------------------------------
@@ -367,6 +372,17 @@ class RunDiagnosis:
         fetch = self.fetching()
         disc = self.discovery()
         gate = self.integrity_and_grounding().get("stopped_at_gate")
+
+        # Absence of a trace is not evidence about research. A compile-stage refusal
+        # that fires before the bundle is checkpointed leaves every research count at
+        # zero — reading those zeros as "no candidate URL was discovered at all" writes
+        # a fabricated discovery failure into the record of a run that issued a full
+        # research pass. Every other research-stage cause below requires a POSITIVE
+        # count and is safe; only the zero-URL check must distinguish "the record says
+        # zero" from "there is no record".
+        research_recorded = bool(self._trace()) or bool(
+            disc.get("urls_considered_count") or disc.get("queries_used")
+        )
 
         if ext["claims_stored"] == 0 and ext["claim_candidates"] > 0:
             out.append(
@@ -392,7 +408,7 @@ class RunDiagnosis:
                     f"{fetch['rejection_reasons']}",
                 }
             )
-        if disc["urls_considered_count"] == 0:
+        if research_recorded and disc["urls_considered_count"] == 0:
             out.append(
                 {"cause": "discovery_failure", "why": "no candidate URL was discovered at all"}
             )
@@ -459,7 +475,7 @@ class RunDiagnosis:
                     "why": "an actor was compiled with no entity behind it",
                 }
             )
-        if gate in ("semantic_plan_invalid", "lowering_gap"):
+        if gate in ("semantic_plan_invalid", "lowering_gap", "semantic_lowering_error"):
             # The semantic compiler's own refusals. An invalid plan after revision is
             # the planner failing to describe a coherent world; a lowering gap is a
             # meaning the universal change mapping cannot yet represent. Both are

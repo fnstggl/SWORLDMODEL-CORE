@@ -581,6 +581,49 @@ def _terminal_laundered_from_uncertainty(exc: WorldIntegrityError, subject: str)
     )
 
 
+def _semantic_plan_invalid(exc: WorldIntegrityError, subject: str) -> RepairPlan:
+    errors = _strings(exc.details.get("semantic_errors"))
+    return RepairPlan(
+        failure="semantic_plan_invalid",
+        missing_element="a semantic plan whose references and producers all hold",
+        queries=(),
+        instruction=(
+            "Your previous semantic plan did not hold together mechanically: "
+            f"{errors[:8]}. Rebuild the plan fixing exactly these, keeping every "
+            "judgement about the world you already made that these errors do not touch."
+        ),
+    )
+
+
+def _lowering_gap(exc: WorldIntegrityError, subject: str) -> RepairPlan:
+    construct = str(exc.details.get("unsupported construct") or "the unsupported construct")
+    return RepairPlan(
+        failure="lowering_gap",
+        missing_element=f"a representable expression of {construct}",
+        queries=(),
+        instruction=(
+            f"The universal change mapping cannot represent {construct}: "
+            f"{exc.details.get('why existing universal changes cannot represent it')}. "
+            "Express the same causal meaning using the universal operations that do "
+            "exist — declared events, dated or chained process occurrences, state "
+            "changes with grounded inputs — without weakening what the world means."
+        ),
+    )
+
+
+def _semantic_lowering_error(exc: WorldIntegrityError, subject: str) -> RepairPlan:
+    return RepairPlan(
+        failure="semantic_lowering_error",
+        missing_element="a plan the lowerer can carry into the runtime",
+        queries=(),
+        instruction=(
+            "Lowering your previous plan failed mechanically: "
+            f"{exc.details.get('error')}. Re-emit the plan with every declaration "
+            "complete and every enum from the schema's own lists."
+        ),
+    )
+
+
 def _orphan_actors(exc: WorldIntegrityError, subject: str) -> RepairPlan:
     orphans = _strings(exc.details.get("orphan_actors"))
     return RepairPlan(
@@ -641,6 +684,9 @@ _PLANS = {
     "uncertainty_writes_terminal": _uncertainty_writes_terminal,
     "terminal_laundered_from_uncertainty": _terminal_laundered_from_uncertainty,
     "terminal_preresolved_without_evidence": _terminal_preresolved_without_evidence,
+    "semantic_plan_invalid": _semantic_plan_invalid,
+    "lowering_gap": _lowering_gap,
+    "semantic_lowering_error": _semantic_lowering_error,
     "terminal_reads_no_world_state": _terminal_reads_no_world_state,
     "decisive_evidence_contradiction": _decisive_evidence_contradiction,
     "unknown_expression_operator": _unknown_expression_operator,

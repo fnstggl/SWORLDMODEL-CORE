@@ -141,6 +141,24 @@ def _compile_with_repair(
                 )
                 raise
 
+            if time.monotonic() > deadline:
+                # Checked BEFORE starting an attempt as well as after one returns: a
+                # semantic-mode attempt costs several provider calls, and a deadline
+                # that only fires post-attempt lets a single repair overrun the whole
+                # compile budget before anyone looks at the clock.
+                log.record(
+                    plan,
+                    failure=failure,
+                    message=str(exc),
+                    claims_before=before,
+                    claims_after=before,
+                    outcome=(
+                        f"repair budget of {config.max_compile_seconds:.0f}s exhausted "
+                        "before the attempt; the last diagnosis stands"
+                    ),
+                )
+                raise
+
             repaired = _repair_once(question, as_of, horizon, bundle, config, plan)
             after = len(repaired.evidence_store.claims) if repaired else before
             if repaired is None:
@@ -269,6 +287,51 @@ def _repair_once(
     return _recompile(question, as_of, horizon, bundle, config, plan.instruction)
 
 
+def compile_for_mode(
+    config: ForecastConfig,
+    question: str,
+    as_of: datetime,
+    horizon: datetime,
+    view: Any,
+    *,
+    extra_instruction: str = "",
+    structure_id: str = "primary",
+) -> dict[str, Any]:
+    """The one compile entry point both modes share, at every call site.
+
+    Three places compile a world from evidence — the initial research compile, the
+    repair recompile, and each structural alternative — and a mode that exists at two
+    of them is a silent mixed-mode run at the third. Routing all of them here makes
+    missing a site impossible, and stamps the mode into the compilation so the trace
+    can always say which compiler produced which structure.
+    """
+
+    if getattr(config, "compiler_mode", "direct") == "semantic":
+        from .semantic_compile import semantic_compile_live
+
+        data, _ = semantic_compile_live(
+            config.gateway,
+            question,
+            as_of,
+            horizon,
+            view,
+            extra_instruction=extra_instruction,
+            structure_id=structure_id,
+        )
+    else:
+        data, _ = compile_world_spec_live(
+            config.gateway,
+            question,
+            as_of,
+            horizon,
+            view,
+            extra_instruction=extra_instruction,
+            structure_id=structure_id,
+        )
+    data["compiler_mode"] = getattr(config, "compiler_mode", "direct")
+    return data
+
+
 def _recompile(
     question: str,
     as_of: datetime,
@@ -299,28 +362,15 @@ def _recompile(
         # the direct compiler re-authors the WorldSpec, the semantic path re-plans and
         # re-lowers. Neither mode gets a private repair mechanism, which keeps the A/B
         # comparison honest.
-        if getattr(config, "compiler_mode", "direct") == "semantic":
-            from .semantic_compile import semantic_compile_live
-
-            data, _ = semantic_compile_live(
-                config.gateway,
-                question,
-                as_of,
-                horizon,
-                bundle.evidence_store.view(as_of),
-                extra_instruction=instruction,
-                structure_id="primary",
-            )
-        else:
-            data, _ = compile_world_spec_live(
-                config.gateway,
-                question,
-                as_of,
-                horizon,
-                bundle.evidence_store.view(as_of),
-                extra_instruction=instruction,
-                structure_id="primary",
-            )
+        data = compile_for_mode(
+            config,
+            question,
+            as_of,
+            horizon,
+            bundle.evidence_store.view(as_of),
+            extra_instruction=instruction,
+            structure_id="primary",
+        )
         # Carry the research record forward. A compiler-only repair does no new
         # research, so `assemble_bundle` has no trace to build — and without this the
         # record of every query, source and rejection made before the repair was dropped
@@ -328,13 +378,29 @@ def _recompile(
         # fetched, 0 claims" in its own diagnosis while its audit showed 38 extractions
         # and 399 HTTP requests.
         #
+        # A semantic repair round's plan and mapping ride the trace under a per-round
+        # key, so the artifact a simulated world is audited against is the plan that
+        # actually produced it, not the first round's.
+        live_trace = dict(bundle.live_trace or {})
+        if "_semantic" in data:
+            rounds = list(live_trace.get("semantic_repair_rounds") or [])
+            rounds.append(data["_semantic"])
+            live_trace["semantic_repair_rounds"] = rounds
+        #
         # Parsing is inside the try for a reason. A live OPEC+ run died on
         # `float(None)` in the resource parser *here*, during a repair recompile, where
         # nothing was catching it — past every gate that would have turned it into a
         # diagnosis, out through run_forecast, leaving a traceback and no artifacts at
         # all. A repair that cannot be read is a repair that did not happen.
-        return replace(assemble_bundle(bundle.evidence_store, data), live_trace=bundle.live_trace)
-    except (GatewayError, WorldIntegrityError, ValueError, KeyError, TypeError, IndexError):
+        return replace(assemble_bundle(bundle.evidence_store, data), live_trace=live_trace)
+    except WorldIntegrityError as exc:
+        if exc.details.get("recompilable") is False:
+            # A reasoned, final refusal — the review abstained, the evidence cannot
+            # support any faithful world — must propagate as itself, never be melted
+            # into "the repaired compilation could not be produced".
+            raise
+        return None
+    except (GatewayError, ValueError, KeyError, TypeError, IndexError):
         return None
 
 
@@ -393,8 +459,8 @@ def _compile_alternative(
     built from two different sets of facts.
     """
 
-    data, _ = compile_world_spec_live(
-        config.gateway,
+    data = compile_for_mode(
+        config,
         question,
         as_of,
         horizon,
@@ -476,12 +542,16 @@ def _checkpoint_research(config: ForecastConfig, bundle: ResearchBundle) -> None
     lose a run, which is the opposite of the point.
     """
 
+    _write_research_files(config, bundle.live_trace or {}, bundle.evidence_store)
+
+
+def _write_research_files(config: ForecastConfig, live_trace: dict[str, Any], store: Any) -> None:
     out = config.trace_dir
     if out is None:
         return
     try:
         out.mkdir(parents=True, exist_ok=True)
-        (out / "research_trace.json").write_text(canonical_json(bundle.live_trace or {}) + "\n")
+        (out / "research_trace.json").write_text(canonical_json(live_trace) + "\n")
         (out / "evidence_store.json").write_text(
             canonical_json(
                 [
@@ -495,13 +565,32 @@ def _checkpoint_research(config: ForecastConfig, bundle: ResearchBundle) -> None
                         "supporting_excerpt": c.supporting_excerpt,
                         "available_at": c.available_at.isoformat(),
                     }
-                    for c in bundle.evidence_store.all()
+                    for c in store.all()
                 ]
             )
             + "\n"
         )
     except OSError:
         pass
+
+
+def _checkpoint_partial(config: ForecastConfig, exc: BaseException) -> bool:
+    """Persist research carried by a refusal that fired before the bundle existed.
+
+    The initial compile runs inside ``research()``, so its refusal used to erase the
+    entire research record: no trace, no store, and a diagnosis that read the resulting
+    zeros as "no candidate URL was discovered at all". A compile-stage refusal now
+    carries the completed research on the exception, and it is written here exactly as
+    the successful path would have written it. Returns whether research was attached —
+    which is also the proof the run reached compilation, not a research failure.
+    """
+
+    live_trace = getattr(exc, "partial_live_trace", None)
+    store = getattr(exc, "partial_evidence_store", None)
+    if live_trace is None or store is None:
+        return False
+    _write_research_files(config, dict(live_trace), store)
+    return True
 
 
 def run_forecast(
@@ -518,11 +607,21 @@ def run_forecast(
         # had got, not why it ended.
         raise
     except SWorldModelError as exc:
-        raise ForecastRefused(exc, stage="research", repair_log=log) from exc
+        # The initial compile runs inside research(); when IT refuses, the research
+        # that preceded it is complete and rides on the exception. Writing it and
+        # naming the true stage keeps a compile refusal from erasing twenty minutes of
+        # retrieval and being misfiled as a discovery failure.
+        reached_compile = _checkpoint_partial(config, exc)
+        raise ForecastRefused(
+            exc, stage="compilation" if reached_compile else "research", repair_log=log
+        ) from exc
     except (TypeError, ValueError, KeyError) as exc:
         # A parser or provider shape nobody anticipated. It is still a run that stopped,
         # and it still owes a diagnosis rather than a traceback.
-        raise ForecastRefused(exc, stage="research", repair_log=log) from exc
+        reached_compile = _checkpoint_partial(config, exc)
+        raise ForecastRefused(
+            exc, stage="compilation" if reached_compile else "research", repair_log=log
+        ) from exc
     _checkpoint_research(config, bundle)
     attempted: list[ResearchBundle] = []
     try:

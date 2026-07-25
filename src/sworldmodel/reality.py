@@ -60,7 +60,17 @@ def verify_reality(
     #    because nothing remains to happen. That is a faithful factual resolution, not an
     #    empty world. This gate ran before the producer-lineage gate that already knows
     #    this, and refused the honest world first; it now defers to the same rule.
-    if not actors and not spec.external_processes and not _terminal_established_by_evidence(spec):
+    # Process NODES that carry effects are producers too: an operational chain lowered
+    # entirely to dated-and-dependent nodes — no actors, no external processes — is a
+    # world in which things happen and the outcome is produced. Counting only actors
+    # and externals refused exactly that world.
+    productive_nodes = any(getattr(n, "effects", ()) for n in spec.process.nodes)
+    if (
+        not actors
+        and not spec.external_processes
+        and not productive_nodes
+        and not _terminal_established_by_evidence(spec)
+    ):
         raise WorldIntegrityError(
             "the compiled world has no causal producer — no actor whose decisions and "
             "no external or operational process whose behavior could produce this "

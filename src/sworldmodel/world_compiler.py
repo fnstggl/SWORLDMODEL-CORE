@@ -1247,7 +1247,48 @@ def enforce_outcome_is_produced(
     action must be able to move at least one term the terminal reads.
     """
 
-    if not spec.actions and not spec.external_processes:
+    # A question the record has already answered is the one legitimate world in which
+    # nothing acts and nothing runs: every term the terminal reads is established by
+    # cited evidence, and demanding a producer would force a future event to be
+    # invented for an outcome that already happened. This must be judged BEFORE the
+    # nothing-can-act refusal below, or the sanctioned encoding of "already settled" —
+    # a cited initial value and deliberately no mechanism — is refused for being
+    # exactly what it is. A live OPEC+ compilation was: two claims established the
+    # announcements had already been made, the world was one cited field, and the gate
+    # killed it for having no actions.
+    #
+    # Deliberately narrow: only the pure factual-resolution shape takes this path —
+    # no actions, no nodes, no external processes, every terminal term evidence-
+    # established, and no uncertainty touching any terminal term. A world with any
+    # mechanism, or any branch draw near the terminal, is judged by the full gate.
+    established = terminal_producers(spec)
+    pure_record = (
+        not spec.actions and not spec.external_processes and not spec.process.nodes
+    )
+    uncertainty_touched = {
+        f"field:{name}"
+        for u in uncertainties
+        for o in u.outcomes
+        for name, _ in o.field_effects
+    } | {f"field:{u.variable}" for u in uncertainties}
+    if (
+        pure_record
+        and established
+        and not (uncertainty_touched & set(established))
+        and all(
+            who and all(str(w).startswith("evidence:") for w in who)
+            for who in established.values()
+        )
+    ):
+        return
+
+    # Process nodes whose own effects change the world are producers in their own
+    # right: a purely operational chain — dated nodes and dependent nodes, no actors,
+    # no external processes — is a world in which things happen. Judged here once, so
+    # neither refusal below can call an executing chain "nothing".
+    productive_nodes = any(node.effects for node in spec.process.nodes)
+
+    if not spec.actions and not spec.external_processes and not productive_nodes:
         # Whether the world has actors changes what is wrong and what the repair is. A
         # world with actors but no actions compiled people and gave them nothing to do —
         # a live Bank of England run put Andrew Bailey in the world with no way to make
