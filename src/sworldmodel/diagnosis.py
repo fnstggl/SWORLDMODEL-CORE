@@ -397,8 +397,14 @@ class RunDiagnosis:
         if not out:
             out.append(
                 {
-                    "cause": "none",
-                    "why": "the run completed without stopping at a stage",
+                    "cause": "unclassified" if self.failure is not None else "none",
+                    "why": (
+                        f"the run stopped at {gate or self.failure_stage!r} and no rule "
+                        "here recognised the mechanism — classify it by hand rather than "
+                        "reading this as a clean run"
+                        if self.failure is not None
+                        else "the run completed without stopping at a stage"
+                    ),
                 }
             )
         return out

@@ -95,6 +95,21 @@ def verify_reality(
     else:
         expected = len(named)
         absent = participants_absent_from(named, entity_names)
+        # A person can be present in a world through the body they act within. Asked
+        # whether the EU and Mercosur will sign, a compiler that models the Commission,
+        # the Council, the Parliament and the member states has represented the
+        # Commission President — inside the institution she leads — and adding her as a
+        # separate actor beside her own institution would double-count the same
+        # authority. What this gate must not permit is a person the world has no place
+        # for at all, so the association has to come from the evidence: some claim that
+        # names the person must also name a compiled entity.
+        if absent:
+            covered, absent = _covered_by_an_organization(absent, evidence, entity_names)
+            if covered:
+                notes.append(
+                    "represented through their institution: "
+                    + "; ".join(f"{p} (via {org})" for p, org in sorted(covered))
+                )
         if absent:
             raise WorldIntegrityError(
                 "the compiled world omits participants the verified evidence names — "
@@ -199,6 +214,41 @@ def verify_reality(
             },
         )
     return manifest
+
+
+def _covered_by_an_organization(
+    absent: tuple[str, ...], evidence: EvidenceView, entity_names: tuple[str, ...]
+) -> tuple[list[tuple[str, str]], tuple[str, ...]]:
+    """Split the absent people into those an included body speaks for, and the rest.
+
+    The link is evidential, not assumed: a claim must name both the person and a
+    compiled entity. Co-occurrence in a verified claim is weak on its own, which is why
+    it is only ever used to excuse a person from having their *own* slot in a world that
+    already models their institution — never to add anyone, and never to establish a
+    role.
+    """
+
+    claims = list(evidence.available())
+    covered: list[tuple[str, str]] = []
+    still_absent: list[str] = []
+    for person in absent:
+        key = person.strip().lower()
+        org = next(
+            (
+                name
+                for claim in claims
+                if key in claim.proposition.lower()
+                or any(key == e.strip().lower() for e in claim.entities)
+                for name in entity_names
+                if name.strip().lower() != key and name.strip().lower() in claim.proposition.lower()
+            ),
+            None,
+        )
+        if org:
+            covered.append((person, org))
+        else:
+            still_absent.append(person)
+    return covered, tuple(still_absent)
 
 
 def _coverage(contract: ResolutionContract, available_ids: set[str]) -> tuple[float, str]:
