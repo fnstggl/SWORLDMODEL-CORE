@@ -253,6 +253,12 @@ class UncertaintySpec:
     reversal_capable: bool
     outcomes: tuple[UncertaintyOutcome, ...]
     constraining_evidence_ids: tuple[str, ...] = ()
+    # Other uncertainty variables this one is NOT independent of. Declaring a
+    # dependence is a refusal to be crossed as if independent — the compiler must
+    # instead express the dependent set as one uncertainty over joint states.
+    depends_on: tuple[str, ...] = ()
+    # When the unknown value actually becomes public, if the evidence establishes it.
+    release_at: datetime | None = None
 
 
 @dataclass(frozen=True)

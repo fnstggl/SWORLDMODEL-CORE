@@ -1,12 +1,22 @@
-"""Run configuration for the single public entry point."""
+"""Run configuration for the single public entry point.
+
+There is one production configuration and it is live: a real DeepSeek gateway and the
+live research backend, sharing one HTTP transport so every network call is counted
+together. There is deliberately no ``offline()`` constructor and no deterministic
+gateway to reach — a config that can quietly produce a forecast without touching the
+real world is exactly how a simulator starts reporting its own assumptions back to you.
+
+Tests construct :class:`ForecastConfig` directly with fixtures from ``tests/``.
+"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-from .gateway import DeterministicGateway, ModelGateway
+from .engine import RunBudget
+from .gateway import ModelGateway
 from .research import ResearchBackend
 
 
@@ -16,15 +26,12 @@ class ForecastConfig:
     research_backend: ResearchBackend
     seed: int = 0
     trace_dir: Path | None = None
-    max_branches: int = 24
-    include_reference_class_diagnostic: bool = True
+    max_branches: int = 8
+    # How many *causal structures* may be simulated when the evidence leaves the
+    # structure genuinely open. 1 means the compiled structure is taken as given.
+    max_structures: int = 3
     run_label: str = "run"
-
-    @classmethod
-    def offline(cls, research_backend: ResearchBackend, **kw: object) -> ForecastConfig:
-        """Deterministic, network-free configuration (offline reasoner)."""
-
-        return cls(gateway=DeterministicGateway(), research_backend=research_backend, **kw)  # type: ignore[arg-type]
+    budget: RunBudget = field(default_factory=RunBudget)
 
     @classmethod
     def live(
@@ -33,16 +40,14 @@ class ForecastConfig:
         seed: int = 0,
         trace_dir: Path | None = None,
         max_branches: int = 8,
+        max_structures: int = 3,
         research_budget: object | None = None,
         transport: object | None = None,
         now: datetime | None = None,
         model: str | None = None,
+        budget: RunBudget | None = None,
     ) -> ForecastConfig:
-        """Production configuration: live DeepSeek gateway + live research backend.
-
-        Gateway and research share ONE HTTP transport so all network calls are counted
-        together. This is the only config whose ``is_live`` is True.
-        """
+        """The production configuration: live DeepSeek + live research, one transport."""
 
         from .deepseek_gateway import DeepSeekGateway
         from .http import UrllibTransport
@@ -62,6 +67,8 @@ class ForecastConfig:
             seed=seed,
             trace_dir=trace_dir,
             max_branches=max_branches,
+            max_structures=max_structures,
+            budget=budget or RunBudget(),
         )
 
     @property

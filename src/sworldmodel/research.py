@@ -1,37 +1,25 @@
-"""Evidence research and world grounding.
+"""The research contract and the bundle every backend must produce.
 
-More detailed simulation is harmful when the underlying information is false, so this
-is one of the most important stages. A research backend produces the *complete*
-structured evidence store (never a truncated string) plus a compiled
-:class:`~sworldmodel.worldspec.WorldSpec` — the actual causal world required for the
-question — the genuine uncertainties, and the load-bearing reality facts.
+A research backend produces the *complete* structured evidence store — never a
+truncated string — plus the compiled :class:`~sworldmodel.worldspec.WorldSpec` for this
+question, its genuine uncertainties, and the load-bearing reality facts.
 
-Two backends ship here:
-* :class:`CorpusResearchBackend` — reads a document corpus of real, dated sources and
-  materializes cited claims, runs event-level lineage de-duplication and contradiction
-  detection. The corpus carries an authored ``world_spec`` (used offline / in tests).
-* :class:`MockResearchBackend` — an in-memory bundle for unit tests.
-
-The live web backend (:mod:`live_research`) implements the same ``research`` interface
-and compiles the ``world_spec`` from the model instead of reading it from a corpus.
+Exactly one backend ships in production: :mod:`live_research`, which starts from the
+question alone, searches, fetches, verifies and dates real sources, and compiles the
+world from the model. Corpus readers and in-memory fixtures live under ``tests/``,
+where they cannot be reached from a live run — a prepared corpus that production code
+can open is a prepared answer waiting to be found.
 """
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Protocol
 
-from .evidence import EvidenceClaim, EvidenceStore, mark_contradiction
-from .models import (
-    AuthorityLevel,
-    EpistemicType,
-    RequiredRealityFact,
-    SourceType,
-    UncertaintySpec,
-)
+from .errors import WorldIntegrityError
+from .evidence import EvidenceStore
+from .models import RequiredRealityFact, UncertaintySpec
 from .world import WorldFact
 from .world_compiler import (
     parse_required_facts,
@@ -58,7 +46,6 @@ class ResearchBundle:
     horizon: datetime
     research_plan: tuple[str, ...]
     as_of: datetime | None = None
-    reference_class: dict[str, str] | None = None
     outcome: dict[str, Any] | None = None  # post-cutoff; never used by the forecast
     live_trace: dict[str, Any] | None = None
     compile_responses: tuple[Any, ...] = ()
@@ -82,52 +69,6 @@ BACKWARD_PLAN = (
 )
 
 
-def build_bundle_from_dict(data: dict[str, Any]) -> ResearchBundle:
-    """Materialize a :class:`ResearchBundle` from a corpus dict.
-
-    Runs real lineage grouping and contradiction detection on the claims; both are
-    behavior the forecast depends on, not decoration."""
-
-    store = EvidenceStore()
-    claim_keys: dict[str, str] = {}
-    for src in data.get("sources", []):
-        s_type = SourceType(src["source_type"])
-        authority = AuthorityLevel(int(src["authority_level"]))
-        published = _dt(src["published_at"])
-        available = _dt(src.get("available_at") or src["published_at"])
-        retrieved = _dt(src.get("retrieved_at") or src["published_at"])
-        assert published is not None and available is not None and retrieved is not None
-        lineage = src["lineage_event_id"]
-        for claim in src["claims"]:
-            if "claim_key" in claim:
-                claim_keys[claim["id"]] = str(claim["claim_key"])
-            store.add(
-                EvidenceClaim(
-                    id=claim["id"],
-                    proposition=claim["proposition"],
-                    normalized_value=str(claim["normalized_value"]),
-                    entities=tuple(claim.get("entities", [])),
-                    valid_from=_dt(claim.get("valid_from")),
-                    valid_until=_dt(claim.get("valid_until")),
-                    published_at=published,
-                    available_at=available,
-                    source_id=src["source_id"],
-                    source_url=src.get("url", ""),
-                    source_title=src.get("title", ""),
-                    source_type=s_type,
-                    authority_level=authority,
-                    supporting_excerpt=claim.get("supporting_excerpt", ""),
-                    lineage_event_id=lineage,
-                    epistemic_type=EpistemicType(claim.get("epistemic_type", "observation")),
-                    confidence=float(claim.get("confidence", 0.9)),
-                    retrieved_at=retrieved,
-                    contradiction_ids=tuple(claim.get("contradiction_ids", [])),
-                )
-            )
-    _apply_contradictions(store, data.get("contradictions", []), claim_keys)
-    return assemble_bundle(store, data)
-
-
 def assemble_bundle(store: EvidenceStore, data: dict[str, Any]) -> ResearchBundle:
     """Assemble a :class:`ResearchBundle` from a materialized store + a compiled
     ``world_spec`` and its uncertainties/facts/reality metadata."""
@@ -136,7 +77,12 @@ def assemble_bundle(store: EvidenceStore, data: dict[str, Any]) -> ResearchBundl
     as_of = _dt(reality.get("as_of"))
     default_time = as_of or datetime.fromisoformat("1970-01-01T00:00:00+00:00")
     horizon = _dt(reality.get("horizon"))
-    assert horizon is not None, "corpus/live compilation must declare a horizon"
+    if horizon is None:
+        raise WorldIntegrityError(
+            "a compilation must declare the horizon it was compiled for; without it the "
+            "world has no end and the terminal cannot be evaluated",
+            details={"reality_keys": sorted(reality)},
+        )
 
     available_ids = {c.id for c in store.all()}
     spec = parse_world_spec(data["world_spec"])
@@ -158,57 +104,6 @@ def assemble_bundle(store: EvidenceStore, data: dict[str, Any]) -> ResearchBundl
         horizon=horizon,
         research_plan=BACKWARD_PLAN,
         as_of=as_of,
-        reference_class=data.get("reference_class"),
         outcome=data.get("outcome"),
         compile_responses=tuple(data.get("_compile_responses", []) or []),
     )
-
-
-def _apply_contradictions(
-    store: EvidenceStore, explicit: list[list[str]], claim_keys: dict[str, str]
-) -> None:
-    """Record decisive contradictions: (1) corpus-declared pairs and (2) claims that
-    share an explicit ``claim_key`` but disagree on ``normalized_value``."""
-
-    pairs: set[tuple[str, str]] = set()
-    for pair in explicit:
-        pairs.add((pair[0], pair[1]))
-    by_key: dict[str, list[str]] = {}
-    for cid, key in claim_keys.items():
-        by_key.setdefault(key, []).append(cid)
-    for ids in by_key.values():
-        for i in range(len(ids)):
-            for j in range(i + 1, len(ids)):
-                a, b = store.get(ids[i]), store.get(ids[j])
-                if a.normalized_value != b.normalized_value:
-                    pairs.add((a.id, b.id))
-    for a_id, b_id in pairs:
-        na, nb = mark_contradiction(store.get(a_id), store.get(b_id))
-        store.claims[na.id] = na
-        store.claims[nb.id] = nb
-
-
-class CorpusResearchBackend:
-    """Reads a corpus directory containing ``corpus.json``."""
-
-    def __init__(self, corpus_dir: str | Path) -> None:
-        self.corpus_dir = Path(corpus_dir)
-
-    def research(self, question: str, as_of: datetime, horizon: datetime) -> ResearchBundle:
-        path = self.corpus_dir / "corpus.json"
-        data = json.loads(path.read_text())
-        return build_bundle_from_dict(data)
-
-
-class MockResearchBackend:
-    """Wraps a pre-built bundle (or a corpus dict) for deterministic unit tests."""
-
-    def __init__(
-        self, bundle: ResearchBundle | None = None, *, data: dict[str, Any] | None = None
-    ) -> None:
-        if bundle is None and data is None:
-            raise ValueError("MockResearchBackend needs a bundle or data")
-        self._bundle = bundle if bundle is not None else build_bundle_from_dict(data)  # type: ignore[arg-type]
-
-    def research(self, question: str, as_of: datetime, horizon: datetime) -> ResearchBundle:
-        return self._bundle

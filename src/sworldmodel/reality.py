@@ -5,15 +5,23 @@ simulate. Behavioral rollout does not begin until load-bearing reality facts are
 verified. The checks are *generic*: they apply to any compiled world (a decision
 body, a negotiation table, a set of population strata, a set of organizations).
 
-The central invariant is preserved without any committee assumption: if the compiled
-world claims a specific number of decision-relevant participants, that many must be
-verified from evidence — a nine-participant body can never become five modeled units.
-Any such mismatch stops the run with :class:`WorldIntegrityError`.
+The central invariant is preserved without any committee assumption: every participant
+the *verified evidence* names must appear in the compiled roster — a nine-participant
+body can never become five modeled units. The anchor is the evidence, not the
+compiler's own declaration: comparing a compiled roster against a count the same model
+response supplied only ever detects that model disagreeing with itself, which is not a
+reality check. The compiler's declared count is still compared against its own roster,
+but it is reported as what it is — an internal-consistency check.
+
+When the evidence names no decision-relevant person, the participant check cannot run.
+The manifest then reports ``expected_participants`` as ``None`` and records why, rather
+than reporting a check that did not happen.
 """
 
 from __future__ import annotations
 
 from .actors import ActorState
+from .coverage import evidence_named_participants, participants_absent_from
 from .errors import EvidenceError, WorldIntegrityError
 from .evidence import EvidenceView
 from .models import IntegrityVerdict, RealityManifest, ResolutionContract
@@ -25,38 +33,78 @@ def verify_reality(
     actors: dict[str, ActorState],
 ) -> RealityManifest:
     """Build the manifest and RAISE if the world is not faithful. Returns a VERIFIED
-    manifest only when every check passes."""
+    manifest only when every check that could be run passed, and records in
+    ``notes`` every check that could not be run."""
 
     represented = len(actors)
-    expected = contract.expected_participants
-    details_base: dict[str, object] = {
-        "expected participants": expected,
-        "verified and represented participants": represented,
-    }
+    roster_names = tuple(a.entity.name for a in actors.values())
+    notes: list[str] = []
 
     # 0. There must be at least one verified actor to simulate.
     if not actors:
+        # The compiler was told the world must contain at least one actor whose
+        # decisions produce the outcome. Emitting none is a defect in that compilation,
+        # so the caller may compile again from the same evidence before giving up. What
+        # it may not do is simulate a world in which nobody decides anything.
         raise WorldIntegrityError(
-            "no actors were verified from evidence — simulation refused", details=details_base
+            "no actors were compiled — there is nobody whose decisions could produce "
+            "this outcome, so there is nothing to simulate",
+            details={"verified and represented participants": 0, "recompilable": True},
         )
 
-    # 1. If the world claims a specific participant count, it must match the roster
-    #    exactly (no silent compression of a larger body into fewer modeled units).
-    if expected is not None and represented != expected:
+    # 1. Every participant the verified evidence names must be on the compiled roster.
+    #    This is the only participant check anchored outside the compiler's own output.
+    named = evidence_named_participants(evidence, contract, focal_identities=roster_names)
+    expected: int | None
+    if not named:
+        expected = None
+        notes.append(
+            "participant count not established: the verified claims name no "
+            "decision-relevant person, so the compiled roster was not checked against "
+            "evidence and no participant count is reported"
+        )
+    else:
+        expected = len(named)
+        absent = participants_absent_from(named, roster_names)
+        if absent:
+            raise WorldIntegrityError(
+                "the compiled roster omits participants the verified evidence names — "
+                "simulation refused",
+                details={
+                    "participants named by evidence": list(named),
+                    "compiled roster": list(roster_names),
+                    "absent from the roster": list(absent),
+                },
+            )
+
+    # 2. The compiled world's own declared participant count must match the roster it
+    #    emitted. A model that says "nine seats" and then emits five has contradicted
+    #    itself; this catches that, and nothing more — it is not evidence.
+    declared = contract.expected_participants
+    if declared is not None and represented != declared:
+        # This is the compiler contradicting itself, not evidence contradicting the
+        # compiler. It is a defect in one compilation, and the caller may recompile;
+        # the detail says so, so a bounded retry can act on it.
         raise WorldIntegrityError(
-            "participant roster does not match verified reality — simulation refused",
-            details={**details_base, "difference": (expected - represented)},
+            "participant roster does not match the count the compiled world declares "
+            "for itself — simulation refused",
+            details={
+                "declared by the compiled world": declared,
+                "verified and represented participants": represented,
+                "difference": (declared - represented),
+                "recompilable": True,
+            },
         )
 
-    # 2. No duplicated participant (same underlying person occupying two slots).
-    names = [a.entity.name.strip().lower() for a in actors.values()]
+    # 3. No duplicated participant (same underlying person occupying two slots).
+    names = [n.strip().lower() for n in roster_names]
     dupes = sorted({n for n in names if n and names.count(n) > 1})
     if dupes:
         raise WorldIntegrityError(
             "duplicated participant detected — refused", details={"duplicated": dupes}
         )
 
-    # 3. Every required reality fact must be satisfied by available evidence.
+    # 4. Every required reality fact must be satisfied by available evidence.
     available_ids = {c.id for c in evidence.available()}
     missing_facts: list[str] = []
     for fact in contract.required_reality_facts:
@@ -66,7 +114,7 @@ def verify_reality(
         if not all(cid in available_ids for cid in fact.evidence_claim_ids):
             missing_facts.append(f"{fact.key}: cited evidence not available by cutoff")
 
-    # 4. Decisive evidence contradictions block rollout.
+    # 5. Decisive evidence contradictions block rollout.
     conflicts = [f"{a} <> {b}" for a, b in evidence.store.contradictions()]
 
     verdict = (
@@ -74,9 +122,11 @@ def verify_reality(
         if not missing_facts and not conflicts
         else IntegrityVerdict.REFUSED
     )
-    coverage = _coverage(contract, available_ids)
+    coverage, coverage_note = _coverage(contract, available_ids)
+    if coverage_note:
+        notes.append(coverage_note)
     manifest = RealityManifest(
-        verified_entities=tuple(sorted(a.entity.name for a in actors.values())),
+        verified_entities=tuple(sorted(roster_names)),
         verified_roles=tuple((a.actor_id, a.role) for a in actors.values()),
         verified_authorities=tuple((a.actor_id, a.authority) for a in actors.values()),
         verified_rules=(contract.target_outcome,) if contract.target_outcome else (),
@@ -87,6 +137,7 @@ def verify_reality(
         integrity_verdict=verdict,
         expected_participants=expected,
         represented_participants=represented,
+        notes=tuple(notes),
     )
 
     if verdict is IntegrityVerdict.REFUSED:
@@ -101,13 +152,22 @@ def verify_reality(
     return manifest
 
 
-def _coverage(contract: ResolutionContract, available_ids: set[str]) -> float:
+def _coverage(contract: ResolutionContract, available_ids: set[str]) -> tuple[float, str]:
+    """The fraction of required reality facts whose cited evidence is available.
+
+    Returns ``(fraction, note)``. With no required facts there is nothing to cover, so
+    the fraction is vacuous rather than a passing score, and the note says so.
+    """
+
     facts = contract.required_reality_facts
     if not facts:
-        return 1.0
+        return 1.0, (
+            "evidence_coverage is vacuous: the compiled world declared no required "
+            "reality facts, so no fact was checked for evidential support"
+        )
     satisfied = sum(
         1
         for f in facts
         if f.evidence_claim_ids and all(cid in available_ids for cid in f.evidence_claim_ids)
     )
-    return satisfied / len(facts)
+    return satisfied / len(facts), ""

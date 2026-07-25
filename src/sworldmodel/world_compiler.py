@@ -34,7 +34,7 @@ from .coverage import (
     enforce_coverage,
     evidence_checklist,
 )
-from .errors import GatewayError
+from .errors import GatewayError, WorldIntegrityError
 from .evidence import EvidenceView
 from .gateway import GatewayRequest, ModelGateway
 from .grounding import (
@@ -75,9 +75,19 @@ def build_base_world(
     world_facts: tuple[WorldFact, ...],
 ) -> WorldState:
     entities_by_id = {e.entity_id: e for e in spec.entities}
+    orphans = sorted(a.entity_id for a in spec.actors if a.entity_id not in entities_by_id)
+    if orphans:
+        # Inventing an entity here would put a person in the simulation that verified
+        # reality never described, and the coverage gate — which enumerates entities —
+        # would never see them.
+        raise WorldIntegrityError(
+            f"actors {orphans} were compiled without a matching entity. Every actor must be "
+            "a declared entity carrying its own evidence citations.",
+            details={"orphan_actors": orphans},
+        )
     actor_states: dict[str, ActorState] = {}
     for aspec in spec.actors:
-        entity = entities_by_id.get(aspec.entity_id) or _default_actor_entity(aspec)
+        entity = entities_by_id[aspec.entity_id]
         state = ActorState.from_spec(entity, aspec, default_time=contract.as_of)
         # Ground each actor as the specific real entity it is, with provenance on every
         # element, so its prompt carries its own verified history rather than a template.
@@ -138,7 +148,10 @@ def compile_world(
     grounding_report = assess_actor_grounding(profiles)
     enforce_actor_grounding(grounding_report)
 
-    # Gate 3 — evidence-to-world coverage against the exact compiled WorldSpec.
+    # Gate 3 — the outcome must be produced by what actors do, not supplied to them.
+    enforce_outcome_is_produced(spec, uncertainties)
+
+    # Gate 4 — evidence-to-world coverage against the exact compiled WorldSpec.
     view, signal_claim_ids = world_spec_view(spec, base_world, uncertainties, world_facts)
     inventory = build_candidate_inventory(
         evidence,
@@ -167,10 +180,6 @@ def compile_world(
     )
 
 
-def _default_actor_entity(aspec: ActorSpec) -> EntitySpec:
-    return EntitySpec(entity_id=aspec.entity_id, name=aspec.entity_id, kind="person", is_actor=True)
-
-
 # Entity kinds that are deliberately synthetic stand-ins rather than named real people.
 _CONSTRUCTED_KINDS = frozenset({"population_group", "stratum", "segment", "cohort"})
 
@@ -194,15 +203,11 @@ def actor_grounding_profile(
             cids = tuple(str(c) for c in (d.get("evidence_claim_ids") or []))
             seeds.append((content, cids))
 
-    policy = aspec.policy
-    inclination = ""
-    if policy.default_action_id:
-        params = policy.default_params_dict
-        detail = ", ".join(f"{k}={v}" for k, v in sorted(params.items()))
-        inclination = (
-            f"{policy.default_action_id}({detail})" if detail else policy.default_action_id
-        )
-    reactions = tuple((r.when_field, r.action_id or "wait") for r in policy.rules if r.when_field)
+    # An actor's inclination is its compiled *reasoning* about why it leans as it does,
+    # marked as an inference. It is never a pre-selected action: nothing here may tell
+    # the runtime what this actor is going to do.
+    inclination = aspec.reasoning.strip()
+    reactions: tuple[tuple[str, str], ...] = ()
 
     profile = profile_from_member(
         actor_id=entity.entity_id,
@@ -212,6 +217,11 @@ def actor_grounding_profile(
         previous_action=None,  # history lives in the seeds and is sorted by its wording
         memory_seeds=tuple(seeds),
         inclination=inclination or None,
+        # The compiled reasoning is an inference *from this entity's cited evidence*, so
+        # it carries those citations and is marked SUPPORTED_INFERENCE. An entity with
+        # no citations has no grounded inclination either, and the actor is told nothing
+        # rather than told a guess.
+        inclination_claim_ids=tuple(entity.evidence_claim_ids),
         reaction_rules=reactions,
         valid_time=contract.as_of.isoformat(),
     )
@@ -390,6 +400,20 @@ def world_spec_view(
             )
         )
 
+    # -- external (non-agent) processes -----------------------------------------
+    for pid, description, claim_ids in _external_process_objects(spec):
+        accessible.update(claim_ids)
+        objects.append(
+            WorldObject(
+                object_id=f"external:{pid}",
+                kind="scheduled_event",
+                name=description[:64],
+                claim_ids=claim_ids,
+                wired=True,
+                uses=("external_process",),
+            )
+        )
+
     # -- verified world facts every actor can read ------------------------------
     for wf in world_facts:
         accessible.update(wf.evidence_claim_ids)
@@ -454,11 +478,17 @@ def _referenced_fields(spec: WorldSpec, uncertainties: tuple[UncertaintySpec, ..
         for eff in action.effects:
             used |= _effect_fields(eff)
     for node in spec.process.nodes:
-        used |= _expr_fields(node.condition)
+        used |= _expr_fields(node.entry_condition)
         for eff in node.effects:
             used |= _effect_fields(eff)
-    for a in spec.actors:
-        used.update(r.when_field for r in a.policy.rules if r.when_field)
+    for proc in spec.external_processes:
+        for occ in proc.occurrences:
+            used |= _expr_fields(occ.condition)
+            for eff in occ.effects:
+                used |= _effect_fields(eff)
+    for rule in spec.wake_rules:
+        if rule.on_field_change:
+            used.add(rule.on_field_change)
     used |= _expr_fields(spec.terminal.yes_when) | _expr_fields(spec.terminal.unresolved_when)
     return used
 
@@ -492,6 +522,107 @@ def _effect_fields(eff: Any) -> set[str]:
         if isinstance(sub, dict):
             out.update(str(k) for k in sub)
     return out
+
+
+def _expr_collections(expr: Any) -> set[str]:
+    """Record collections a declarative expression reads (``count``/``sum``/``values``)."""
+
+    from .worldspec import Expr
+
+    if not isinstance(expr, Expr):
+        return set()
+    out: set[str] = set()
+    if expr.op in ("count", "sum", "values", "exists") and expr.args:
+        first = expr.args[0]
+        if isinstance(first, str):
+            out.add(first)
+        elif isinstance(first, Expr) and first.op == "const" and first.args:
+            out.add(str(first.args[0]))
+    for a in expr.args:
+        out |= _expr_collections(a)
+    return out
+
+
+def _action_writes(spec: WorldSpec) -> tuple[set[str], set[str]]:
+    """What the compiled actions can actually change: (fields, record collections)."""
+
+    fields: set[str] = set()
+    collections: set[str] = set()
+    for action in spec.actions:
+        for eff in action.effects:
+            fields |= _effect_fields(eff)
+            if eff.op == "append_record":
+                coll = eff.params_dict.get("collection")
+                if isinstance(coll, str):
+                    collections.add(coll)
+    return fields, collections
+
+
+def enforce_outcome_is_produced(
+    spec: WorldSpec, uncertainties: tuple[UncertaintySpec, ...]
+) -> None:
+    """Refuse a world whose answer nobody has to do anything to produce.
+
+    This is the gate that catches a forecast dressed as a simulation. If the terminal
+    reads only things that compiled *actions* never write — typically because the
+    compiler encoded the decision itself as an uncertain input field — then the branch
+    weights are the forecast and the actors are scenery. Every trajectory "resolves"
+    without anyone acting, and the reported probability is the model's prior on that
+    field wearing the label ``weighted_simulated_trajectories``.
+
+    The world must be one in which the outcome is *produced*: at least one compiled
+    action must be able to move at least one term the terminal reads.
+    """
+
+    terminal_fields = _expr_fields(spec.terminal.yes_when)
+    terminal_colls = _expr_collections(spec.terminal.yes_when)
+    if not spec.actions:
+        raise WorldIntegrityError(
+            "the compiled world has no actions — nobody can do anything, so the outcome "
+            "cannot be produced by what anyone decides",
+            details={"recompilable": True},
+        )
+    if not spec.process.nodes and not spec.external_processes:
+        # A world may legitimately be driven entirely by external processes and wake
+        # rules rather than a procedural graph. What it may not be is a world in which
+        # nothing is scheduled to happen at all.
+        raise WorldIntegrityError(
+            "the compiled world has no process and no external processes — nothing is "
+            "scheduled to happen, so no actor will ever be in a position to act",
+            details={"recompilable": True},
+        )
+
+    written_fields, written_colls = _action_writes(spec)
+    if (terminal_fields & written_fields) or (terminal_colls & written_colls):
+        return
+
+    uncertain = {u.variable for u in uncertainties} | {
+        name for u in uncertainties for o in u.outcomes for name, _ in o.field_effects
+    }
+    raise WorldIntegrityError(
+        "the outcome is an input, not a result: no compiled action can move any term "
+        "the terminal reads, so every branch resolves without anyone acting and the "
+        "answer would be the branch weights rather than the simulation",
+        details={
+            "recompilable": True,
+            "terminal reads fields": sorted(terminal_fields),
+            "terminal reads collections": sorted(terminal_colls),
+            "fields any action can write": sorted(written_fields),
+            "collections any action can write": sorted(written_colls),
+            "terminal terms supplied by uncertainty instead": sorted(terminal_fields & uncertain),
+        },
+    )
+
+
+def _external_process_objects(spec: WorldSpec) -> list[tuple[str, str, tuple[str, ...]]]:
+    """External (non-agent) processes are part of the compiled world and must be
+    visible to the coverage gate, or a verified scheduled release could be represented
+    and still be reported as missing."""
+
+    return [
+        (p.process_id, p.description or p.process_id, p.evidence_claim_ids)
+        for p in spec.external_processes
+    ]
 
 
 def _touched_objects(spec: WorldSpec) -> set[str]:
@@ -634,10 +765,13 @@ def parse_uncertainties(
         parsed_outcomes: list[UncertaintyOutcome] = []
         for o in outcomes:
             prov = o.get("provenance")
+            # An unlabeled weight is an unjustified weight. Defaulting to a strong
+            # label (explicit_model) would let an invented number outrank an honest
+            # one in the weakest-provenance ordering that stamps the branch.
             provenance = (
                 WeightProvenance(prov)
                 if prov in _VALID_PROVENANCE
-                else WeightProvenance.EXPLICIT_MODEL
+                else WeightProvenance.SYMMETRIC_IGNORANCE
             )
             parsed_outcomes.append(
                 UncertaintyOutcome(
@@ -661,22 +795,52 @@ def parse_uncertainties(
                 reversal_capable=bool(u.get("reversal_capable", True)),
                 outcomes=tuple(parsed_outcomes),
                 constraining_evidence_ids=constraining,
+                depends_on=tuple(str(d) for d in (u.get("depends_on") or [])),
+                release_at=_parse_iso(u.get("release_at")),
             )
         )
     return tuple(out)
+
+
+def _parse_iso(value: object) -> datetime | None:
+    if isinstance(value, str) and value.strip():
+        try:
+            return datetime.fromisoformat(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _epistemic(raw: object, has_citations: bool) -> EpistemicType:
+    """Read an epistemic label the model produced.
+
+    Unrecognized labels are common — a compiler will happily write "rule" or "fact" —
+    and they must not crash a run. They also must not be promoted to OBSERVATION, which
+    is what a permissive default would do: an unrecognized label means we do not know
+    the epistemic status, and the one thing we may not do is call it established fact.
+    An uncited statement is a hypothesis regardless of what it was labeled.
+    """
+
+    if isinstance(raw, str):
+        try:
+            return EpistemicType(raw.strip().lower())
+        except ValueError:
+            pass
+    return EpistemicType.INFERENCE if has_citations else EpistemicType.HYPOTHESIS
 
 
 def parse_world_facts(items: Any, default_time: datetime) -> tuple[WorldFact, ...]:
     facts: list[WorldFact] = []
     for i, wf in enumerate(items or []):
         at = wf.get("available_at")
+        cites = tuple(str(c) for c in (wf.get("evidence_claim_ids") or []))
         facts.append(
             WorldFact(
                 fact_id=f"fact_{i}",
                 text=str(wf.get("text", "")),
-                evidence_claim_ids=tuple(wf.get("evidence_claim_ids", []) or []),
+                evidence_claim_ids=cites,
                 available_at=datetime.fromisoformat(at) if isinstance(at, str) else default_time,
-                epistemic_type=EpistemicType(wf.get("epistemic_type", "observation")),
+                epistemic_type=_epistemic(wf.get("epistemic_type"), bool(cites)),
             )
         )
     return tuple(facts)
@@ -698,7 +862,7 @@ def parse_required_facts(items: Any) -> tuple[RequiredRealityFact, ...]:
 # ---------------------------------------------------------------------------
 
 
-def _render_evidence(view: EvidenceView, *, limit: int = 160) -> str:
+def render_evidence(view: EvidenceView, *, limit: int = 160) -> str:
     claims = sorted(view.available(), key=lambda c: (-int(c.authority_level), c.id))[:limit]
     return "\n".join(
         f"{c.id} | {c.proposition} = {c.normalized_value} "
@@ -708,7 +872,14 @@ def _render_evidence(view: EvidenceView, *, limit: int = 160) -> str:
 
 
 def compile_world_spec_live(
-    gateway: ModelGateway, question: str, as_of: datetime, horizon: datetime, view: EvidenceView
+    gateway: ModelGateway,
+    question: str,
+    as_of: datetime,
+    horizon: datetime,
+    view: EvidenceView,
+    *,
+    extra_instruction: str = "",
+    structure_id: str = "primary",
 ) -> tuple[dict[str, Any], Any]:
     """Ask the model to compile the whole causal world for an arbitrary question, then
     normalize and citation-check it. Returns ``(compilation_dict, gateway_response)``
@@ -719,22 +890,30 @@ def compile_world_spec_live(
         "question": question,
         "as_of": as_of.isoformat(),
         "horizon": horizon.isoformat(),
-        "evidence": _render_evidence(view),
+        "evidence": render_evidence(view),
         # The deterministic inventory of what verified reality actually contains. The
         # model is handed this explicitly so it cannot silently forget a verified item
         # while compiling; the coverage gate then checks the compiled world against it.
         "checklist": evidence_checklist(view, as_of=as_of, horizon=horizon),
+        # Set only when compiling a structural alternative: the same evidence, a
+        # different causal structure the evidence also leaves open.
+        "extra_instruction": extra_instruction,
     }
     resp = gateway.generate(
         GatewayRequest(
             task_kind="compile_world_spec",
             prompt=render_world_compile_prompt(ctx),
-            context={"question": question},
-            seed=int(prompt_hash("world" + question)[:8], 16),
+            context={"question": question, "structure_id": structure_id},
+            seed=int(prompt_hash("world" + question + structure_id)[:8], 16),
             expected_keys=("world_spec",),
         )
     )
-    return _normalize_compilation(resp.data, view, as_of, horizon), resp
+    data = _normalize_compilation(resp.data, view, as_of, horizon), resp
+    compiled_dict = data[0]
+    spec_dict = compiled_dict.get("world_spec")
+    if isinstance(spec_dict, dict):
+        spec_dict.setdefault("structure_id", structure_id)
+    return compiled_dict, resp
 
 
 def _normalize_compilation(
@@ -762,6 +941,18 @@ def _normalize_compilation(
     data["target_outcome"] = _s(data.get("target_outcome")) or "the YES condition"
     data["as_of"] = as_of.isoformat()
     data["horizon"] = horizon.isoformat()
+    # A normalized compilation is complete on its own: every consumer reads the same
+    # `reality` block, so an alternative structure compiled through this function is
+    # assembled by exactly the same code as the primary one.
+    reality = dict(data.get("reality") or {})
+    reality.setdefault("as_of", data["as_of"])
+    reality.setdefault("horizon", data["horizon"])
+    reality.setdefault("subject_entity", data["subject_entity"])
+    reality.setdefault("resolution_units", data["resolution_units"])
+    reality.setdefault("target_outcome", data["target_outcome"])
+    if data.get("expected_participants") is not None:
+        reality.setdefault("expected_participants", data["expected_participants"])
+    data["reality"] = reality
     return data
 
 

@@ -32,6 +32,11 @@ class TraceContext:
     run_result: RunResult
     forecast: ForecastResult
     model_id: str
+    # What the compiler concluded about whether it compiled the *right* world, and the
+    # provider response that said so. Carried in the trace because a reader must be able
+    # to see which structures were simulated and which could not be represented.
+    structure_assessment: Any = None
+    structure_response: Any = None
     _calls_override: list[Any] = field(default_factory=list)
 
     # -- serializable payloads --------------------------------------------------
@@ -73,7 +78,16 @@ class TraceContext:
         }
 
     def evidence_manifest(self) -> dict[str, Any]:
+        """Every claim with enough provenance to be re-verified against its source.
+
+        A manifest that records only that a claim exists is not an audit trail. Each
+        entry carries the URL actually fetched (the archived capture, for a pastcast),
+        the excerpt it was verified against, and the content hash of the document it
+        came from, so a reader can go back to the page and check.
+        """
+
         claims = self.evidence_store.all()
+        provenance = {r["claim_id"]: r for r in self.evidence_store.provenance_records()}
         return {
             "claim_count": len(claims),
             "independent_event_count": len(self.evidence_store.independent_event_ids()),
@@ -96,6 +110,9 @@ class TraceContext:
                     "authority_level": int(c.authority_level),
                     "epistemic_type": c.epistemic_type.value,
                     "lineage_event_id": c.lineage_event_id,
+                    "source_url": c.source_url,
+                    "supporting_excerpt": c.supporting_excerpt,
+                    "provenance": provenance.get(c.id, {}),
                 }
                 for c in claims
             ],
@@ -199,10 +216,15 @@ class TraceContext:
         return lines
 
     def actor_decision_lines(self) -> list[str]:
-        """One record per actor decision, carrying the BYTE-EXACT prompt that was sent
-        to the provider (not a reconstruction) plus the provider's parsed response, so
-        the trace can prove what each specific actor actually received and why it was
-        invoked at that moment."""
+        """One record per actor invocation — the stable contract a replay or a frontend
+        reads.
+
+        Each record answers, without reconstruction: what woke this actor and when, what
+        had been delivered to it, what it actually noticed, which memories it retrieved,
+        what its plan was before, what it decided to do with that plan, what it intended,
+        what the world allowed, and what its state was afterwards. The prompt is the
+        byte-exact string that was sent.
+        """
 
         out = []
         for d in self.run_result.actor_decisions:
@@ -215,19 +237,29 @@ class TraceContext:
                         "branch_id": d.branch_id,
                         "actor_id": d.actor_id,
                         "canonical_identity": ctx.get("canonical_identity"),
+                        "branch_time": d.branch_time,
                         "stage": d.stage,
-                        "trigger": d.trigger,
-                        "actor_evidence_claim_ids": ctx.get("actor_evidence_claim_ids", []),
+                        "wake_reason": d.wake_reason,
+                        "wake_detail": d.wake_detail,
+                        "trigger_event_ids": d.trigger_event_ids,
+                        "delivered_observation_ids": d.delivered_observation_ids,
+                        "noticed_observation_ids": d.noticed_observation_ids,
                         "retrieved_memory_ids": d.retrieved_memory_ids,
-                        "observed_event_ids": _observed_ids(ctx.get("observations")),
+                        "plan_before": d.plan_before,
+                        "plan_disposition": d.plan_disposition,
+                        "plan_after": d.plan_after,
+                        "state_before": d.state_before,
+                        "state_after": d.state_after,
+                        "actor_evidence_claim_ids": ctx.get("actor_evidence_claim_ids", []),
                         "feasible_actions": ctx.get("feasible_actions", []),
                         "local_view": ctx,
                         "exact_prompt": prompt,
                         "provider_response": response,
-                        "choice": d.choice,
-                        "status": d.status,
-                        "reason": d.reason,
+                        "intent": d.intent,
+                        "validation_status": d.validation_status,
+                        "validation_reason": d.validation_reason,
                         "applied_event_ids": d.event_ids,
+                        "world_version_at_decision": d.world_version_at_decision,
                         "prompt_hash": d.prompt_hash,
                         "model": d.model,
                     }
@@ -273,6 +305,12 @@ class TraceContext:
         (out_dir / "actor_grounding.json").write_text(
             canonical_json(self.actor_grounding_manifest()) + "\n"
         )
+        (out_dir / "structural_uncertainty.json").write_text(
+            canonical_json(self.structure_manifest()) + "\n"
+        )
+        (out_dir / "branch_schedule.json").write_text(
+            canonical_json(self.schedule_manifest()) + "\n"
+        )
         (out_dir / "event_ledger.jsonl").write_text("\n".join(self.event_ledger_lines()) + "\n")
         (out_dir / "llm_calls.jsonl").write_text("\n".join(self.llm_call_lines()) + "\n")
         (out_dir / "actor_decisions.jsonl").write_text(
@@ -280,6 +318,35 @@ class TraceContext:
         )
         (out_dir / report_name).write_text(self.render_report(forecast_hash))
         return forecast_hash
+
+    def structure_manifest(self) -> dict[str, Any]:
+        """Whether the compiled causal structure was treated as settled, which
+        alternatives were simulated, and which could not be represented."""
+
+        a = self.structure_assessment
+        as_dict = getattr(a, "as_dict", None)
+        return (
+            as_dict()
+            if callable(as_dict)
+            else {"is_material": False, "reason": "not assessed", "alternatives": []}
+        )
+
+    def schedule_manifest(self) -> dict[str, Any]:
+        """The branch calendars: what ran, what stopped them, and what was still
+        scheduled when the question's window closed. This is what a replay or a
+        visualization reads to reconstruct time without re-running anything."""
+
+        return {
+            branch: {
+                "batches": d.batches,
+                "events": d.events,
+                "stop_reason": d.stop_reason,
+                "actor_invocations": dict(d.actor_call_counts),
+                "unfired_in_horizon": d.unfired_in_horizon,
+                "pending_beyond_horizon": d.pending_beyond_horizon,
+            }
+            for branch, d in sorted(self.run_result.diagnostics.items())
+        }
 
     # -- report -----------------------------------------------------------------
 
@@ -332,8 +399,21 @@ class TraceContext:
             )
         add("")
 
-        add("## 7. Compiled process graph")
-        add("- " + " -> ".join(f"{n.node_id}({n.stage})" for n in spec.process.nodes) + "\n")
+        add("## 7. Compiled process graph, external processes and wake rules")
+        for n in spec.process.nodes:
+            when = n.at or (f"after {n.after_node}+{n.delay_seconds}s" if n.after_node else "start")
+            add(
+                f"- **{n.node_id}** ({n.stage}) at {when}; participants "
+                f"{list(n.participants) or 'none'} -> {list(n.next_nodes) or 'end'}"
+            )
+        for proc in spec.external_processes:
+            add(
+                f"- external **{proc.process_id}**: {proc.description} "
+                f"({len(proc.occurrences)} occurrences)"
+            )
+        for rule in spec.wake_rules:
+            add(f"- wake **{rule.rule_id}**: wakes {list(rule.wakes)} because {rule.reason}")
+        add("")
 
         add("## 8. External uncertain events and branch weights")
         for u in self.compiled.uncertainty_variables:
@@ -342,12 +422,42 @@ class TraceContext:
                 add(f"    - {o.value}: weight {o.weight.value} [{o.weight.provenance.value}]")
         add("")
 
-        add("## 9. Actor decisions (local view -> action choice -> events)")
+        add("## 9. Actor invocations (what woke them -> what they intended -> what happened)")
+        add(
+            "Invocation counts differ by actor and by branch because different things "
+            "happened to them. Nothing here is scheduled.\n"
+        )
         for d in self.run_result.actor_decisions:
-            c = d.choice
+            c = d.intent
             add(
-                f"- [{d.branch_id}] {d.actor_id} @ {d.stage}: {c['mode']} "
-                f"{c.get('action_id') or c.get('novel_description')} -> {d.status} ({d.reason})"
+                f"- [{d.branch_id}] {d.branch_time} {d.actor_id} woken by "
+                f"*{d.wake_reason}* ({d.wake_detail}); plan: {d.plan_disposition}; "
+                f"intent {c['mode']} {c.get('action_id') or c.get('novel_description')} "
+                f"-> {d.validation_status} ({d.validation_reason})"
+            )
+        add("")
+
+        add("### 9b. Invocations per actor per branch")
+        per: dict[tuple[str, str], list[str]] = {}
+        for d in self.run_result.actor_decisions:
+            per.setdefault((d.branch_id, d.actor_id), []).append(d.wake_reason)
+        for (branch, actor), reasons in sorted(per.items()):
+            counts: dict[str, int] = {}
+            for r in reasons:
+                counts[r] = counts.get(r, 0) + 1
+            add(
+                f"- {branch} / {actor}: {len(reasons)} — "
+                + ", ".join(f"{k}×{v}" for k, v in sorted(counts.items()))
+            )
+        add("")
+
+        add("### 9c. Branch execution diagnostics")
+        for bid, diag in sorted(self.run_result.diagnostics.items()):
+            add(
+                f"- {bid}: {diag.batches} time-batches, {diag.events} events, "
+                f"stopped because *{diag.stop_reason}*; "
+                f"{diag.unfired_in_horizon} entries never fired in-horizon, "
+                f"{len(diag.pending_beyond_horizon)} scheduled beyond the horizon"
             )
         add("")
 

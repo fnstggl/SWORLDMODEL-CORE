@@ -1,4 +1,4 @@
-.PHONY: install test lint typecheck banxico banxico-eval synthetic clean all check
+.PHONY: install test lint typecheck clean check
 
 PY ?= python3
 
@@ -15,23 +15,7 @@ lint:
 typecheck:
 	$(PY) -m mypy
 
-# Run the Banxico pastcast and write the SEALED pre-outcome artifacts.
-# Uses the deterministic offline backends unless SWORLDMODEL_MODEL_API_KEY is set.
-banxico:
-	$(PY) -m sworldmodel banxico run
-
-# Compare the sealed pre-outcome forecast against the known result.
-# Refuses to run until the pre-outcome artifact exists and is hashed.
-banxico-eval:
-	$(PY) -m sworldmodel banxico evaluate
-
-# Generalization proof: synthetic committees through the same runtime.
-synthetic:
-	$(PY) -m sworldmodel synthetic run
-
 check: lint typecheck test
-
-all: check banxico
 
 clean:
 	rm -rf .mypy_cache .ruff_cache .pytest_cache

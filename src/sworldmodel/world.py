@@ -26,6 +26,7 @@ from typing import Any
 
 from .actors import ActorState, LocalView, Observation
 from .evidence import EvidenceView
+from .ids import content_id
 from .models import (
     BranchWeight,
     EpistemicType,
@@ -34,6 +35,7 @@ from .models import (
     ResolutionContract,
     Visibility,
 )
+from .schedule import Schedule
 from .worldspec import EntitySpec
 
 # Effect-op event kinds that carry observable content into an actor's view.
@@ -84,6 +86,38 @@ class Commitment:
 
 
 @dataclass(frozen=True)
+class Delivery:
+    """One step of the information lifecycle, for one actor and one event.
+
+    Visibility, delivery, and noticing are three different things and each is recorded
+    separately: an event may be *visible* to an actor, become *available* to it at some
+    later time through some channel, and be *noticed* later still — or never. Only
+    noticed information enters an actor's view, its memory, or its reasoning.
+    """
+
+    event_id: str
+    actor_id: str
+    available_at: datetime
+    notice_at: datetime | None = None  # when it is scheduled to be noticed
+    noticed_at: datetime | None = None  # when it actually was
+    channel: str = ""
+
+    @property
+    def noticed(self) -> bool:
+        return self.noticed_at is not None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "event_id": self.event_id,
+            "actor_id": self.actor_id,
+            "available_at": self.available_at.isoformat(),
+            "notice_at": self.notice_at.isoformat() if self.notice_at else None,
+            "noticed_at": self.noticed_at.isoformat() if self.noticed_at else None,
+            "channel": self.channel,
+        }
+
+
+@dataclass(frozen=True)
 class WorldFact:
     fact_id: str
     text: str
@@ -118,9 +152,16 @@ class WorldState:
     resources: tuple[tuple[str, float], ...] = ()
     commitments: tuple[Commitment, ...] = ()
     stage: str = "initial"
-    pending_events: tuple[Event, ...] = ()
     event_history: tuple[Event, ...] = ()
     terminal_state: Any = None  # TerminalEvaluation | None (set by engine)
+    # The branch clock: everything that is still going to happen, in time order.
+    schedule: Schedule = field(default_factory=Schedule)
+    # The information lifecycle: who has been delivered what, and who noticed it.
+    deliveries: tuple[Delivery, ...] = ()
+    # Monotonic state version. An actor's intention records the version it saw, so an
+    # intention formed against a world that has since moved can be caught and refused
+    # instead of being applied to a world the actor never observed.
+    version: int = 0
 
     # -- ExprContext surface (read-only accessors for the evaluator) ------------
 
@@ -180,22 +221,23 @@ class WorldState:
     # -- projection -------------------------------------------------------------
 
     def view_for(self, actor_id: str, trigger: Event | None = None) -> LocalView:
-        """Derive the local view an actor could have received by ``self.time``."""
+        """Derive the local view of an actor: strictly what it has **noticed**.
+
+        Not what happened, not what was visible, not what was delivered — what this
+        actor actually took in, by this branch time.
+        """
 
         actor = self.actors[actor_id]
-        role = actor.role
+        by_id = {ev.event_id: ev for ev in self.event_history}
 
         observations: list[Observation] = []
-        for ev in self.event_history:
-            if ev.status is not EventStatus.APPLIED or ev.time > self.time:
+        for d in self.deliveries:
+            if d.actor_id != actor_id or d.noticed_at is None or d.noticed_at > self.time:
                 continue
-            if ev.kind not in _OBSERVABLE_KINDS:
+            ev = by_id.get(d.event_id)
+            if ev is None or ev.status is not EventStatus.APPLIED:
                 continue
-            if not self._visible_to(ev, actor_id, role):
-                continue
-            if ev.event_id in actor.last_observed_event_ids:
-                continue
-            observations.append(_to_observation(ev))
+            observations.append(_to_observation(ev, d))
         observations.sort(key=lambda o: (o.time, o.obs_id))
 
         public_facts = tuple(
@@ -206,7 +248,7 @@ class WorldState:
         return LocalView(
             actor_id=actor_id,
             branch_time=self.time,
-            role=role,
+            role=actor.role,
             authority=actor.authority,
             stage=self.stage,
             public_facts=public_facts,
@@ -215,10 +257,26 @@ class WorldState:
             question=self.contract.question,
             subject=self.contract.subject_entity,
             trigger_obs_id=trigger.event_id if trigger else None,
+            world_version=self.version,
         )
 
+    def observers_of(self, ev: Event) -> tuple[str, ...]:
+        """Which actors *could* observe this event at all. Visibility only — becoming
+        available and being noticed are separate, later steps."""
+
+        out = []
+        for aid, actor in self.actors.items():
+            if aid == ev.actor_id and aid not in ev.audience:
+                # An actor does not receive its own public act as news — it already
+                # knows it acted. It *does* receive things addressed to it personally,
+                # including the world's verdict on what it just attempted.
+                continue
+            if self.visible_to(ev, aid, actor.role):
+                out.append(aid)
+        return tuple(out)
+
     @staticmethod
-    def _visible_to(ev: Event, actor_id: str, role: str) -> bool:
+    def visible_to(ev: Event, actor_id: str, role: str) -> bool:
         if ev.visibility is Visibility.PUBLIC:
             return True
         if ev.visibility is Visibility.PRIVATE:
@@ -226,6 +284,52 @@ class WorldState:
         if ev.visibility is Visibility.ROLE:
             return role in ev.audience
         return False
+
+    # -- information lifecycle --------------------------------------------------
+
+    def deliver(self, deliveries: tuple[Delivery, ...]) -> WorldState:
+        """Record that events became available to actors. Availability is not
+        awareness: nothing enters an actor's view until it is noticed."""
+
+        if not deliveries:
+            return self
+        known = {(d.event_id, d.actor_id) for d in self.deliveries}
+        fresh = tuple(d for d in deliveries if (d.event_id, d.actor_id) not in known)
+        if not fresh:
+            return self
+        return replace(self, deliveries=self.deliveries + fresh, version=self.version + 1)
+
+    def mark_noticed(self, actor_id: str, event_ids: frozenset[str], at: datetime) -> WorldState:
+        """Flip delivered-but-unseen information to noticed for one actor."""
+
+        changed = False
+        out: list[Delivery] = []
+        for d in self.deliveries:
+            if d.actor_id == actor_id and d.event_id in event_ids and d.noticed_at is None:
+                out.append(replace(d, noticed_at=at))
+                changed = True
+            else:
+                out.append(d)
+        if not changed:
+            return self
+        return replace(self, deliveries=tuple(out), version=self.version + 1)
+
+    def available_unnoticed(self, actor_id: str, *, by: datetime) -> tuple[Delivery, ...]:
+        return tuple(
+            d
+            for d in self.deliveries
+            if d.actor_id == actor_id and d.noticed_at is None and d.available_at <= by
+        )
+
+    def noticed_event_ids(self, actor_id: str) -> frozenset[str]:
+        return frozenset(
+            d.event_id for d in self.deliveries if d.actor_id == actor_id and d.noticed
+        )
+
+    # -- schedule ---------------------------------------------------------------
+
+    def with_schedule(self, schedule: Schedule) -> WorldState:
+        return replace(self, schedule=schedule)
 
     # -- state transitions (all return new instances) --------------------------
 
@@ -236,7 +340,6 @@ class WorldState:
         resources = dict(self.resources)
         commitments = list(self.commitments)
         history = list(self.event_history)
-        pending = list(self.pending_events)
         time = self.time
 
         for raw in events:
@@ -288,7 +391,6 @@ class WorldState:
                 documents.setdefault(did, {}).update(dict(data.get("fields", {})))
 
             history.append(ev)
-            pending = [pe for pe in pending if pe.event_id != ev.event_id]
             time = max(time, ev.time)
 
         return replace(
@@ -299,8 +401,8 @@ class WorldState:
             resources=tuple(sorted(resources.items())),
             commitments=tuple(commitments),
             event_history=tuple(history),
-            pending_events=tuple(pending),
             time=time,
+            version=self.version + 1,
         )
 
     def with_stage(self, stage: str) -> WorldState:
@@ -317,10 +419,10 @@ class WorldState:
     def set_terminal(self, evaluation: Any) -> WorldState:
         return replace(self, terminal_state=evaluation)
 
-    def enqueue(self, events: list[Event] | tuple[Event, ...]) -> WorldState:
-        return replace(self, pending_events=self.pending_events + tuple(events))
-
     def clone(self, new_branch_id: str, weight: BranchWeight) -> WorldState:
+        """Fork a branch. Actor memory, plans and commitments are copied, never shared:
+        two possible worlds must be able to diverge completely."""
+
         new_actors = {aid: a.clone() for aid, a in self.actors.items()}
         return replace(
             self,
@@ -328,6 +430,21 @@ class WorldState:
             parent_branch_id=self.branch_id,
             weight=weight,
             actors=new_actors,
+        )
+
+    def state_digest(self) -> str:
+        """A content hash of the decision-relevant world state, used to detect that a
+        trajectory has stopped making progress. Time is excluded on purpose: a world
+        where only the clock moves has not changed."""
+
+        return content_id(
+            "wstate",
+            repr(self.fields),
+            repr(tuple((k, tuple((r.key, r.value, r.by) for r in v)) for k, v in self.records)),
+            repr(self.documents),
+            repr(self.resources),
+            repr(tuple((c.by, c.text, c.tag) for c in self.commitments)),
+            self.stage,
         )
 
 
@@ -342,21 +459,25 @@ def _num(v: Any) -> float:
         return 0.0
 
 
-def _to_observation(ev: Event) -> Observation:
+def _to_observation(ev: Event, delivery: Delivery) -> Observation:
     data = ev.payload_dict
     info: dict[str, Any] = {}
     for key in _INFO_KEYS:
         sub = data.get(key)
         if isinstance(sub, dict):
             info.update(sub)
+    assert delivery.noticed_at is not None
     return Observation(
         obs_id=ev.event_id,
-        time=ev.time,
+        time=delivery.noticed_at,
         kind=ev.kind,
         source=ev.actor_id or "environment",
         summary=_summarize(ev),
         info_fields=tuple(sorted(info.items())),
         evidence_claim_ids=ev.evidence_claim_ids,
+        occurred_at=ev.time,
+        available_at=delivery.available_at,
+        channel=delivery.channel,
     )
 
 

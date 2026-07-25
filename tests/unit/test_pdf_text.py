@@ -30,11 +30,15 @@ def test_non_pdf_bytes_yield_no_text() -> None:
     assert pdf_to_text(b"<html><body>not a pdf</body></html>") == ""
 
 
-def test_extracts_metadata_creation_date() -> None:
+def test_metadata_date_is_the_latest_not_the_earliest() -> None:
+    # A document is only as old as its most recent modification: the text extracted is
+    # the text as it stands now. Dating this PDF by its creation date would admit a
+    # document edited after an information cutoff into a pastcast under a pre-cutoff
+    # timestamp, which is exactly the leak the latest-date rule closes.
     pdf = b"%PDF-1.7\n<< /CreationDate (D:20260415120000-06'00') /ModDate (D:20260420) >>\n%%EOF"
     dt = pdf_metadata_date(pdf)
     assert dt is not None
-    assert dt.year == 2026 and dt.month == 4 and dt.day == 15  # earliest metadata date
+    assert (dt.year, dt.month, dt.day) == (2026, 4, 20)
     assert pdf_metadata_date(b"%PDF-1.7 no dates here") is None
 
 

@@ -22,6 +22,13 @@ _TJ = re.compile(rb"\((?:[^()\\]|\\.)*\)\s*Tj")
 _TJ_ARRAY = re.compile(rb"\[(.*?)\]\s*TJ", re.DOTALL)
 _ESCAPED = re.compile(rb"\\([()\\])")
 
+# Resource bounds on a single file. Neither decides anything about a source's content
+# or credibility; they bound the work one hostile or enormous PDF can cause.
+_MAX_TEXT_CHARS = 200_000
+# Content streams decompress to far more bytes than they yield characters, so the scan
+# is allowed a proportionally larger byte budget before it stops.
+_STREAM_BYTES_PER_TEXT_CHAR = 8
+
 
 def looks_like_pdf(content: bytes, *, content_type: str = "", url: str = "") -> bool:
     """Detect a PDF by magic bytes, declared content type, or URL suffix."""
@@ -33,8 +40,13 @@ def looks_like_pdf(content: bytes, *, content_type: str = "", url: str = "") -> 
     return url.split("?", 1)[0].lower().endswith(".pdf")
 
 
-def pdf_to_text(content: bytes, *, max_chars: int = 200_000) -> str:
-    """Extract readable text from PDF bytes. Returns "" if nothing usable is found."""
+def pdf_to_text(content: bytes, *, max_chars: int = _MAX_TEXT_CHARS) -> str:
+    """Extract readable text from PDF bytes. Returns "" if nothing usable is found.
+
+    ``max_chars`` is a resource bound on a hostile or enormous file, not a judgment
+    about the document: it caps work, and truncation is visible to the caller because
+    the returned text is short relative to the file.
+    """
 
     if content[:5] != b"%PDF-":
         return ""
@@ -52,23 +64,28 @@ def pdf_to_text(content: bytes, *, max_chars: int = 200_000) -> str:
         for arr in _TJ_ARRAY.finditer(chunk):
             parts.append("".join(_decode_str(s.group(0)) for s in _STR.finditer(arr.group(1))))
         total += len(chunk)
-        if total > max_chars * 8:  # bound work on very large files
+        if total > max_chars * _STREAM_BYTES_PER_TEXT_CHAR:  # bound work on very large files
             break
     text = "\n".join(p for p in parts if p.strip())
     return _tidy(text)[:max_chars]
 
 
 def pdf_metadata_date(content: bytes) -> datetime | None:
-    """The document's own creation/modification date from its metadata (``/CreationDate``
-    or ``/ModDate``). This is the reliable publication date used for cutoff enforcement;
-    the *earliest* metadata date found is taken, since a document cannot predate it."""
+    """The date this document's *current bytes* are known to be no older than.
+
+    Returns the **latest** ``/CreationDate`` or ``/ModDate`` in the metadata. The text
+    this module extracts is the text of the file as it stands now, so the file is only
+    as old as its most recent modification: a document created before an information
+    cutoff and edited after it carries post-cutoff content, and dating it by its
+    creation date would admit exactly that content into a pastcast.
+    """
 
     dates: list[datetime] = []
     for m in _PDF_DATE.finditer(content):
         dt = _parse_pdf_date(m.group(1), m.group(2))
         if dt is not None:
             dates.append(dt)
-    return min(dates) if dates else None
+    return max(dates) if dates else None
 
 
 def _parse_pdf_date(digits: bytes, offset: bytes | None) -> datetime | None:

@@ -11,9 +11,10 @@ from __future__ import annotations
 
 import itertools
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
-from .errors import MassConservationError
+from .errors import MassConservationError, WorldIntegrityError
 from .models import UncertaintyOutcome, UncertaintySpec, WeightProvenance
 
 # Ordering from weakest (most epistemically humble) to strongest identification.
@@ -36,6 +37,10 @@ class Scenario:
     provenance_detail: str
     field_levels: tuple[tuple[str, Any], ...]  # world-field name -> level under this branch
     conditions: tuple[tuple[str, str], ...]  # (variable, outcome_value)
+    # When this branch's uncertain value actually becomes public, if the evidence says.
+    # ``None`` means it is a standing condition of the branch rather than a dated
+    # release: the runtime must not invent a date for it.
+    release_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -49,6 +54,22 @@ def _weakest(provs: list[WeightProvenance]) -> WeightProvenance:
     return min(provs, key=lambda p: _PROVENANCE_STRENGTH[p])
 
 
+def _refuse_unmodeled_dependence(specs: tuple[UncertaintySpec, ...]) -> None:
+    """Refuse to cross two uncertainties the compiler itself said are dependent."""
+
+    present = {s.variable for s in specs}
+    for spec in specs:
+        clashing = sorted(present & set(spec.depends_on))
+        if clashing:
+            raise WorldIntegrityError(
+                f"uncertainty {spec.variable!r} declares dependence on {clashing}, which are "
+                "also modeled as separate uncertainties. Crossing dependent unknowns as if "
+                "independent invents a joint distribution. Express them as one uncertainty "
+                "whose outcomes are joint states.",
+                details={"variable": spec.variable, "depends_on": clashing},
+            )
+
+
 def enumerate_scenarios(
     uncertainties: tuple[UncertaintySpec, ...],
     baseline_fields: dict[str, Any],
@@ -58,19 +79,29 @@ def enumerate_scenarios(
     """Build joint scenarios from the world's uncertainty declarations.
 
     If there is no declared uncertainty, a single baseline scenario (weight 1.0)
-    represents the world as verified. Otherwise we take the product across uncertain
-    variables (each is a distinct external event, so independence is defensible), rank
-    by weight, cap at ``max_branches``, and disclose any dropped mass.
+    represents the world as verified.
+
+    Otherwise, variables are combined **only where independence is defensible**. Any
+    variable that declares a dependence on another present variable is refused: two
+    dependent unknowns multiplied as if independent produce confident joint
+    probabilities that nothing supports, and the fix is for the compiler to express
+    them as one uncertainty with joint outcomes, not for this function to guess a
+    correlation. Independent variables are crossed, ranked, capped at ``max_branches``,
+    and any dropped mass is disclosed rather than renormalized away.
     """
 
     specs = uncertainties
+    _refuse_unmodeled_dependence(specs)
     if not specs:
         baseline = Scenario(
             scenario_id="baseline",
             weight=1.0,
             provenance=WeightProvenance.DIRECT_EMPIRICAL,
             provenance_detail="no declared future uncertainty; world taken as verified",
-            field_levels=tuple(sorted(baseline_fields.items())),
+            # Nothing is released into a baseline branch: the verified initial field
+            # values are already in the base world. Re-delivering them as an event
+            # would make the world's own starting state look like news.
+            field_levels=(),
             conditions=(),
         )
         return ScenarioSet(scenarios=(baseline,), truncated_mass=0.0, truncated_reason="")
@@ -87,13 +118,14 @@ def enumerate_scenarios(
         per_var.append(list(spec.outcomes))
         var_names.append(spec.variable)
 
-    baseline_levels = dict(baseline_fields)
     raw: list[Scenario] = []
     for combo in itertools.product(*per_var):
         weight = 1.0
         provs: list[WeightProvenance] = []
         details: list[str] = []
-        levels: dict[str, Any] = dict(baseline_levels)
+        # Only the genuinely uncertain values travel with the branch. The rest of the
+        # world is already verified and needs no announcement.
+        levels: dict[str, Any] = {}
         conditions: list[tuple[str, str]] = []
         for name, outcome, spec in zip(var_names, combo, specs, strict=True):
             var_total = sum(o.weight.value for o in spec.outcomes)
@@ -104,6 +136,14 @@ def enumerate_scenarios(
                 levels[fld] = lvl
             conditions.append((name, outcome.value))
         sid = "sc_" + "_".join(f"{n}:{v}" for n, v in conditions)
+        # A release date belongs to the uncertainty that has one. Borrowing the
+        # earliest across all of them would give a branch a date for a value whose
+        # timing the evidence never established.
+        releases = [
+            spec.release_at
+            for spec, outcome in zip(specs, combo, strict=True)
+            if spec.release_at is not None and outcome.field_effects
+        ]
         raw.append(
             Scenario(
                 scenario_id=sid,
@@ -112,6 +152,7 @@ def enumerate_scenarios(
                 provenance_detail="; ".join(details),
                 field_levels=tuple(sorted(levels.items())),
                 conditions=tuple(conditions),
+                release_at=min(releases) if releases else None,
             )
         )
 
