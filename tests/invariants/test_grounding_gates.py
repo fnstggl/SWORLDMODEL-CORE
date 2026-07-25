@@ -28,6 +28,7 @@ from sworldmodel.coverage import (
     build_candidate_inventory,
     evidence_checklist,
 )
+from sworldmodel.epistemics import EpistemicClass, GroundingLevel
 from sworldmodel.errors import WorldIntegrityError
 from sworldmodel.evidence import EvidenceClaim, EvidenceStore, EvidenceView
 from sworldmodel.grounding import (
@@ -40,7 +41,14 @@ from sworldmodel.grounding import (
 from sworldmodel.models import AuthorityLevel, EpistemicType, ResolutionContract, SourceType
 from sworldmodel.reality import verify_reality
 from sworldmodel.world_compiler import build_base_world
-from sworldmodel.worldspec import ActorSpec, EntitySpec, Expr, TerminalExpression
+from sworldmodel.worldspec import (
+    ActorSpec,
+    EntitySpec,
+    Expr,
+    ProcessGraph,
+    TerminalExpression,
+    WorldSpec,
+)
 
 AS_OF = datetime.fromisoformat("2026-05-14T23:59:59+00:00")
 HORIZON = datetime.fromisoformat("2026-06-25T23:59:59+00:00")
@@ -96,6 +104,24 @@ def _actor(entity_id: str, name: str) -> ActorState:
         entity_id, name, "person", is_actor=True, role="member", authority=("decide",)
     )
     return ActorState.from_spec(entity, ActorSpec(entity_id), default_time=AS_OF)
+
+
+def _spec(actors: dict[str, ActorState]) -> WorldSpec:
+    """The minimum WorldSpec the reality gate reads: which entities the world contains
+    and whether anything non-agent runs in it."""
+
+    return WorldSpec(
+        title="fixture",
+        entities=tuple(a.entity for a in actors.values()),
+        actors=tuple(ActorSpec(aid) for aid in actors),
+        fields=(),
+        resources=(),
+        channels=(),
+        documents=(),
+        actions=(),
+        process=ProcessGraph(()),
+        terminal=TerminalExpression(Expr("const", (True,))),
+    )
 
 
 def _people_view() -> EvidenceView:
@@ -159,9 +185,16 @@ def test_a_supported_mark_cannot_be_constructed_without_a_citation() -> None:
             GroundedItem("she favours a hold", mark, ())
 
 
-def test_a_cited_record_that_is_not_the_actors_own_does_not_ground_it() -> None:
-    """Citations alone are not grounding: a fact about the world, attached to a person,
-    is still not that person's own record."""
+def test_a_cited_record_that_is_not_the_actors_own_does_not_ground_it_as_its_own() -> None:
+    """Citations alone are not a personal record: a fact about the world, attached to a
+    person, is still not that person's own statement.
+
+    What follows from that is a *level*, not a deletion. The actor is admitted — a real
+    member of a real board does not stop existing because no source quotes them — but
+    the evidence reaches only their institution, so their own position is HYPOTHETICAL
+    and the simulation is what resolves it. Under the previous rule this actor was
+    removed from the world, which is how live runs ended up with nobody in them.
+    """
 
     ambient = profile_from_member(
         actor_id="ada",
@@ -172,7 +205,65 @@ def test_a_cited_record_that_is_not_the_actors_own_does_not_ground_it() -> None:
         memory_seeds=((f"{BOARD} met on Tuesday.", ("k_ada",)),),
     )
     assert not ambient.has_own_cited_record
-    assert not assess_actor_grounding((ambient,)).is_complete
+    assessment = ambient.grounding_assessment()
+    assert assessment.level is GroundingLevel.ROLE_LEVEL_BEHAVIOR
+    assert assessment.disposition_class is EpistemicClass.HYPOTHETICAL
+    assert assessment.admissible
+    assert assess_actor_grounding((ambient,)).is_complete
+    # And the actor is told, in its own prompt, that its position is not established.
+    assert "role-level or institution-level" in ambient.render_grounding()
+
+
+def test_a_verified_office_is_enough_to_model_a_real_decision_maker() -> None:
+    """The correction this system needed most.
+
+    A commissioner, governor or minister whose office and authority are a matter of
+    public record is a real causal producer. No retrieved source quotes their private
+    preference — that is exactly the thing the simulation exists to resolve — and
+    demanding one before they may exist is what left EU–Mercosur and Tesla with zero
+    compiled participants.
+    """
+
+    from dataclasses import replace as _replace
+
+    officeholder = _replace(
+        profile_from_member(
+            actor_id="sef",
+            name="the Trade Commissioner",
+            role="Commissioner for Trade",
+            authority=("sign_on_behalf_of_the_union",),
+            previous_action=None,
+        ),
+        claim_ids=("k_office",),  # the entity's own citation, attesting the office
+    )
+    assert not officeholder.has_own_cited_record
+    assessment = officeholder.grounding_assessment()
+    assert assessment.level is GroundingLevel.OFFICIAL_ROLE
+    assert assessment.disposition_class is EpistemicClass.INFERRED
+    assert assessment.supporting_claim_ids == ("k_office",)
+    assert assess_actor_grounding((officeholder,)).is_complete
+
+
+def test_a_name_with_no_citation_of_any_kind_is_still_refused() -> None:
+    """The hierarchy admits weak grounding, not absent grounding. An actor no surviving
+    claim attaches to the world in any way is invented, and stays refused."""
+
+    invented = profile_from_member(
+        actor_id="ghost",
+        name="A. Person",
+        role="",
+        authority=(),
+        previous_action=None,
+        memory_seeds=(("I intend to vote against.", ()),),  # citation did not survive
+    )
+    assessment = invented.grounding_assessment()
+    assert assessment.level is GroundingLevel.NONE
+    assert not assessment.admissible
+    report = assess_actor_grounding((invented,))
+    assert not report.is_complete
+    with pytest.raises(WorldIntegrityError) as exc:
+        enforce_actor_grounding(report)
+    assert "ghost" in str(exc.value)
 
 
 # --------------------------------------------------------------------------- #
@@ -260,11 +351,11 @@ def test_an_event_is_not_represented_merely_by_saying_decision() -> None:
 def test_roster_is_checked_against_the_participants_the_evidence_names() -> None:
     actors = {"ada": _actor("ada", "Ada North"), "ben": _actor("ben", "Ben East")}
     with pytest.raises(WorldIntegrityError) as exc:
-        verify_reality(_contract(), _people_view(), actors)
+        verify_reality(_contract(), _people_view(), actors, _spec(actors))
     assert "Cara West" in str(exc.value)
 
     actors["cara"] = _actor("cara", "Cara West")
-    manifest = verify_reality(_contract(), _people_view(), actors)
+    manifest = verify_reality(_contract(), _people_view(), actors, _spec(actors))
     assert manifest.expected_participants == 3
     assert manifest.represented_participants == 3
 
@@ -274,7 +365,8 @@ def test_an_unestablished_participant_count_is_reported_as_unestablished() -> No
     manifest must say so rather than report a check that never ran."""
 
     view = _view(_claim("k_ctx", "conditions were unchanged over the quarter.", ()))
-    manifest = verify_reality(_contract(), view, {"ada": _actor("ada", "Ada North")})
+    actors = {"ada": _actor("ada", "Ada North")}
+    manifest = verify_reality(_contract(), view, actors, _spec(actors))
     assert manifest.expected_participants is None
     assert any("not established" in n for n in manifest.notes)
 

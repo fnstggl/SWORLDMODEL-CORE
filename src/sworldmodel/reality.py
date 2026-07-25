@@ -25,12 +25,14 @@ from .coverage import evidence_named_participants, participants_absent_from
 from .errors import EvidenceError, WorldIntegrityError
 from .evidence import EvidenceView
 from .models import IntegrityVerdict, RealityManifest, ResolutionContract
+from .worldspec import WorldSpec
 
 
 def verify_reality(
     contract: ResolutionContract,
     evidence: EvidenceView,
     actors: dict[str, ActorState],
+    spec: WorldSpec,
 ) -> RealityManifest:
     """Build the manifest and RAISE if the world is not faithful. Returns a VERIFIED
     manifest only when every check that could be run passed, and records in
@@ -40,21 +42,47 @@ def verify_reality(
     roster_names = tuple(a.entity.name for a in actors.values())
     notes: list[str] = []
 
-    # 0. There must be at least one verified actor to simulate.
-    if not actors:
-        # The compiler was told the world must contain at least one actor whose
-        # decisions produce the outcome. Emitting none is a defect in that compilation,
-        # so the caller may compile again from the same evidence before giving up. What
-        # it may not do is simulate a world in which nobody decides anything.
+    # 0. Something must exist that can produce the outcome.
+    #
+    #    Not necessarily a *person*. A quarterly delivery count is produced by
+    #    production throughput, factory schedules, inventory and logistics; requiring a
+    #    named individual there would mean inventing an executive who personally decides
+    #    how many cars get built, which is a less faithful world than one with no
+    #    individuals in it at all. What may never be missing is a causal pathway: some
+    #    modeled thing whose operation produces the answer.
+    if not actors and not spec.external_processes:
         raise WorldIntegrityError(
-            "no actors were compiled — there is nobody whose decisions could produce "
-            "this outcome, so there is nothing to simulate",
-            details={"verified and represented participants": 0, "recompilable": True},
+            "the compiled world has no causal producer — no actor whose decisions and "
+            "no external or operational process whose behavior could produce this "
+            "outcome, so there is nothing to simulate",
+            details={
+                "verified and represented participants": 0,
+                "external processes": 0,
+                "recompilable": True,
+            },
+        )
+    if not actors:
+        notes.append(
+            "no individual or organizational actor was compiled: this world resolves "
+            f"through {len(spec.external_processes)} modeled process(es). That is "
+            "correct only if the outcome is genuinely produced by throughput or "
+            "administration rather than by anyone's decision"
         )
 
-    # 1. Every participant the verified evidence names must be on the compiled roster.
-    #    This is the only participant check anchored outside the compiler's own output.
-    named = evidence_named_participants(evidence, contract, focal_identities=roster_names)
+    # 1. Every participant the verified evidence names must be present in the compiled
+    #    world. This is the only participant check anchored outside the compiler's own
+    #    output.
+    #
+    #    Present in the world — not necessarily as an LLM actor. Whether a named person
+    #    should be a deliberating actor, a non-deciding entity, or part of an
+    #    organization acting as one unit is a *representation* question the evidence
+    #    answers differently for a five-seat board and for a manufacturer's quarterly
+    #    output. Forcing every named person into an actor slot is how a system ends up
+    #    inventing an executive who personally decides a delivery count. What the
+    #    evidence does establish, and what this gate enforces, is that a person it names
+    #    in role terms cannot silently vanish from the world.
+    entity_names = tuple(e.name for e in spec.entities)
+    named = evidence_named_participants(evidence, contract, focal_identities=entity_names)
     expected: int | None
     if not named:
         expected = None
@@ -65,16 +93,29 @@ def verify_reality(
         )
     else:
         expected = len(named)
-        absent = participants_absent_from(named, roster_names)
+        absent = participants_absent_from(named, entity_names)
         if absent:
             raise WorldIntegrityError(
-                "the compiled roster omits participants the verified evidence names — "
+                "the compiled world omits participants the verified evidence names — "
                 "simulation refused",
                 details={
                     "participants named by evidence": list(named),
-                    "compiled roster": list(roster_names),
-                    "absent from the roster": list(absent),
+                    "compiled entities": list(entity_names),
+                    "compiled actor roster": list(roster_names),
+                    "absent from the world": list(absent),
+                    "recompilable": True,
                 },
+            )
+        present_not_acting = participants_absent_from(named, roster_names)
+        if present_not_acting:
+            scales = {e.name: e.representation_scale for e in spec.entities}
+            notes.append(
+                "represented but not deliberating: "
+                + "; ".join(
+                    f"{n} (as {scales.get(n) or 'entity'})" for n in sorted(present_not_acting)
+                )
+                + " — the evidence names them, and this world models their effect "
+                "through the process rather than through their own decisions"
             )
 
     # 2. The compiled world's own declared participant count must match the roster it

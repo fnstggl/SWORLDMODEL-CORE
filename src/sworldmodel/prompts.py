@@ -228,19 +228,45 @@ def render_world_compile_prompt(context: dict[str, Any]) -> str:
 
 _COMPILE_RULES = """RULES THE COMPILED WORLD MUST SATISFY:
 
+WHAT PRODUCES THE OUTCOME. First decide what actually causes this outcome in the real world, then
+represent that. A causal producer may be a person, an organization, an institutional body, a subunit,
+a coalition, a population stratum, a network, a market, an administrative process, a production
+system, a logistical system, or an external physical or economic process. Some questions are settled
+by a handful of named people; some are settled by throughput, demand and a reporting calendar with no
+individual deciding anything. Model whichever is true here.
+
+Never invent a person who "decides" an aggregate. A quarterly delivery total is produced by
+production, inventory, logistics and demand — not by an executive choosing a number. If the honest
+answer is that no individual controls the outcome, compile no actors and put the causal machinery in
+`external_processes`, operational `process` nodes and fields. That world is valid.
+
 REPRESENTATION SCALE. For every entity, choose the level that is causally faithful and say which:
 individual, organization (acting as one unit), subunit, population_stratum, network, or
 external_process. Do not turn a body of independent decision-makers into one actor, and do not
 invent a million agents where an aggregate process is the honest representation. If an entity stands
 for many real units, give represents_count.
 
-ACTORS ARE SPECIFIC PEOPLE OR BODIES. The world MUST contain at least one actor whose decisions
-actually produce the outcome, and every entity that decides must appear in both `entities`
-(is_actor true) and `actors`. Each actor MUST carry at least one memory_seed stating, in the first
-person, something that entity itself verifiably did or said, citing the claim ids that support it.
-An actor with only a name and a role is rejected and the run is refused. If the evidence records
-nothing about an actor, say exactly that in the seed rather than inventing a fact, and never give
-one actor another actor's history.
+ACTORS ARE REAL OCCUPANTS OF REAL ROLES. Compile an actor for each person or body whose own
+decisions genuinely move this outcome. Every entity that decides must appear in both `entities`
+(is_actor true) and `actors`.
+
+You do NOT need a first-person quotation to model someone. An actor is admissible when the evidence
+establishes that they hold the relevant office, that the office carries relevant authority, and that
+they sit inside the causal boundary. Grounding is ranked, strongest first:
+  1. their own action or first-person statement
+  2. verified office, membership and authority
+  3. documented prior behavior
+  4. official institutional or organizational policy
+  5. contemporaneous reporting naming them
+  6. role-level or institution-level behavioral evidence
+Level 2 is enough. A minister, governor, commissioner, negotiator or executive does not stop existing
+because no retrieved source quotes their private preference — that preference is exactly what the
+simulation is for. Give it as an uncertainty, not as a fact and not as a reason to omit them.
+
+What is refused is an actor with NO surviving citation of any kind: a name with nothing behind it.
+So cite the claims that establish each actor's role and authority on the entity, put whatever the
+evidence genuinely records in `memory_seeds` with its claim ids, and where the record is silent say
+so plainly instead of inventing a statement. Never give one actor another actor's history.
 
 PLANS MUST BE GROUNDED, NOT INVENTED. An actor's initial_plan is optional and should be sparse. Give
 one only where evidence, a published schedule, a role obligation or an existing commitment supports
@@ -269,16 +295,27 @@ PARTS OF THE WORLD THAT ARE NOT PEOPLE. Put scheduled data releases, market or a
 clocks, publication cycles, delivery systems and legal deadlines in `external_processes`. Do not
 create an actor whose only job is to make the weather happen.
 
-UNCERTAINTY. Declare only genuine unknowns that can change the answer. Give each outcome's weight a
-provenance, and say `release_at` if the evidence establishes when the unknown value becomes public.
-If two unknowns are not independent, do NOT list them separately — list one uncertainty whose
-outcomes are joint states, or the run is refused. When no defensible point weight exists, use
-symmetric_ignorance_assumption rather than inventing precision.
+UNCERTAINTY IS THE INPUT, NEVER THE ANSWER. Declare only genuine unknowns that can change the answer:
+incoming data, private inclinations, interpretations, demand, throughput, implementation success,
+attention, timing, delay. Give each outcome's weight a provenance, and say `release_at` if the
+evidence establishes when the unknown value becomes public. If two unknowns are not independent, do
+NOT list them separately — list one uncertainty whose outcomes are joint states, or the run is
+refused. When no defensible point weight exists, use symmetric_ignorance_assumption rather than
+inventing precision.
 
-THE TERMINAL IS AN EXPRESSION OVER WORLD STATE. Write the condition that makes the answer YES in
-terms of what will actually be true in the world, using only the universal operators. Use
-`unresolved_when` for states where the process genuinely did not determine the answer — an
-undetermined world must report as unresolved, never be rounded to NO."""
+An uncertainty may set exogenous conditions. It may NEVER set a term the terminal reads — not the
+decision, not the vote result, not whether it was unanimous, not the final count, not whether the
+agreement was signed, not any other encoding of YES or NO. A world whose terminal terms come from
+branch weights is refused, because then the branch weights are the forecast and the simulation is
+scenery.
+
+THE TERMINAL IS AN EXPRESSION OVER WORLD STATE, AND SOMETHING MUST PRODUCE IT. Write the condition
+that makes the answer YES in terms of what will actually be true in the world, using only the
+universal operators. Every term it reads must be written by something that runs: an action an actor
+takes, a process node, or an external/operational process. Check each term before you finish — if
+nothing writes it, the world is incomplete. Use `unresolved_when` for states where the process
+genuinely did not determine the answer — an undetermined world must report as unresolved, never be
+rounded to NO."""
 
 
 _WORLD_SCHEMA = """Return a SINGLE JSON object:

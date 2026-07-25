@@ -137,7 +137,7 @@ def compile_world(
     base_world = build_base_world(spec, contract, evidence, world_facts)
 
     # Gate 1 — reality integrity: refuse a structurally false world.
-    manifest = verify_reality(contract, evidence, base_world.actors)
+    manifest = verify_reality(contract, evidence, base_world.actors, spec)
 
     # Gate 2 — actors must be specific grounded entities, not generic role templates.
     profiles = tuple(
@@ -543,19 +543,60 @@ def _expr_collections(expr: Any) -> set[str]:
     return out
 
 
+def _effect_writes(effects: Any) -> tuple[set[str], set[str]]:
+    fields: set[str] = set()
+    collections: set[str] = set()
+    for eff in effects:
+        fields |= _effect_fields(eff)
+        if eff.op == "append_record":
+            coll = eff.params_dict.get("collection")
+            if isinstance(coll, str):
+                collections.add(coll)
+    return fields, collections
+
+
 def _action_writes(spec: WorldSpec) -> tuple[set[str], set[str]]:
     """What the compiled actions can actually change: (fields, record collections)."""
 
     fields: set[str] = set()
     collections: set[str] = set()
     for action in spec.actions:
-        for eff in action.effects:
-            fields |= _effect_fields(eff)
-            if eff.op == "append_record":
-                coll = eff.params_dict.get("collection")
-                if isinstance(coll, str):
-                    collections.add(coll)
+        f, c = _effect_writes(action.effects)
+        fields |= f
+        collections |= c
     return fields, collections
+
+
+def terminal_producers(spec: WorldSpec) -> dict[str, tuple[str, ...]]:
+    """For every term the terminal reads, what in this world can write it.
+
+    This is the compile-time half of terminal producer lineage: before anything runs,
+    each terminal term must name at least one thing whose *operation* could set it — an
+    action somebody takes, a process node that fires, or an external/operational process
+    that advances. The runtime half records which of those actually did it.
+
+    An uncertainty is deliberately not a producer. A branch condition may influence a
+    producer; it may not stand in for one. A terminal term whose only writer is an
+    uncertainty's ``field_effects`` is the answer wearing the costume of a world state.
+    """
+
+    terms = _expr_fields(spec.terminal.yes_when) | _expr_collections(spec.terminal.yes_when)
+    producers: dict[str, list[str]] = {t: [] for t in terms}
+
+    def record(label: str, effects: Any) -> None:
+        fields, colls = _effect_writes(effects)
+        for term in fields | colls:
+            if term in producers:
+                producers[term].append(label)
+
+    for action in spec.actions:
+        record(f"action:{action.action_id}", action.effects)
+    for node in spec.process.nodes:
+        record(f"process_node:{node.node_id}", node.effects)
+    for proc in spec.external_processes:
+        for i, occ in enumerate(proc.occurrences):
+            record(f"external_process:{proc.process_id}#{i}", occ.effects)
+    return {k: tuple(v) for k, v in producers.items()}
 
 
 def enforce_outcome_is_produced(
@@ -576,10 +617,10 @@ def enforce_outcome_is_produced(
 
     terminal_fields = _expr_fields(spec.terminal.yes_when)
     terminal_colls = _expr_collections(spec.terminal.yes_when)
-    if not spec.actions:
+    if not spec.actions and not spec.external_processes:
         raise WorldIntegrityError(
-            "the compiled world has no actions — nobody can do anything, so the outcome "
-            "cannot be produced by what anyone decides",
+            "the compiled world has no actions and no external processes — nobody can "
+            "do anything and nothing runs, so the outcome cannot be produced",
             details={"recompilable": True},
         )
     if not spec.process.nodes and not spec.external_processes:
@@ -592,24 +633,56 @@ def enforce_outcome_is_produced(
             details={"recompilable": True},
         )
 
-    written_fields, written_colls = _action_writes(spec)
-    if (terminal_fields & written_fields) or (terminal_colls & written_colls):
-        return
-
+    # Every terminal term must have at least one producer. A world where actors act
+    # busily on fields the terminal never reads, while the terminal's own terms arrive
+    # from branch weights, is the most dangerous shape this gate exists to catch: it
+    # looks alive and its answer was fixed before anyone opened their mouth.
+    producers = terminal_producers(spec)
+    orphans = sorted(term for term, who in producers.items() if not who)
     uncertain = {u.variable for u in uncertainties} | {
         name for u in uncertainties for o in u.outcomes for name, _ in o.field_effects
     }
+    written_fields, written_colls = _action_writes(spec)
+
+    if not orphans:
+        # A world that compiled actors owes those actors a causal role. If every
+        # terminal term is written only by processes while people deliberate over
+        # fields the terminal never reads, the deliberation is decoration — the same
+        # defect as an uncertainty writing the answer, one layer further out.
+        if spec.actors and not (
+            (terminal_fields & written_fields) or (terminal_colls & written_colls)
+        ):
+            raise WorldIntegrityError(
+                "this world compiled actors who cannot affect the outcome: every "
+                "terminal term is written by a process, and no action any actor can "
+                "take moves any of them. Either the actors belong in the causal path "
+                "or they do not belong in the world",
+                details={
+                    "recompilable": True,
+                    "actors": [a.entity_id for a in spec.actors],
+                    "terminal reads fields": sorted(terminal_fields),
+                    "fields any action can write": sorted(written_fields),
+                    "producers by terminal term": {
+                        k: list(v) for k, v in sorted(producers.items())
+                    },
+                },
+            )
+        return
+
     raise WorldIntegrityError(
-        "the outcome is an input, not a result: no compiled action can move any term "
-        "the terminal reads, so every branch resolves without anyone acting and the "
-        "answer would be the branch weights rather than the simulation",
+        "the outcome is an input, not a result: nothing in this world can produce "
+        f"{orphans} — no action, process node or external process writes it — so every "
+        "branch resolves without anything happening and the answer would be the branch "
+        "weights rather than the simulation",
         details={
             "recompilable": True,
+            "terminal terms with no producer": orphans,
             "terminal reads fields": sorted(terminal_fields),
             "terminal reads collections": sorted(terminal_colls),
             "fields any action can write": sorted(written_fields),
             "collections any action can write": sorted(written_colls),
-            "terminal terms supplied by uncertainty instead": sorted(terminal_fields & uncertain),
+            "terminal terms supplied by uncertainty instead": sorted(set(orphans) & uncertain),
+            "producers by terminal term": {k: list(v) for k, v in sorted(producers.items())},
         },
     )
 

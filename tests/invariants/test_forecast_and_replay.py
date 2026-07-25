@@ -225,7 +225,12 @@ def test_a_world_whose_outcome_is_an_input_is_refused() -> None:
     gw = _gateway(_signal_sensitive)
     with pytest.raises(WorldIntegrityError) as exc:
         _compile(data, gw)
-    assert "no actions" in str(exc.value)
+    assert "the outcome is an input" in str(exc.value)
+    details = exc.value.details
+    # Nothing that runs can write the term the terminal reads.
+    assert details["terminal terms with no producer"] == ["rate_decision"]
+    assert details["producers by terminal term"] == {"rate_decision": []}
+    assert details["terminal terms supplied by uncertainty instead"] == ["rate_decision"]
     assert exc.value.details.get("recompilable") is True
 
 

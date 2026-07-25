@@ -44,16 +44,16 @@ import re
 from dataclasses import dataclass, replace
 from enum import StrEnum
 
+from .epistemics import (
+    EpistemicClass,
+    GroundingAssessment,
+    GroundingLevel,
+    is_first_person,
+    private_state_class,
+)
 from .errors import WorldIntegrityError
 
 _WORD = re.compile(r"[a-z0-9]+")
-
-# Grammatical first person. This is a closed class of English pronouns — a property of
-# *voice*, not a domain vocabulary — so it says "this record is written as the actor's
-# own" for a committee member, a head of state or a population stratum alike.
-_FIRST_PERSON = frozenset(
-    {"i", "me", "my", "mine", "myself", "we", "us", "our", "ours", "ourselves"}
-)
 
 
 class Provenance(StrEnum):
@@ -256,9 +256,118 @@ class ActorGroundingProfile:
     @property
     def has_own_cited_record(self) -> bool:
         """True when the actor carries at least one cited, self-attributed record of a
-        prior action, statement, stated position or commitment of its own."""
+        prior action, statement, stated position or commitment of its own.
+
+        This is now a *promoter* to :attr:`GroundingLevel.DIRECT_RECORD`, not a
+        condition of existing. See :meth:`grounding_assessment`.
+        """
 
         return bool(self.own_cited_records)
+
+    def grounding_assessment(self) -> GroundingAssessment:
+        """Where this actor sits in the evidence hierarchy, and what that licenses.
+
+        The level is decided by which *citations survived*, never by the compiler's
+        confidence. Each rung is checked in order and the strongest reached wins, so an
+        actor with a first-person record is grounded at level 1 even though its office
+        would independently ground it at level 2.
+
+        The crucial property is what happens at levels 2-6: the actor is admitted, and
+        its disposition is downgraded to INFERRED or HYPOTHETICAL rather than the actor
+        being deleted. A trade commissioner whose office and authority are a matter of
+        public record does not stop existing because no retrieved source quotes them in
+        the first person — their private position is simply not a fact, and the
+        simulation is what resolves it.
+        """
+
+        keys = self.identity_keys()
+
+        def cited(items: tuple[GroundedItem, ...]) -> tuple[GroundedItem, ...]:
+            return tuple(i for i in items if i.is_supported)
+
+        own = self.own_cited_records
+        first_person = tuple(i for i in own if is_first_person(i.content))
+        if first_person:
+            return self._assess(
+                GroundingLevel.DIRECT_RECORD,
+                "carries a cited record in this actor's own voice",
+                first_person,
+            )
+
+        # An office is a structural fact. It is verifiable, it is what puts the actor
+        # inside the causal boundary, and it is the level at which most real
+        # decision-makers are knowable before the fact.
+        if self.role.strip() and self.authority and self.claim_ids:
+            return self._assess(
+                GroundingLevel.OFFICIAL_ROLE,
+                f"holds the verified office {self.role!r} with cited authority "
+                f"({', '.join(self.authority)})",
+                (),
+                extra_claims=self.claim_ids,
+            )
+
+        if own:
+            return self._assess(
+                GroundingLevel.DOCUMENTED_PRIOR_BEHAVIOR,
+                "carries cited records of conduct attributed to this actor by name",
+                own,
+            )
+
+        policy = cited(self.constraints) + cited(self.relevant_documents)
+        if policy:
+            return self._assess(
+                GroundingLevel.INSTITUTIONAL_POLICY,
+                "grounded in cited institutional policy or governing documents",
+                policy,
+            )
+
+        named = tuple(
+            i for i in self.all_items() if i.is_supported and _any_name(i.content, keys)
+        )
+        if named:
+            return self._assess(
+                GroundingLevel.CONTEMPORANEOUS_REPORTING,
+                "named by cited contemporaneous sources",
+                named,
+            )
+
+        role_level = tuple(i for i in self.all_items() if i.is_supported)
+        if role_level and self.role.strip():
+            return self._assess(
+                GroundingLevel.ROLE_LEVEL_BEHAVIOR,
+                f"grounded only at the level of the role {self.role!r}, not the individual",
+                role_level,
+            )
+
+        return GroundingAssessment(
+            actor_id=self.actor_id,
+            level=GroundingLevel.NONE,
+            reason=(
+                "no surviving citation attaches this actor to the world: neither a "
+                "record of its own, nor a cited office and authority, nor any cited "
+                "source that names it"
+            ),
+            disposition_class=EpistemicClass.UNSUPPORTED,
+            missing=self.missing_information,
+        )
+
+    def _assess(
+        self,
+        level: GroundingLevel,
+        reason: str,
+        items: tuple[GroundedItem, ...],
+        *,
+        extra_claims: tuple[str, ...] = (),
+    ) -> GroundingAssessment:
+        claims = {c for i in items for c in i.claim_ids} | set(extra_claims)
+        return GroundingAssessment(
+            actor_id=self.actor_id,
+            level=level,
+            reason=reason,
+            supporting_claim_ids=tuple(sorted(claims)),
+            disposition_class=private_state_class(level),
+            missing=self.missing_information,
+        )
 
     def render_grounding(self) -> str:
         """The ACTOR-SPECIFIC GROUNDING block placed in this actor's prompt.
@@ -268,11 +377,23 @@ class ActorGroundingProfile:
         — the actor is told how many were withheld, not what they said.
         """
 
+        assessment = self.grounding_assessment()
         lines: list[str] = [f"You are {self.canonical_identity}."]
         if self.aliases:
             lines.append(f"Also referred to as: {', '.join(self.aliases)}")
         lines.append(f"Role: {self.role}")
         lines.append(f"Authority: {', '.join(self.authority) or '(none recorded)'}")
+        lines.append(
+            f"HOW YOU ARE GROUNDED: {assessment.level.label} "
+            f"(hierarchy level {int(assessment.level)}). Your own current position is "
+            f"{assessment.disposition_class.value.upper()} at this level."
+        )
+        if assessment.disposition_class is not EpistemicClass.VERIFIED:
+            lines.append(
+                "No source records what you privately intend here. Reason from your "
+                "office, obligations and record — and do not pretend to a position you "
+                "have not taken."
+            )
         if self.is_constructed_representative:
             lines.append(
                 "NOTE: you are a CONSTRUCTED REPRESENTATIVE agent standing for a "
@@ -326,6 +447,7 @@ class ActorGroundingProfile:
         prev = self.previous_observed_action
         incl = self.current_evidence_grounded_inclination
         return {
+            "grounding": self.grounding_assessment().as_dict(),
             "actor_id": self.actor_id,
             "canonical_identity": self.canonical_identity,
             "aliases": list(self.aliases),
@@ -361,9 +483,14 @@ def _self_attributed(content: str, keys: frozenset[str]) -> bool:
     """True when ``content`` is this actor's own record: written in the first person,
     or explicitly naming the actor."""
 
-    low = content.lower()
-    if set(_WORD.findall(low)) & _FIRST_PERSON:
+    if is_first_person(content):
         return True
+    low = content.lower()
+    return any(_names(k, low) for k in keys)
+
+
+def _any_name(content: str, keys: frozenset[str]) -> bool:
+    low = content.lower()
     return any(_names(k, low) for k in keys)
 
 
@@ -394,11 +521,19 @@ class ActorGroundingReport:
     missing_previous_actions: tuple[str, ...] = ()
     dropped_uncited: tuple[str, ...] = ()
     dispositions: tuple[tuple[str, str, str], ...] = ()  # (claim_id, actor_id, disposition)
+    assessments: tuple[GroundingAssessment, ...] = ()
     notes: tuple[str, ...] = ()
 
     @property
     def is_complete(self) -> bool:
         return not (self.ungrounded_actors or self.misattributed or self.missing_previous_actions)
+
+    @property
+    def level_histogram(self) -> tuple[tuple[str, int], ...]:
+        counts: dict[str, int] = {}
+        for a in self.assessments:
+            counts[a.level.name.lower()] = counts.get(a.level.name.lower(), 0) + 1
+        return tuple(sorted(counts.items()))
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -408,6 +543,8 @@ class ActorGroundingReport:
             "missing_previous_actions": list(self.missing_previous_actions),
             "dropped_uncited": list(self.dropped_uncited),
             "profiles": [p.as_dict() for p in self.profiles],
+            "grounding_assessments": [a.as_dict() for a in self.assessments],
+            "grounding_levels": dict(self.level_histogram),
             "dispositions": [
                 {"claim_id": c, "actor_id": a, "disposition": d} for c, a, d in self.dispositions
             ],
@@ -422,10 +559,18 @@ def assess_actor_grounding(
 ) -> ActorGroundingReport:
     """Check that each actor is grounded as the specific entity it claims to be.
 
-    An actor passes only when it carries at least one *cited, self-attributed* record
-    of its own — a prior action, statement, stated position or commitment that both
-    survives the citation check and is written in the actor's own voice (or names it).
-    No actor may carry another actor's personal record.
+    An actor passes when the surviving citations place it somewhere on the evidence
+    hierarchy — a record of its own, a verified office and authority, documented prior
+    conduct, institutional policy, contemporaneous reporting that names it, or evidence
+    at the level of its role. What fails is an actor with *no* surviving citation of any
+    kind: a name with nothing behind it.
+
+    What the level changes is not whether the actor exists but what may be said about
+    it. Below a direct record, its disposition is marked INFERRED or HYPOTHETICAL and
+    the simulation resolves it, rather than the compiler asserting it.
+
+    No actor may carry another actor's personal record; that check is unchanged, and it
+    is the one that actually catches fabrication.
     """
 
     ungrounded: list[str] = []
@@ -433,6 +578,7 @@ def assess_actor_grounding(
     missing_prev: list[str] = []
     dropped: list[str] = []
     dispositions: list[tuple[str, str, str]] = []
+    assessments: list[GroundingAssessment] = []
 
     # Cross-assignment check. Sharing a *source* is legitimate — one set of minutes or
     # one poll can back every actor — so claim-id overlap is not misattribution. The
@@ -461,11 +607,12 @@ def assess_actor_grounding(
             if p.population_weight is None:
                 ungrounded.append(f"{p.actor_id}: constructed representative without a weight")
             continue
-        if not p.has_own_cited_record:
+        assessment = p.grounding_assessment()
+        assessments.append(assessment)
+        if not assessment.admissible:
             ungrounded.append(
-                f"{p.actor_id} ({p.canonical_identity}): no cited, first-person, "
-                "evidence-supported prior action, statement, position or commitment — "
-                "this actor is a name and a role, not a grounded participant"
+                f"{p.actor_id} ({p.canonical_identity}): {assessment.reason} — this "
+                "actor has no referent in the evidence and may not enter the world"
             )
         if require_previous_action and p.previous_observed_action is None:
             missing_prev.append(f"{p.actor_id} ({p.canonical_identity}): no previous action found")
@@ -479,6 +626,7 @@ def assess_actor_grounding(
         missing_previous_actions=tuple(missing_prev),
         dropped_uncited=tuple(dropped),
         dispositions=tuple(dispositions),
+        assessments=tuple(assessments),
     )
 
 
@@ -589,7 +737,8 @@ def profile_from_member(
     missing: list[str] = []
     if not profile.has_own_cited_record:
         missing.append(
-            "no previous action or statement of this actor is supported by cited evidence"
+            "your own words: no retrieved source records a statement or action of yours "
+            "on this matter, so your position here is not established"
         )
     if dropped:
         missing.append(
