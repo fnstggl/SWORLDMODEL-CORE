@@ -1195,7 +1195,14 @@ def exclusion_reviewer(gateway: ModelGateway | None) -> ExclusionReviewer | None
             "knowledge, authority, feasible actions, a resource constraint, the causal "
             "pathway, an uncertainty branch, the timing of events, or the terminal "
             'outcome? Reply JSON {"could_matter": true|false, "why": "..."}. '
-            "Answer true only if it plausibly could."
+            "Answer true only if it plausibly could.\n\n"
+            "Facts about a SOURCE rather than about the world are always false here: "
+            "when a page was published, who bylined it, what it is titled, where it "
+            "lives. That is provenance, it is already recorded against every claim it "
+            "supports, and it is not a thing that exists inside the simulated world. A "
+            "publication date blocking a run is this check misfiring — the date an "
+            "event is scheduled for is world content, the date an article about it went "
+            "online is not."
         )
         try:
             resp = gateway.generate(

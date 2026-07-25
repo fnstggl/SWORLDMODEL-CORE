@@ -1118,9 +1118,14 @@ def _record_exclusion(
 ) -> None:
     """Record an EXCLUDED_IRRELEVANT disposition — unless an independent reviewer says
     the item could still matter, in which case the exclusion is invalid and it becomes
-    UNCERTAIN and blocks (the exclusion challenge)."""
+    UNCERTAIN and blocks (the exclusion challenge).
 
-    if reviewer is not None and reviewer(cand):
+    Source provenance is not put to the reviewer at all. There is no compiled world in
+    which "the document was published on 18 September 2025" could be represented, so a
+    challenge to it could only ever be unsatisfiable — the compiler would be told to
+    include something that is not world content, and no recompile could comply."""
+
+    if reviewer is not None and not _is_source_provenance(cand) and reviewer(cand):
         a.dispositions.append(
             CandidateDisposition(
                 candidate_id=cand.candidate_id,
@@ -1213,9 +1218,48 @@ def _label(cand: EvidenceCandidate, why: str) -> str:
 
 
 def _exclusion_reason(cand: EvidenceCandidate) -> str:
+    if _is_source_provenance(cand):
+        return "provenance of a source, not a thing inside the world"
     if cand.kind is CandidateKind.PERSON:
         return "named incidentally; no role, vote, or membership signal in the evidence"
     return f"no outcome-relevant signal for this {cand.kind.value} in the evidence"
+
+
+# A self-referential subject: the extractor talking about the page it was handed rather
+# than about anything in the world. "The Bank of England published its minutes" names a
+# real body and is world content; "the document was published" names nothing.
+_SELF_REFERENCE = re.compile(
+    r"\b(?:the|this)\s+(?:document|article|page|web\s?page|website|site|text|source|url)\b"
+)
+_PROVENANCE_PREDICATE = re.compile(
+    r"\b(?:was|is|were|are|has\s+been)\s+(?:last\s+)?"
+    r"(?:published|posted|updated|modified|dated|titled|entitled|written|authored|"
+    r"bylined|retrieved|accessed|hosted|archived|captured)\b"
+    r"|\b(?:appears?|appeared)\s+(?:on|at)\b"
+    r"|\bcarries\s+a\s+byline\b"
+    r"|\bhas\s+the\s+(?:url|title)\b"
+)
+
+
+def _is_source_provenance(cand: EvidenceCandidate) -> bool:
+    """Whether this candidate describes a *source* rather than the world.
+
+    When a page went online, who bylined it, what it is titled, where it lives: that is
+    provenance. It is already recorded against every claim the page supports, and it is
+    not a thing that exists inside the simulated world, so it can be neither material
+    nor challenged into blocking a run. A live Bank of England run was refused because
+    an independent reviewer challenged the exclusion of "The document was published on
+    September 18, 2025" — there is no compiled world in which that could be represented.
+
+    Both halves are required: a self-referential subject *and* a provenance predicate.
+    A named body publishing a named document is an event in the world and is untouched.
+    """
+
+    text = " ".join(cand.description.split()).lower()
+    # Drop the extractor's topic namespace ("context: ...") before matching.
+    _, _, body = text.partition(": ")
+    body = body or text
+    return bool(_SELF_REFERENCE.search(body) and _PROVENANCE_PREDICATE.search(body))
 
 
 def _report(candidates: tuple[EvidenceCandidate, ...], a: _Assessment) -> CompilationCoverageReport:

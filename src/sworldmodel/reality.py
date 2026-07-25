@@ -153,22 +153,36 @@ def verify_reality(
                 "through the process rather than through their own decisions"
             )
 
-    # 2. The compiled world's own declared participant count must match the roster it
-    #    emitted. A model that says "nine seats" and then emits five has contradicted
-    #    itself; this catches that, and nothing more — it is not evidence.
+    # 2. The compiled world must actually contain as many participants as it declares.
+    #    A model that says "nine seats" and then puts five people in the world has
+    #    contradicted itself; this catches that, and nothing more — it is not evidence.
+    #
+    #    Counted against the entities the world contains, not against the deliberating
+    #    actor slots. Section 1 above deliberately allows a named participant to be
+    #    represented as a non-deciding entity whose effect a process carries, and this
+    #    check may not then turn that same choice into a contradiction. A live OPEC+ run
+    #    was refused here for declaring eight producer countries and modelling the group
+    #    as one deliberating unit with the eight beside it — a legitimate representation
+    #    that section 1 had just accepted.
+    #
+    #    Directional for the same reason: representing *more* than the declared count is
+    #    not a contradiction. A world that names eight producers also needs the market
+    #    they sell into and the meeting that convenes them, and those are not extra
+    #    participants — they are the rest of the world. Only a shortfall means the
+    #    compiler declared a roster it did not populate.
     declared = contract.expected_participants
-    if declared is not None and represented != declared:
+    if declared is not None and declared > len(spec.entities):
         # This is the compiler contradicting itself, not evidence contradicting the
         # compiler. It is a defect in one compilation, and the caller may recompile;
         # the detail says so, so a bounded retry can act on it.
         raise WorldIntegrityError(
-            "participant roster does not match the count the compiled world declares "
-            "for itself — simulation refused",
+            "the compiled world declares more participants than it contains — simulation refused",
             details={
-                "failure": "roster_count_contradiction",
+                "failure": "declared_participants_not_represented",
                 "declared by the compiled world": declared,
-                "verified and represented participants": represented,
-                "difference": (declared - represented),
+                "represented in the world": len(spec.entities),
+                "of which deliberating actors": represented,
+                "difference": (declared - len(spec.entities)),
                 "recompilable": True,
             },
         )

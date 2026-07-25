@@ -415,6 +415,29 @@ class RunDiagnosis:
             out.append(
                 {"cause": "compiler_omission", "why": "the run stopped at the coverage gate"}
             )
+        if gate == "participants_omitted":
+            out.append(
+                {
+                    "cause": "compiler_omission",
+                    "why": "the verified evidence names participants the compiled world "
+                    "has no place for at all",
+                }
+            )
+        if gate == "declared_participants_not_represented":
+            out.append(
+                {
+                    "cause": "incorrect_representation_scale",
+                    "why": "the compiled world declared a participant count it did not "
+                    "populate — the compiler chose a scale it then failed to fill",
+                }
+            )
+        if gate == "duplicate_participant":
+            out.append(
+                {
+                    "cause": "entity_resolution_failure",
+                    "why": "the same participant occupies two slots in the compiled roster",
+                }
+            )
         rt = self.runtime()
         if rt.get("ran") and self.failure_stage == "simulation":
             out.append({"cause": "repeated_wake_up_loop", "why": "the event loop did not settle"})

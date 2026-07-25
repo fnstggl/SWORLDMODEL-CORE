@@ -211,19 +211,23 @@ def _participants_omitted(exc: WorldIntegrityError, subject: str) -> RepairPlan:
     )
 
 
-def _roster_count_contradiction(exc: WorldIntegrityError, subject: str) -> RepairPlan:
+def _declared_participants_not_represented(exc: WorldIntegrityError, subject: str) -> RepairPlan:
     declared = exc.details.get("declared by the compiled world")
-    represented = exc.details.get("verified and represented participants")
+    represented = exc.details.get("represented in the world")
     return RepairPlan(
-        failure="roster_count_contradiction",
-        missing_element=f"a roster of {declared} (you emitted {represented})",
+        failure="declared_participants_not_represented",
+        missing_element=f"a roster of {declared} (the world contains {represented})",
         queries=(f"{subject} full membership list all members names",),
         instruction=(
-            f"You declared expected_participants={declared} and then emitted "
-            f"{represented} actors. One of the two is wrong. Either compile every one of "
-            f"the {declared} participants, or correct expected_participants to the number "
-            "the evidence actually establishes — and set it to null if the evidence does "
-            "not establish a count. Do not invent a participant to reach a number."
+            f"You declared expected_participants={declared} and the world you compiled "
+            f"contains {represented} entities in total. One of the two is wrong. Either "
+            f"add the missing participants as entities, or correct expected_participants "
+            "to the number the evidence actually establishes — and set it to null if the "
+            "evidence does not establish a count. Do not invent a participant to reach a "
+            "number. Note that this is a count of entities, not of deliberating actors: "
+            "a participant the evidence names may be an entity whose effect a process "
+            "carries rather than an actor that decides, and that choice is not the "
+            "problem here."
         ),
     )
 
@@ -462,7 +466,7 @@ _PLANS = {
     "no_causal_producer": _no_causal_producer,
     "actors_ungrounded": _actors_ungrounded,
     "participants_omitted": _participants_omitted,
-    "roster_count_contradiction": _roster_count_contradiction,
+    "declared_participants_not_represented": _declared_participants_not_represented,
     "terminal_has_no_producer": _terminal_has_no_producer,
     "actors_cannot_reach_terminal": _actors_cannot_reach_terminal,
     "environment_presets_terminal": _environment_presets_terminal,

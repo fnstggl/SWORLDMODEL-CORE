@@ -96,6 +96,7 @@ def _contract(**kw: object) -> ResolutionContract:
         resolution_units="the outcome",
         terminal=TerminalExpression(Expr("const", (True,))),
         target_outcome="the measure carries",
+        expected_participants=kw.get("expected_participants"),  # type: ignore[arg-type]
     )
 
 
@@ -380,6 +381,50 @@ def test_an_event_is_not_represented_merely_by_saying_decision() -> None:
     assert assess_coverage((event,), with_node).is_complete
 
 
+def test_source_provenance_is_excluded_and_never_put_to_the_reviewer() -> None:
+    """A live Bank of England run was refused because an independent reviewer challenged
+    the exclusion of "The document was published on September 18, 2025". Provenance is
+    recorded against every claim the page supports and exists nowhere in the world, so
+    the challenge could only ever be unsatisfiable — no recompile can include it."""
+
+    def challenge_everything(_: EvidenceCandidate) -> bool:
+        return True
+
+    provenance = EvidenceCandidate(
+        candidate_id="c_prov",
+        kind=CandidateKind.DOCUMENT,
+        canonical_identity="context: The document was published on September 18, 2025.",
+        description="context: The document was published on September 18, 2025.",
+        claim_ids=("k_prov",),
+        lineage_ids=("ev_prov",),
+        materiality=Materiality.IMMATERIAL,
+    )
+    empty = WorldSpecView(objects=())
+    report = assess_coverage((provenance,), empty, exclusion_reviewer=challenge_everything)
+    disposition = report.disposition_for("c_prov")
+    assert disposition is not None
+    assert disposition.disposition is Disposition.EXCLUDED_IRRELEVANT
+    assert "provenance" in disposition.reason
+    assert report.is_complete
+
+    # A named body publishing a named document is an event in the world, not provenance,
+    # and the challenge still blocks.
+    world_event = EvidenceCandidate(
+        candidate_id="c_event",
+        kind=CandidateKind.SCHEDULED_EVENT,
+        canonical_identity="date: The Bank of England published its minutes on 18 September 2025.",
+        description="date: The Bank of England published its minutes on 18 September 2025.",
+        claim_ids=("k_event",),
+        lineage_ids=("ev_event",),
+        materiality=Materiality.IMMATERIAL,
+    )
+    blocked = assess_coverage((world_event,), empty, exclusion_reviewer=challenge_everything)
+    challenged = blocked.disposition_for("c_event")
+    assert challenged is not None
+    assert challenged.disposition is Disposition.UNCERTAIN
+    assert not blocked.is_complete
+
+
 # --------------------------------------------------------------------------- #
 # 4. The participant count is anchored in evidence, or it is not reported.
 # --------------------------------------------------------------------------- #
@@ -395,6 +440,49 @@ def test_roster_is_checked_against_the_participants_the_evidence_names() -> None
     manifest = verify_reality(_contract(), _people_view(), actors, _spec(actors))
     assert manifest.expected_participants == 3
     assert manifest.represented_participants == 3
+
+
+def test_a_declared_roster_the_world_never_populated_is_refused() -> None:
+    """The motivating failure: the compiler says nine seats and puts five people in the
+    world. Counting what the world contains is what catches it."""
+
+    actors = {"ada": _actor("ada", "Ada North")}
+    with pytest.raises(WorldIntegrityError) as exc:
+        verify_reality(_contract(expected_participants=9), _view(), actors, _spec(actors))
+    assert exc.value.details["failure"] == "declared_participants_not_represented"
+    assert exc.value.details["represented in the world"] == 1
+    assert exc.value.details["recompilable"] is True
+
+
+def test_participants_carried_by_a_process_do_not_contradict_the_declared_count() -> None:
+    """A live OPEC+ run declared eight producer countries, modelled the group as one
+    deliberating unit and the eight beside it as entities the process carries, and was
+    refused for it — by the gate that sits directly below the one which had just
+    accepted exactly that representation. Representation scale is not a contradiction,
+    and representing more of the world than the count names is not one either.
+    """
+
+    deciding = _actor("opec_plus", "OPEC+")
+    carried = tuple(
+        EntitySpec(f"e{i}", name, "organization", is_actor=False)
+        for i, name in enumerate(("Saudi Arabia", "Russia", "Iraq", "UAE"))
+    )
+    spec = WorldSpec(
+        title="fixture",
+        entities=(deciding.entity, *carried),
+        actors=(ActorSpec("opec_plus"),),
+        fields=(),
+        resources=(),
+        channels=(),
+        documents=(),
+        actions=(),
+        process=ProcessGraph(()),
+        terminal=TerminalExpression(Expr("const", (True,))),
+    )
+    manifest = verify_reality(
+        _contract(expected_participants=4), _view(), {"opec_plus": deciding}, spec
+    )
+    assert manifest.represented_participants == 1
 
 
 def test_an_unestablished_participant_count_is_reported_as_unestablished() -> None:
@@ -612,7 +700,7 @@ def test_every_gate_failure_code_has_a_repair_plan() -> None:
         "no_causal_producer",
         "actors_ungrounded",
         "participants_omitted",
-        "roster_count_contradiction",
+        "declared_participants_not_represented",
         "duplicate_participant",
         "required_facts_unverified",
         "decisive_evidence_contradiction",
