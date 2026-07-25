@@ -28,6 +28,7 @@ from sworldmodel.coverage import (
     build_candidate_inventory,
     evidence_checklist,
 )
+from sworldmodel.epistemics import EpistemicClass, GroundingLevel
 from sworldmodel.errors import WorldIntegrityError
 from sworldmodel.evidence import EvidenceClaim, EvidenceStore, EvidenceView
 from sworldmodel.grounding import (
@@ -40,7 +41,14 @@ from sworldmodel.grounding import (
 from sworldmodel.models import AuthorityLevel, EpistemicType, ResolutionContract, SourceType
 from sworldmodel.reality import verify_reality
 from sworldmodel.world_compiler import build_base_world
-from sworldmodel.worldspec import ActorSpec, EntitySpec, Expr, TerminalExpression
+from sworldmodel.worldspec import (
+    ActorSpec,
+    EntitySpec,
+    Expr,
+    ProcessGraph,
+    TerminalExpression,
+    WorldSpec,
+)
 
 AS_OF = datetime.fromisoformat("2026-05-14T23:59:59+00:00")
 HORIZON = datetime.fromisoformat("2026-06-25T23:59:59+00:00")
@@ -96,6 +104,24 @@ def _actor(entity_id: str, name: str) -> ActorState:
         entity_id, name, "person", is_actor=True, role="member", authority=("decide",)
     )
     return ActorState.from_spec(entity, ActorSpec(entity_id), default_time=AS_OF)
+
+
+def _spec(actors: dict[str, ActorState]) -> WorldSpec:
+    """The minimum WorldSpec the reality gate reads: which entities the world contains
+    and whether anything non-agent runs in it."""
+
+    return WorldSpec(
+        title="fixture",
+        entities=tuple(a.entity for a in actors.values()),
+        actors=tuple(ActorSpec(aid) for aid in actors),
+        fields=(),
+        resources=(),
+        channels=(),
+        documents=(),
+        actions=(),
+        process=ProcessGraph(()),
+        terminal=TerminalExpression(Expr("const", (True,))),
+    )
 
 
 def _people_view() -> EvidenceView:
@@ -159,20 +185,122 @@ def test_a_supported_mark_cannot_be_constructed_without_a_citation() -> None:
             GroundedItem("she favours a hold", mark, ())
 
 
-def test_a_cited_record_that_is_not_the_actors_own_does_not_ground_it() -> None:
-    """Citations alone are not grounding: a fact about the world, attached to a person,
-    is still not that person's own record."""
+def test_a_cited_record_that_is_not_the_actors_own_does_not_ground_it_as_its_own() -> None:
+    """Citations alone are not a personal record: a fact about the world, attached to a
+    person, is still not that person's own statement.
 
-    ambient = profile_from_member(
-        actor_id="ada",
-        name="Ada North",
-        role="member",
-        authority=("decide",),
-        previous_action=None,
-        memory_seeds=((f"{BOARD} met on Tuesday.", ("k_ada",)),),
+    What follows from that is a *level*, not a deletion. The actor is admitted — a real
+    member of a real board does not stop existing because no source quotes them — but
+    the evidence reaches only their institution, so their own position is HYPOTHETICAL
+    and the simulation is what resolves it. Under the previous rule this actor was
+    removed from the world, which is how live runs ended up with nobody in them.
+    """
+
+    from dataclasses import replace as _replace
+
+    ambient = _replace(
+        profile_from_member(
+            actor_id="ada",
+            name="Ada North",
+            role="member",
+            authority=("decide",),
+            previous_action=None,
+            memory_seeds=((f"{BOARD} met on Tuesday.", ("k_ada",)),),
+        ),
+        # What the compiler attaches to a real entity: the claims that establish it.
+        claim_ids=("k_ada",),
     )
     assert not ambient.has_own_cited_record
-    assert not assess_actor_grounding((ambient,)).is_complete
+    assessment = ambient.grounding_assessment()
+    # A cited office with cited authority is level 2, and that is the right answer: what
+    # is *not* established is the actor's own position, which becomes an inference.
+    assert assessment.level is GroundingLevel.OFFICIAL_ROLE
+    assert assessment.disposition_class is EpistemicClass.INFERRED
+    assert assessment.admissible
+    assert assess_actor_grounding((ambient,)).is_complete
+    assert "verified office" in ambient.render_grounding()
+
+    # The same person with no authority recorded falls to role level, and their position
+    # becomes an open alternative rather than an inference.
+    role_only = _replace(ambient, authority=())
+    weaker = role_only.grounding_assessment()
+    assert weaker.level is GroundingLevel.ROLE_LEVEL_BEHAVIOR
+    assert weaker.disposition_class is EpistemicClass.HYPOTHETICAL
+    assert weaker.admissible
+    assert "role-level or institution-level" in role_only.render_grounding()
+
+
+def test_role_level_grounding_still_needs_the_entity_itself_to_be_cited() -> None:
+    """The floor under the weakest admissible level.
+
+    Without this, one irrelevant claim id hung on an invented person's memory seed —
+    plus any non-empty role string — was enough to admit an actor that nothing in the
+    evidence refers to. The entity must carry a surviving citation of its own.
+    """
+
+    uncited_entity = profile_from_member(
+        actor_id="ghost",
+        name="A. Person",
+        role="member",  # a role string proves nothing on its own
+        authority=(),
+        previous_action=None,
+        memory_seeds=(("The meeting took place.", ("k_ada",)),),  # cited, but not about them
+    )
+    assessment = uncited_entity.grounding_assessment()
+    assert assessment.level is GroundingLevel.NONE
+    assert not assessment.admissible
+
+
+def test_a_verified_office_is_enough_to_model_a_real_decision_maker() -> None:
+    """The correction this system needed most.
+
+    A commissioner, governor or minister whose office and authority are a matter of
+    public record is a real causal producer. No retrieved source quotes their private
+    preference — that is exactly the thing the simulation exists to resolve — and
+    demanding one before they may exist is what left EU–Mercosur and Tesla with zero
+    compiled participants.
+    """
+
+    from dataclasses import replace as _replace
+
+    officeholder = _replace(
+        profile_from_member(
+            actor_id="sef",
+            name="the Trade Commissioner",
+            role="Commissioner for Trade",
+            authority=("sign_on_behalf_of_the_union",),
+            previous_action=None,
+        ),
+        claim_ids=("k_office",),  # the entity's own citation, attesting the office
+    )
+    assert not officeholder.has_own_cited_record
+    assessment = officeholder.grounding_assessment()
+    assert assessment.level is GroundingLevel.OFFICIAL_ROLE
+    assert assessment.disposition_class is EpistemicClass.INFERRED
+    assert assessment.supporting_claim_ids == ("k_office",)
+    assert assess_actor_grounding((officeholder,)).is_complete
+
+
+def test_a_name_with_no_citation_of_any_kind_is_still_refused() -> None:
+    """The hierarchy admits weak grounding, not absent grounding. An actor no surviving
+    claim attaches to the world in any way is invented, and stays refused."""
+
+    invented = profile_from_member(
+        actor_id="ghost",
+        name="A. Person",
+        role="",
+        authority=(),
+        previous_action=None,
+        memory_seeds=(("I intend to vote against.", ()),),  # citation did not survive
+    )
+    assessment = invented.grounding_assessment()
+    assert assessment.level is GroundingLevel.NONE
+    assert not assessment.admissible
+    report = assess_actor_grounding((invented,))
+    assert not report.is_complete
+    with pytest.raises(WorldIntegrityError) as exc:
+        enforce_actor_grounding(report)
+    assert "ghost" in str(exc.value)
 
 
 # --------------------------------------------------------------------------- #
@@ -260,11 +388,11 @@ def test_an_event_is_not_represented_merely_by_saying_decision() -> None:
 def test_roster_is_checked_against_the_participants_the_evidence_names() -> None:
     actors = {"ada": _actor("ada", "Ada North"), "ben": _actor("ben", "Ben East")}
     with pytest.raises(WorldIntegrityError) as exc:
-        verify_reality(_contract(), _people_view(), actors)
+        verify_reality(_contract(), _people_view(), actors, _spec(actors))
     assert "Cara West" in str(exc.value)
 
     actors["cara"] = _actor("cara", "Cara West")
-    manifest = verify_reality(_contract(), _people_view(), actors)
+    manifest = verify_reality(_contract(), _people_view(), actors, _spec(actors))
     assert manifest.expected_participants == 3
     assert manifest.represented_participants == 3
 
@@ -274,7 +402,8 @@ def test_an_unestablished_participant_count_is_reported_as_unestablished() -> No
     manifest must say so rather than report a check that never ran."""
 
     view = _view(_claim("k_ctx", "conditions were unchanged over the quarter.", ()))
-    manifest = verify_reality(_contract(), view, {"ada": _actor("ada", "Ada North")})
+    actors = {"ada": _actor("ada", "Ada North")}
+    manifest = verify_reality(_contract(), view, actors, _spec(actors))
     assert manifest.expected_participants is None
     assert any("not established" in n for n in manifest.notes)
 
@@ -297,3 +426,102 @@ def test_an_actor_without_a_matching_entity_is_refused() -> None:
     with pytest.raises(WorldIntegrityError) as exc:
         build_base_world(bundle.spec, contract, bundle.evidence_store.view(AS_OF), ())
     assert dropped in str(exc.value)
+
+
+# --------------------------------------------------------------------------- #
+# 6. Verification is loose about notation and strict about support.
+# --------------------------------------------------------------------------- #
+
+
+def test_a_date_written_in_prose_supports_a_claim_normalized_to_iso() -> None:
+    """The exact claim a live EU–Mercosur run discarded, which was its whole store.
+
+    A Council page reading "Brussels, 17 January 2026 — ... signed ..." was refused
+    because the ISO form 2026-01-17 decomposes into 2026, 1 and 17, and the phantom "1"
+    from the month can never appear in prose that writes "January". The claim was
+    rejected for its own formatting, the store was left empty, the compiler was handed
+    nothing, and the run reported that no decision-maker could be found.
+    """
+
+    from sworldmodel.source_extract import verify_claim
+
+    document = (
+        "Brussels, 17 January 2026 - The European Union and Mercosur signed the "
+        "Partnership Agreement at a ceremony in Brazil."
+    )
+    assert (
+        verify_claim(
+            proposition="The European Union and Mercosur signed the trade agreement",
+            normalized_value="2026-01-17",
+            entities=("European Union", "Mercosur"),
+            excerpt="The European Union and Mercosur signed the Partnership Agreement",
+            document=document,
+        )
+        == ""
+    )
+
+
+def test_verification_still_refuses_an_unsupported_value_and_a_wrong_date() -> None:
+    """Loosening notation may not loosen support. Both of these must still fail — the
+    second is the hole that opens if `normalized_value` stops being checked at all,
+    since the compiler's evidence listing shows exactly that value."""
+
+    from sworldmodel.source_extract import verify_claim
+
+    wrong_date = verify_claim(
+        proposition="the agreement was signed",
+        normalized_value="2026-02-17",
+        entities=("agreement",),
+        excerpt="the agreement was signed on 17 January 2026",
+        document="the agreement was signed on 17 January 2026",
+    )
+    assert "date" in wrong_date
+
+    smuggled = verify_claim(
+        proposition="the rate was held",
+        normalized_value="8.50",
+        entities=("Committee",),
+        excerpt="the Committee held the rate unchanged",
+        document="the Committee held the rate unchanged",
+    )
+    assert "value" in smuggled
+
+
+def test_a_lone_expression_argument_is_read_as_a_one_argument_list() -> None:
+    """`args` is a list by schema, and a model will still write the single argument
+    bare: {"op": "const", "args": false}. Iterating that raised TypeError from inside
+    the parser and killed a live Bank of England run before it could write any
+    diagnosis at all. Reading a lone argument as a one-argument list changes no meaning.
+    """
+
+    from sworldmodel.worldspec import parse_expr
+
+    assert parse_expr({"op": "const", "args": False}) == Expr("const", (False,))
+    assert parse_expr({"op": "field", "args": "rate"}) == Expr("field", ("rate",))
+    assert parse_expr({"op": "const", "args": None}) == Expr("const", ())
+    # The ordinary shape is unchanged.
+    nested = parse_expr({"op": "equals", "args": [{"op": "field", "args": ["x"]}, 3]})
+    assert nested.op == "equals" and nested.args[1] == 3
+
+
+def test_an_unparsable_compilation_is_a_refusal_the_repair_loop_can_act_on() -> None:
+    """A shape the parser cannot read is a defect in one compilation, not a fact about
+    the world. It must arrive as a recompilable refusal carrying its parser error —
+    never as a raw TypeError from inside a parser, which leaves no diagnosis behind."""
+
+    from sworldmodel.errors import WorldIntegrityError
+    from sworldmodel.repair import plan_repair
+
+    exc = WorldIntegrityError(
+        "the compiled world could not be parsed",
+        details={
+            "failure": "malformed_compilation",
+            "recompilable": True,
+            "parser_error": "TypeError: 'bool' object is not iterable",
+        },
+    )
+    plan = plan_repair(exc, "will x happen?")
+    assert plan is not None
+    assert not plan.needs_research  # nothing is missing from the evidence
+    assert "could not be parsed" in plan.instruction
+    assert "args" in plan.instruction  # it names the shape to fix

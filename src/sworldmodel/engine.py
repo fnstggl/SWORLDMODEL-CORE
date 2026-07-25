@@ -41,7 +41,7 @@ from .actors import (
 )
 from .compiled import CompiledWorld
 from .effects import UNIVERSAL_OPS, EffectExecutor
-from .errors import GatewayError
+from .errors import GatewayError, UndeterminedExpressionError
 from .executor import KIND_ACTION_COMPLETION, ActionExecutor
 from .expressions import evaluate
 from .gateway import ModelGateway
@@ -431,7 +431,8 @@ def _event_loop(
 ) -> WorldState:
     horizon = world.contract.horizon
     stale_batches = 0
-    last_digest = world.state_digest()
+    last_digest = (world.state_digest(), world.time, world.information_digest())
+    last_queued_here = world.schedule.pending_at(world.time)
 
     while True:
         if diag.batches >= budget.max_batches:
@@ -470,12 +471,45 @@ def _event_loop(
             produced.extend(evs)
         diag.events += len(produced)
 
-        digest = world.state_digest()
-        if not produced and digest == last_digest:
+        # No progress means the world stops *changing*, not that it stops emitting.
+        #
+        # The old condition also required `not produced`, and a cascade always produces
+        # something — that is what makes it a cascade. Measured on the Bank of England
+        # run: 798 batches, 400 actor calls, and exactly ONE distinct world digest
+        # throughout. The guard armed 398 times and its longest consecutive run was 1,
+        # because every other batch emitted an event that reset it. It could not fire.
+        #
+        # Comparing the digest alone is the whole fix, and it must be the digest rather
+        # than the event count: honest runs do reach streaks of nine or ten batches that
+        # emit nothing while time advances, and they are distinguished by the state
+        # having changed, not by their silence.
+        # Progress has three faces, and a run is stale only when none of them moves:
+        # the world state changed, the clock advanced, or somebody learned something
+        # they had not already been told. The third was missing, and without it a world
+        # whose actors correspond without writing world state looks frozen — three
+        # rounds of ordinary pre-meeting correspondence were enough to kill a branch
+        # before it reached its own scheduled session. Counting deliveries would undo
+        # the cascade fix; keying on their *content* does not, because the cascade's
+        # defining property is that it delivers the same thing four hundred times.
+        # A finite burst of simultaneous work is not a stall. Everyone reading the
+        # notes that were just circulated produces batch after batch that changes no
+        # world state and teaches nobody anything new — and it *drains*, strictly, until
+        # the clock moves on to the next real event. A cascade does the opposite: every
+        # item it handles schedules another at the same instant, so the queue at that
+        # instant holds or grows. Requiring the queue to have stopped draining is what
+        # separates them, and without it the guard killed branches four rounds of
+        # ordinary correspondence before their own scheduled session.
+        queued_here = world.schedule.pending_at(world.time)
+        digest = (world.state_digest(), world.time, world.information_digest())
+        draining = queued_here < last_queued_here
+        last_queued_here = queued_here
+        if digest == last_digest and not draining:
             stale_batches += 1
             if stale_batches >= budget.no_progress_batches:
                 diag.stop_reason = (
-                    f"no progress: {stale_batches} consecutive batches changed nothing"
+                    f"no progress: {stale_batches} consecutive batches left the world "
+                    f"state unchanged ({len(produced)} event(s) in the last batch, none "
+                    "of which altered anything the world records)"
                 )
                 break
         else:
@@ -624,7 +658,7 @@ def _fire_process_node(
             applied = _find(world, ev.event_id)
             ledger.append(applied)
             produced.append(applied)
-        world = _propagate(world, spec, produced)
+        world = _propagate(world, spec, produced, microstep=entry.microstep)
         follow.extend(
             _deferred_entries(
                 deferred,
@@ -738,7 +772,7 @@ def _fire_deferred(
     produced = [_find(world, e.event_id) for e in evs]
     for ev in produced:
         ledger.append(ev)
-    return _propagate(world, spec, produced), produced
+    return _propagate(world, spec, produced, microstep=entry.microstep), produced
 
 
 def _fire_external(
@@ -768,7 +802,7 @@ def _fire_external(
             applied = _find(world, ev.event_id)
             ledger.append(applied)
             produced.append(applied)
-        world = _propagate(world, spec, produced)
+        world = _propagate(world, spec, produced, microstep=entry.microstep)
         if deferred:
             world = world.with_schedule(
                 world.schedule.push(
@@ -800,7 +834,9 @@ def _complete_action(
     produced = [_find(world, e.event_id) for e in outcome.events]
     for ev in produced:
         ledger.append(ev)
-    world = _propagate(world, spec, produced, source_action_id=outcome.action_id)
+    world = _propagate(
+        world, spec, produced, source_action_id=outcome.action_id, microstep=entry.microstep
+    )
     if outcome.deferred:
         world = world.with_schedule(
             world.schedule.push(
@@ -1001,7 +1037,7 @@ def _invoke_actor(
     produced = [_find(world, e.event_id) for e in outcome.events]
     for ev in produced:
         ledger.append(ev)
-    world = _propagate(world, spec, produced)
+    world = _propagate(world, spec, produced, microstep=entry.microstep)
 
     updated = world.actors[aid]
     if outcome.ongoing is not None:
@@ -1092,6 +1128,7 @@ def _propagate(
     events: list[Event],
     *,
     source_action_id: str = "",
+    microstep: int = 0,
 ) -> WorldState:
     """Turn events into *deliveries* and schedule the moments they may be noticed.
 
@@ -1099,6 +1136,14 @@ def _propagate(
     says when they took it in. Each is a separate recorded transition with its own
     timestamp, because collapsing them is how simulators accidentally give everyone
     perfect, instant, universal awareness.
+
+    ``microstep`` is the causal layer of whatever produced these events; the notices go
+    one layer *after* it. Stamping them at a fixed layer instead is what made the Bank of
+    England run non-terminating: a notice at layer 1 woke an actor whose action landed at
+    layer 2, whose notices went back to layer 1, and ``pop_batch`` always takes the
+    lowest layer present — so the loop oscillated 2→1→2→1 forever at a single instant.
+    Nearly 800 batches fired at one timestamp, with 400 actor calls all seeing the same
+    clock. A causal layer must be monotone or it is not an ordering.
     """
 
     action = spec.action(source_action_id) if source_action_id else None
@@ -1131,7 +1176,7 @@ def _propagate(
                     origin=ORIGIN_CONSEQUENCE,
                     origin_detail=f"delivery:{ev.event_id}",
                     causal_parents=(ev.event_id,),
-                    microstep=1,
+                    microstep=microstep + 1,
                 )
             )
     if not deliveries:
@@ -1333,18 +1378,83 @@ def _finalize(
     return world
 
 
+def terminal_lineage(
+    world: WorldState, terminal: TerminalExpression
+) -> tuple[dict[str, object], ...]:
+    """For each term the terminal reads, what actually wrote it in *this* trajectory.
+
+    The compile-time gate asks whether something *could* produce each term. This is the
+    other half, and the one that cannot be satisfied by a plausible-looking world spec:
+    it walks the branch's own event ledger and names the event, the actor and the causal
+    parents behind every terminal term. A term with no writer here was not produced by
+    anything that happened — whatever the spec promised.
+    """
+
+    from .world_compiler import _expr_collections, _expr_fields
+
+    terms = sorted(_expr_fields(terminal.yes_when) | _expr_collections(terminal.yes_when))
+    writers: dict[str, list[Event]] = {t: [] for t in terms}
+    for ev in world.event_history:
+        payload = ev.payload_dict
+        touched: set[str] = set()
+        for key in ("field", "collection"):
+            name = payload.get(key)
+            if isinstance(name, str):
+                touched.add(name)
+        for key in ("fields", "data", "levels"):
+            sub = payload.get(key)
+            if isinstance(sub, dict):
+                touched.update(str(k) for k in sub)
+        for term in touched & set(terms):
+            writers[term].append(ev)
+
+    out: list[dict[str, object]] = []
+    for term in terms:
+        evs = writers[term]
+        out.append(
+            {
+                "terminal_term": term,
+                "written_by": [
+                    {
+                        "event_id": e.event_id,
+                        "kind": e.kind,
+                        "at": e.time.isoformat(),
+                        "actor_id": e.actor_id,
+                        "caused_by": list(e.parent_event_ids),
+                        "evidence_claim_ids": list(e.evidence_claim_ids),
+                    }
+                    for e in evs
+                ],
+                "writer_count": len(evs),
+                "produced_by_an_actor": any(e.actor_id for e in evs),
+                "unproduced": not evs,
+            }
+        )
+    return tuple(out)
+
+
 def evaluate_terminal(world: WorldState, terminal: TerminalExpression) -> TerminalEvaluation:
     """The single place YES/NO/unresolved is decided — deterministic, from world state,
     through the universal operators only. No LLM, no mechanism family, no default."""
 
-    if bool(evaluate(terminal.unresolved_when, world)):
+    try:
+        if bool(evaluate(terminal.unresolved_when, world)):
+            return TerminalEvaluation(
+                resolved=False,
+                outcome=None,
+                reason=terminal.description or "terminal condition not determinable",
+                highlights=_highlights(world),
+            )
+        yes = bool(evaluate(terminal.yes_when, world))
+    except UndeterminedExpressionError as exc:
+        # The terminal reads something this branch never determined. That is an honest
+        # unresolved outcome — not a NO, and not a crashed run.
         return TerminalEvaluation(
             resolved=False,
             outcome=None,
-            reason=terminal.description or "terminal condition not determinable",
+            reason=f"terminal depends on a value the world never determined: {exc}",
             highlights=_highlights(world),
         )
-    yes = bool(evaluate(terminal.yes_when, world))
     return TerminalEvaluation(
         resolved=True,
         outcome="YES" if yes else "NO",

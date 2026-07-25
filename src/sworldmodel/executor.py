@@ -31,6 +31,7 @@ from typing import Any
 
 from .actors import ActorState, OngoingAction
 from .effects import EffectExecutor
+from .errors import UndeterminedExpressionError
 from .expressions import evaluate
 from .gateway import ModelGateway
 from .models import Event, Visibility
@@ -108,7 +109,13 @@ class ActionExecutor:
         for res, cost in action.resource_costs:
             if world.get_resource(res, actor.actor_id) < float(cost):
                 return False, f"actor lacks resource {res!r}"
-        if not bool(evaluate(action.preconditions, world)):
+        try:
+            satisfied = bool(evaluate(action.preconditions, world))
+        except UndeterminedExpressionError as exc:
+            # A precondition that reads an undetermined value is not satisfied; the
+            # action is simply unavailable rather than aborting the branch.
+            return False, f"precondition undetermined: {exc}"
+        if not satisfied:
             return False, "precondition not satisfied"
         return True, "ok"
 

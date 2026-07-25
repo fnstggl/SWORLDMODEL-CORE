@@ -225,7 +225,12 @@ def test_a_world_whose_outcome_is_an_input_is_refused() -> None:
     gw = _gateway(_signal_sensitive)
     with pytest.raises(WorldIntegrityError) as exc:
         _compile(data, gw)
-    assert "no actions" in str(exc.value)
+    assert "the outcome is an input" in str(exc.value)
+    details = exc.value.details
+    # Nothing that runs can write the term the terminal reads.
+    assert details["terminal terms with no producer"] == ["rate_decision"]
+    assert details["producers by terminal term"] == {"rate_decision": []}
+    assert details["terminal terms supplied by uncertainty instead"] == ["rate_decision"]
     assert exc.value.details.get("recompilable") is True
 
 
@@ -336,3 +341,153 @@ def test_the_schedule_is_serializable_for_the_trace_contract() -> None:
         # Every invocation names its cause and its effect on the world.
         assert d.wake_reason
         assert d.validation_status in ("started", "executed", "rejected", "failed", "wait")
+
+
+def test_the_environment_may_not_announce_the_answer_before_anyone_acts() -> None:
+    """The third shape of the same defect, taken from a live Bank of England run.
+
+    That world compiled a real actor with a real action, and also a scheduled process
+    node carrying ``set_field(<the terminal term>, True)`` with a literal value and no
+    entry condition. The node fired first, the terminal was already decided, and the
+    actor — woken afterwards — noted that the thing had happened and waited. The
+    reported forecast was 1.0000 from zero producing actions, and the outcome gate
+    passed it because *some* action could in principle have written the term.
+
+    A process that tallies what actors did is right and stays allowed; the difference is
+    whether it is gated on something an action writes.
+    """
+
+    from sworldmodel.errors import WorldIntegrityError
+
+    data = _split_world()
+    data["world_spec"]["fields"].append(
+        {"field_id": "signal_given", "value_type": "bool", "initial": False}
+    )
+    data["world_spec"]["terminal"]["yes_when"] = {
+        "op": "equals",
+        "args": [{"op": "field", "args": ["signal_given"]}, True],
+    }
+    # An action can write the term — so the previous gate is satisfied...
+    data["world_spec"]["actions"].append(
+        {
+            "action_id": "give_signal",
+            "meaning": "say it publicly",
+            "eligible_actors": ["*"],
+            "required_authority": [],
+            "parameters": [],
+            "effects": [{"op": "set_field", "field": "signal_given", "value": True}],
+            "evidence_claim_ids": [],
+        }
+    )
+    # ...but the calendar writes it too, unconditionally, and gets there first.
+    data["world_spec"]["process"]["nodes"][0]["effects"] = [
+        {"op": "set_field", "field": "signal_given", "value": True}
+    ]
+
+    gw = _gateway(_signal_sensitive)
+    with pytest.raises(WorldIntegrityError) as exc:
+        _compile(data, gw)
+    assert "the environment writes the answer" in str(exc.value)
+    assert exc.value.details["terms preset by the environment"] == ["signal_given"]
+    assert exc.value.details.get("recompilable") is True
+
+
+def test_every_terminal_term_names_what_actually_wrote_it() -> None:
+    """The runtime half of producer lineage.
+
+    The compile-time gate asks whether something *could* write each terminal term. This
+    walks the branch's own ledger and names what did: the event, the actor behind it and
+    its causal parents. A world spec cannot satisfy this by looking plausible.
+    """
+
+    from sworldmodel.engine import terminal_lineage
+
+    gw = _gateway(_signal_sensitive)
+    contract, compiled = _compile(_split_world(), gw)
+    result = run(compiled, gw, seed=0)
+
+    for branch_id, world in result.final_worlds.items():
+        lineage = terminal_lineage(world, compiled.spec.terminal)
+        assert lineage, branch_id
+        for term in lineage:
+            assert not term["unproduced"], (branch_id, term["terminal_term"])
+            # The positions the terminal counts were written by the actors themselves.
+            assert term["produced_by_an_actor"], (branch_id, term["terminal_term"])
+            for writer in term["written_by"]:
+                assert writer["event_id"] and writer["kind"]
+
+
+def test_an_operational_process_that_accumulates_output_is_not_an_announcement() -> None:
+    """The gate above must not refuse the world it exists to permit.
+
+    A production line that adds units per shift writes the same terminal term as a
+    process node that declares the answer — but accumulating toward a threshold is how
+    throughput is honestly modelled, and the question is whether the quantity is
+    *reached* or *asserted*. Only `set_field` to a literal is an announcement.
+    """
+
+    data = _split_world()
+    data["world_spec"]["fields"].append(
+        {"field_id": "units_built", "value_type": "number", "initial": 0}
+    )
+    data["world_spec"]["terminal"]["yes_when"] = {
+        "op": "greater_than",
+        "args": [{"op": "field", "args": ["units_built"]}, 100],
+    }
+    data["world_spec"]["actions"].append(
+        {
+            "action_id": "authorize_overtime",
+            "meaning": "add a shift",
+            "eligible_actors": ["*"],
+            "required_authority": [],
+            "parameters": [],
+            "effects": [{"op": "adjust_field", "field": "units_built", "amount": 10}],
+            "evidence_claim_ids": [],
+        }
+    )
+    data["world_spec"]["external_processes"] = [
+        {
+            "process_id": "assembly_line",
+            "description": "the line builds a fixed number of units per shift",
+            "occurrences": [
+                {
+                    "at": "2026-06-01T00:00:00+00:00",
+                    "description": "a shift",
+                    "effects": [{"op": "adjust_field", "field": "units_built", "amount": 40}],
+                }
+            ],
+            "evidence_claim_ids": [],
+        }
+    ]
+
+    gw = _gateway(_signal_sensitive)
+    _, compiled = _compile(data, gw)  # must not raise
+    producers = compiled.spec.external_processes
+    assert producers and producers[0].process_id == "assembly_line"
+
+
+def test_the_pre_rollout_review_can_never_kill_a_run_that_passed_the_gates() -> None:
+    """It is advisory, and it runs after every mechanical gate has already passed.
+
+    A fault here can therefore only ever destroy a run that was otherwise sound — which
+    is what happened: a live Bank of England run compiled a real world, cleared every
+    gate, and died in the review's own summary helper because a compiled `at` is an ISO
+    string and the helper assumed a datetime. An opinion about a world must not be able
+    to stop it.
+    """
+
+    from sworldmodel.world_review import _when, review_world
+
+    # Compiled times arrive as ISO strings, not datetimes. Both must render.
+    assert _when("2026-06-25T00:00:00+00:00") == "2026-06-25T00:00:00+00:00"
+    assert _when(AS_OF) == AS_OF.isoformat()
+    assert _when(None) is None and _when("") is None
+
+    class Malformed:
+        @property
+        def spec(self) -> object:
+            raise RuntimeError("compiled world is malformed")
+
+    review = review_world(Malformed(), None, None, question="q", evidence_render="")
+    assert "could not run" in review.error
+    assert not review.should_repair  # a review that did not happen demands no repair

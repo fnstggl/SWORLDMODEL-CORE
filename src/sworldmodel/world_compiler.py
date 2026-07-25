@@ -58,7 +58,7 @@ from .prompts import render_world_compile_prompt
 from .reality import verify_reality
 from .uncertainty import enumerate_scenarios
 from .world import WorldFact, WorldState
-from .worldspec import ActorSpec, EntitySpec, WorldSpec
+from .worldspec import ActorSpec, EntitySpec, WorldSpec, as_objects
 
 _VALID_PROVENANCE = {p.value for p in WeightProvenance}
 
@@ -83,7 +83,11 @@ def build_base_world(
         raise WorldIntegrityError(
             f"actors {orphans} were compiled without a matching entity. Every actor must be "
             "a declared entity carrying its own evidence citations.",
-            details={"orphan_actors": orphans},
+            details={
+                "failure": "orphan_actors",
+                "recompilable": True,
+                "orphan_actors": orphans,
+            },
         )
     actor_states: dict[str, ActorState] = {}
     for aspec in spec.actors:
@@ -137,7 +141,7 @@ def compile_world(
     base_world = build_base_world(spec, contract, evidence, world_facts)
 
     # Gate 1 — reality integrity: refuse a structurally false world.
-    manifest = verify_reality(contract, evidence, base_world.actors)
+    manifest = verify_reality(contract, evidence, base_world.actors, spec)
 
     # Gate 2 — actors must be specific grounded entities, not generic role templates.
     profiles = tuple(
@@ -180,8 +184,18 @@ def compile_world(
     )
 
 
-# Entity kinds that are deliberately synthetic stand-ins rather than named real people.
+# Representations that are deliberately synthetic stand-ins rather than named real
+# people. ``representation_scale`` is the authority because it is the field the compiler
+# is actually asked for; ``kind`` is checked too, but the schema only ever offers
+# person/organization/object/document/channel there, so keying the exemption off `kind`
+# alone — as this did — meant a compiled population stratum was never once recognized as
+# one, and was then judged by the standards of a named individual.
+_CONSTRUCTED_SCALES = frozenset({"population_stratum", "network"})
 _CONSTRUCTED_KINDS = frozenset({"population_group", "stratum", "segment", "cohort"})
+
+
+def _is_constructed(entity: EntitySpec) -> bool:
+    return entity.representation_scale in _CONSTRUCTED_SCALES or entity.kind in _CONSTRUCTED_KINDS
 
 
 def actor_grounding_profile(
@@ -225,7 +239,7 @@ def actor_grounding_profile(
         reaction_rules=reactions,
         valid_time=contract.as_of.isoformat(),
     )
-    constructed = entity.kind in _CONSTRUCTED_KINDS
+    constructed = _is_constructed(entity)
     weight = entity.attributes_dict.get("weight") if constructed else None
     return replace(
         profile,
@@ -543,19 +557,205 @@ def _expr_collections(expr: Any) -> set[str]:
     return out
 
 
+def _effect_writes(effects: Any) -> tuple[set[str], set[str]]:
+    fields: set[str] = set()
+    collections: set[str] = set()
+    for eff in effects:
+        fields |= _effect_fields(eff)
+        if eff.op == "append_record":
+            coll = eff.params_dict.get("collection")
+            if isinstance(coll, str):
+                collections.add(coll)
+    return fields, collections
+
+
 def _action_writes(spec: WorldSpec) -> tuple[set[str], set[str]]:
     """What the compiled actions can actually change: (fields, record collections)."""
 
     fields: set[str] = set()
     collections: set[str] = set()
     for action in spec.actions:
-        for eff in action.effects:
-            fields |= _effect_fields(eff)
-            if eff.op == "append_record":
-                coll = eff.params_dict.get("collection")
-                if isinstance(coll, str):
-                    collections.add(coll)
+        f, c = _effect_writes(action.effects)
+        fields |= f
+        collections |= c
     return fields, collections
+
+
+def terminal_producers(spec: WorldSpec) -> dict[str, tuple[str, ...]]:
+    """For every term the terminal reads, what in this world can write it.
+
+    This is the compile-time half of terminal producer lineage: before anything runs,
+    each terminal term must name at least one thing whose *operation* could set it — an
+    action somebody takes, a process node that fires, or an external/operational process
+    that advances. The runtime half records which of those actually did it.
+
+    An uncertainty is deliberately not a producer. A branch condition may influence a
+    producer; it may not stand in for one. A terminal term whose only writer is an
+    uncertainty's ``field_effects`` is the answer wearing the costume of a world state.
+    """
+
+    terms = _expr_fields(spec.terminal.yes_when) | _expr_collections(spec.terminal.yes_when)
+    producers: dict[str, list[str]] = {t: [] for t in terms}
+
+    def record(label: str, effects: Any) -> None:
+        fields, colls = _effect_writes(effects)
+        for term in fields | colls:
+            if term in producers:
+                producers[term].append(label)
+
+    for action in spec.actions:
+        record(f"action:{action.action_id}", action.effects)
+    for node in spec.process.nodes:
+        record(f"process_node:{node.node_id}", node.effects)
+    for proc in spec.external_processes:
+        for i, occ in enumerate(proc.occurrences):
+            record(f"external_process:{proc.process_id}#{i}", occ.effects)
+    return {k: tuple(v) for k, v in producers.items()}
+
+
+# The runtime's binding prefixes: a value starting with one of these is resolved from
+# the world when the effect executes. Anything else beginning with "$" is an unknown
+# string the executor will treat as a literal, so it must not be read as "computed".
+_BINDINGS = ("$actor", "$target", "$self.", "$param.", "$now", "$event", "$record")
+
+# Operators whose truth cannot depend on world state.
+_ALWAYS_TRUE_OPS = frozenset({"const"})
+
+
+def _is_trivially_true(expr: Any) -> bool:
+    """Whether a condition is true no matter what happens in the world.
+
+    A gate that names an action-written field is supposed to mean "this fires because of
+    what the actors did". ``or(field("deal_signed"), const(true))`` names one and is
+    identically true, which is a one-line way to walk past the check while looking like
+    it satisfies it.
+    """
+
+    from .worldspec import Expr
+
+    if not isinstance(expr, Expr):
+        return False
+    if expr.op in _ALWAYS_TRUE_OPS:
+        return bool(expr.args and expr.args[0])
+    if expr.op in ("or", "any"):
+        return any(_is_trivially_true(a) for a in expr.args)
+    if expr.op == "and":
+        return bool(expr.args) and all(_is_trivially_true(a) for a in expr.args)
+    return False
+
+
+def _threshold_for(expr: Any, term: str) -> float | None:
+    """The constant a terminal comparison holds ``term`` against, if there is one."""
+
+    from .worldspec import Expr
+
+    if not isinstance(expr, Expr):
+        return None
+    if expr.op in ("greater_than", "greater_or_equal", "less_than", "less_or_equal", "equals"):
+        args = list(expr.args)
+        if len(args) == 2:
+            left, right = args
+            names = _expr_fields(left) if isinstance(left, Expr) else set()
+            if term in names and isinstance(right, (int, float)) and not isinstance(right, bool):
+                return float(right)
+    for arg in getattr(expr, "args", ()):
+        found = _threshold_for(arg, term)
+        if found is not None:
+            return found
+    return None
+
+
+def _actions_gate_a_producer(spec: WorldSpec, terminal_terms: set[str]) -> bool:
+    """Whether what the actors do decides *whether* a producer of the outcome fires.
+
+    Indirect causation is still causation, and it is the normal shape for a decision
+    body: nobody writes "the motion carried", they cast votes, and the session that
+    counts them records the result.
+    """
+
+    action_fields, action_collections = _action_writes(spec)
+    actionable = action_fields | action_collections
+    if not actionable:
+        return False
+
+    def gate_reads(condition: Any) -> set[str]:
+        return _expr_fields(condition) | _expr_collections(condition)
+
+    for node in spec.process.nodes:
+        written, coll = _effect_writes(node.effects)
+        if (written | coll) & terminal_terms and gate_reads(node.entry_condition) & actionable:
+            return True
+    for proc in spec.external_processes:
+        for occ in proc.occurrences:
+            written, coll = _effect_writes(occ.effects)
+            if (written | coll) & terminal_terms and gate_reads(occ.condition) & actionable:
+                return True
+    return False
+
+
+def _environment_preset_terminal_terms(spec: WorldSpec, terminal_terms: set[str]) -> set[str]:
+    """Terminal terms a scheduled non-agent effect decides on its own.
+
+    "On its own" is the load-bearing part, and it has two halves.
+
+    A node is *gated* when its entry condition reads something the actors can change —
+    a field an action writes, or a record collection an action appends to. A session
+    that fires once enough votes have been cast into it is exactly right, and it must
+    pass: that is the canonical committee world. Reading only ``field`` ops missed it
+    entirely, because votes are a collection, and the gate refused the very world its
+    own docstring endorses.
+
+    A condition also has to be able to be false. ``or(field("x"), const(true))`` names an
+    action-written field and is identically true; a check that accepts it is a check with
+    a one-line bypass.
+
+    Then, for an ungated node: setting a terminal term to a literal is the environment
+    announcing the answer. Adding to one is usually production — a line that builds so
+    many units per shift — but not when a single step is enough to cross the terminal's
+    own threshold by itself. ``adjust_field(votes_for, +99)`` against ``votes_for >= 3``
+    is an announcement wearing an increment's clothes.
+    """
+
+    action_fields, action_collections = _action_writes(spec)
+    actionable = action_fields | action_collections
+    preset: set[str] = set()
+
+    def decided_here(effects: Any) -> set[str]:
+        out: set[str] = set()
+        for eff in effects:
+            params = eff.params_dict
+            name = params.get("field")
+            if not isinstance(name, str) or name not in terminal_terms:
+                continue
+            if eff.op == "set_field":
+                value = params.get("value")
+                computed = isinstance(value, str) and value.startswith(_BINDINGS)
+                if not computed:
+                    out.add(name)
+            elif eff.op == "adjust_field":
+                amount = params.get("amount", params.get("value"))
+                threshold = _threshold_for(spec.terminal.yes_when, name)
+                if (
+                    isinstance(amount, (int, float))
+                    and not isinstance(amount, bool)
+                    and threshold is not None
+                    and abs(float(amount)) >= abs(threshold)
+                ):
+                    out.add(name)
+        return out
+
+    def ungated(condition: Any) -> bool:
+        gate = _expr_fields(condition) | _expr_collections(condition)
+        return not (gate & actionable) or _is_trivially_true(condition)
+
+    for node in spec.process.nodes:
+        if ungated(node.entry_condition):
+            preset |= decided_here(node.effects)
+    for proc in spec.external_processes:
+        for occ in proc.occurrences:
+            if ungated(occ.condition):
+                preset |= decided_here(occ.effects)
+    return preset
 
 
 def enforce_outcome_is_produced(
@@ -576,11 +776,11 @@ def enforce_outcome_is_produced(
 
     terminal_fields = _expr_fields(spec.terminal.yes_when)
     terminal_colls = _expr_collections(spec.terminal.yes_when)
-    if not spec.actions:
+    if not spec.actions and not spec.external_processes:
         raise WorldIntegrityError(
-            "the compiled world has no actions — nobody can do anything, so the outcome "
-            "cannot be produced by what anyone decides",
-            details={"recompilable": True},
+            "the compiled world has no actions and no external processes — nobody can "
+            "do anything and nothing runs, so the outcome cannot be produced",
+            details={"failure": "nothing_can_act", "recompilable": True},
         )
     if not spec.process.nodes and not spec.external_processes:
         # A world may legitimately be driven entirely by external processes and wake
@@ -589,27 +789,96 @@ def enforce_outcome_is_produced(
         raise WorldIntegrityError(
             "the compiled world has no process and no external processes — nothing is "
             "scheduled to happen, so no actor will ever be in a position to act",
-            details={"recompilable": True},
+            details={"failure": "nothing_scheduled", "recompilable": True},
         )
 
-    written_fields, written_colls = _action_writes(spec)
-    if (terminal_fields & written_fields) or (terminal_colls & written_colls):
-        return
-
+    # Every terminal term must have at least one producer. A world where actors act
+    # busily on fields the terminal never reads, while the terminal's own terms arrive
+    # from branch weights, is the most dangerous shape this gate exists to catch: it
+    # looks alive and its answer was fixed before anyone opened their mouth.
+    producers = terminal_producers(spec)
+    orphans = sorted(term for term, who in producers.items() if not who)
     uncertain = {u.variable for u in uncertainties} | {
         name for u in uncertainties for o in u.outcomes for name, _ in o.field_effects
     }
+    written_fields, written_colls = _action_writes(spec)
+
+    if not orphans:
+        # An environment that simply announces the answer is the third form of the same
+        # defect. A live run compiled a world in which a scheduled process node carried
+        # `set_field(<the terminal term>, True)` with a literal value and no entry
+        # condition: it fired before the actor was ever invoked, the terminal was already
+        # decided, and the actor — woken afterwards — observed that the thing had
+        # happened and waited. The forecast was 1.0000 with zero producing actions, and
+        # this gate passed it because *some* action could in principle have written the
+        # term. In a world with actors, a term the terminal reads may not be set to a
+        # constant by the scenery.
+        preset = _environment_preset_terminal_terms(spec, terminal_fields | terminal_colls)
+        if spec.actors and preset:
+            raise WorldIntegrityError(
+                f"the environment writes the answer: {sorted(preset)} is set to a fixed "
+                "value by a scheduled process that no actor influences, so the terminal "
+                "is decided before anyone acts and the actors are observers of their own "
+                "outcome",
+                details={
+                    "failure": "environment_presets_terminal",
+                    "recompilable": True,
+                    "terms preset by the environment": sorted(preset),
+                    "actors": [a.entity_id for a in spec.actors],
+                    "producers by terminal term": {
+                        k: list(v) for k, v in sorted(producers.items())
+                    },
+                },
+            )
+        # A world that compiled actors owes those actors a causal role. If every
+        # terminal term is written only by processes while people deliberate over
+        # fields the terminal never reads, the deliberation is decoration — the same
+        # defect as an uncertainty writing the answer, one layer further out.
+        #
+        # Reaching the outcome need not be direct. In the canonical committee world the
+        # members do not write the result at all: they record positions, and a session
+        # node fires when enough have been recorded and writes the outcome. Their
+        # influence runs through that node's gate, and demanding a direct write refused
+        # exactly the world this gate's own docstring calls right.
+        reaches = (
+            (terminal_fields & written_fields)
+            or (terminal_colls & written_colls)
+            or _actions_gate_a_producer(spec, terminal_fields | terminal_colls)
+        )
+        if spec.actors and not reaches:
+            raise WorldIntegrityError(
+                "this world compiled actors who cannot affect the outcome: every "
+                "terminal term is written by a process, and no action any actor can "
+                "take moves any of them. Either the actors belong in the causal path "
+                "or they do not belong in the world",
+                details={
+                    "failure": "actors_cannot_reach_terminal",
+                    "recompilable": True,
+                    "actors": [a.entity_id for a in spec.actors],
+                    "terminal reads fields": sorted(terminal_fields),
+                    "fields any action can write": sorted(written_fields),
+                    "producers by terminal term": {
+                        k: list(v) for k, v in sorted(producers.items())
+                    },
+                },
+            )
+        return
+
     raise WorldIntegrityError(
-        "the outcome is an input, not a result: no compiled action can move any term "
-        "the terminal reads, so every branch resolves without anyone acting and the "
-        "answer would be the branch weights rather than the simulation",
+        "the outcome is an input, not a result: nothing in this world can produce "
+        f"{orphans} — no action, process node or external process writes it — so every "
+        "branch resolves without anything happening and the answer would be the branch "
+        "weights rather than the simulation",
         details={
+            "failure": "terminal_has_no_producer",
             "recompilable": True,
+            "terminal terms with no producer": orphans,
             "terminal reads fields": sorted(terminal_fields),
             "terminal reads collections": sorted(terminal_colls),
             "fields any action can write": sorted(written_fields),
             "collections any action can write": sorted(written_colls),
-            "terminal terms supplied by uncertainty instead": sorted(terminal_fields & uncertain),
+            "terminal terms supplied by uncertainty instead": sorted(set(orphans) & uncertain),
+            "producers by terminal term": {k: list(v) for k, v in sorted(producers.items())},
         },
     )
 
@@ -753,12 +1022,31 @@ def _uncertainty_variables(
 # ---------------------------------------------------------------------------
 
 
+def _field_effects(value: Any) -> tuple[tuple[str, Any], ...]:
+    """``[[field, value], ...]`` — however the compiler wrote it.
+
+    A single pair written flat as ``["field", 1]`` instead of ``[["field", 1]]`` used to
+    raise ValueError from a tuple unpack. Pairs that are not pairs are dropped: a
+    half-written effect names no field to set.
+    """
+
+    if not isinstance(value, (list, tuple)):
+        return ()
+    if len(value) == 2 and all(not isinstance(x, (list, tuple)) for x in value):
+        return ((str(value[0]), value[1]),)
+    out: list[tuple[str, Any]] = []
+    for pair in value:
+        if isinstance(pair, (list, tuple)) and len(pair) == 2:
+            out.append((str(pair[0]), pair[1]))
+    return tuple(out)
+
+
 def parse_uncertainties(
     items: Any, available_ids: set[str] | None = None
 ) -> tuple[UncertaintySpec, ...]:
     out: list[UncertaintySpec] = []
-    for u in items or []:
-        outcomes = u.get("outcomes") or []
+    for u in as_objects(items):
+        outcomes = as_objects(u.get("outcomes"))
         total = sum(float(o.get("weight", 0)) for o in outcomes)
         if total <= 0 or not outcomes:
             continue
@@ -781,7 +1069,7 @@ def parse_uncertainties(
                         provenance=provenance,
                         source_detail=str(o.get("source_detail", o.get("description", ""))),
                     ),
-                    field_effects=tuple((str(k), v) for k, v in (o.get("field_effects") or [])),
+                    field_effects=_field_effects(o.get("field_effects")),
                     description=str(o.get("description", "")),
                 )
             )
@@ -831,7 +1119,7 @@ def _epistemic(raw: object, has_citations: bool) -> EpistemicType:
 
 def parse_world_facts(items: Any, default_time: datetime) -> tuple[WorldFact, ...]:
     facts: list[WorldFact] = []
-    for i, wf in enumerate(items or []):
+    for i, wf in enumerate(as_objects(items)):
         at = wf.get("available_at")
         cites = tuple(str(c) for c in (wf.get("evidence_claim_ids") or []))
         facts.append(
@@ -853,7 +1141,7 @@ def parse_required_facts(items: Any) -> tuple[RequiredRealityFact, ...]:
             description=str(rf.get("description", "")),
             evidence_claim_ids=tuple(rf.get("evidence_claim_ids", []) or []),
         )
-        for rf in (items or [])
+        for rf in as_objects(items)
     )
 
 
@@ -936,6 +1224,22 @@ def _normalize_compilation(
 
     _filter(ws)
     data["world_spec"] = ws
+
+    # Keep only required-reality facts the compiler could actually ground in available
+    # evidence. A fact the model *names* but cannot cite (e.g. "the body has authority",
+    # or a terminal date already given by the contract horizon) is not a verified
+    # load-bearing fact and must not block the run — the participant-count, grounding and
+    # coverage checks are independent and evidence-grounded, so real gaps are still
+    # caught. A fact that DOES cite evidence is left untouched, so a citation that is
+    # unavailable by the cutoff still refuses the run.
+    grounded_facts = []
+    for rf in data.get("required_reality_facts") or []:
+        cited = [str(i) for i in (rf.get("evidence_claim_ids") or []) if str(i) in available]
+        rf["evidence_claim_ids"] = cited
+        if cited:
+            grounded_facts.append(rf)
+    data["required_reality_facts"] = grounded_facts
+
     data["subject_entity"] = _s(data.get("subject_entity")) or _s(ws.get("title")) or "the subject"
     data["resolution_units"] = _s(data.get("resolution_units")) or "the outcome"
     data["target_outcome"] = _s(data.get("target_outcome")) or "the YES condition"

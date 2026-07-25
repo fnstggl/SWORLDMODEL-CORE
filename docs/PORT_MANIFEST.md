@@ -169,3 +169,42 @@ Every hardcoded number in the runtime that made a claim about human behavior:
 The numbers that remain in the runtime are budgets (`RunBudget`), and they can only
 *stop* a trajectory and mark it unresolved. None of them can cause an action, choose an
 option, resolve a terminal, or move a probability.
+
+---
+
+## Completion run: donor code adapted, and what stayed rejected
+
+A second audit of the legacy repository, run specifically against the question *why did
+the old system reach simulation on real questions when this one refuses*, corrected the
+premise. The legacy default compiler (`lean_v2`) imports no retrieval module at all — its
+reported score came from being handed a benchmark's own frozen background paragraph. The
+compiler that did research live (`full_fidelity`) reached simulation partly through
+machinery that must never be ported.
+
+### Adapted
+
+| capability | legacy origin | destination | what changed |
+| --- | --- | --- | --- |
+| truncated-JSON salvage | `swm/world_model_v2/compiler.py::_salvage_json` (`:201-268`) | `jsonsalvage.py` | Rewritten to the core's types and made to return `None` rather than `{}` for "unsalvageable", so an unusable reply can never be mistaken for a successfully parsed empty world. The legacy forensics identified truncation as the cause of exactly the zero-actors symptom seen here; the gateway previously answered truncation by doubling `max_tokens` and discarding the prefix. |
+| targeted missing-element repair | `swm/world_model_v2/evidence_recompile.py::recompile_with_evidence` | `repair.py` + `api._compile_with_repair` | The legacy version reconciles an evidence inventory against a plan diff. Here each gate emits a machine-readable failure code and the planner maps it to *specific* queries and a *specific* instruction. Termination is progress rather than an attempt count. |
+
+### Examined and rejected
+
+| item | legacy origin | why |
+| --- | --- | --- |
+| model-knowledge roster construction | `compiler.py:46-52` — *"Use REAL NAMES … and your world knowledge about them"*, with no citation field | This is the recall the old system had, and it is unsafe invention. Every entity here carries claim ids or it does not exist. |
+| fidelity critic that adds named people | `fidelity.py:18-100` | Adds participants from model knowledge, which is precisely what the coverage and reality gates exist to prevent. |
+| `generic_outcome_prior` terminal fallback | `compiler.py:565-569` | Resolves a hollow world from a broad prior. A world that produces no outcome must report unresolved. |
+| keyword → scenario-family → canned base rate | `family_hazards.py:17-24` | A live router mapping `"beat"` to sports and `"sign"` to deals, stamping a fitted base rate onto the terminal. The single clearest violation of the no-mechanism-families rule. |
+| canned institution registry | `institutions_v2/build.py`, forced on every question by `compiler.py:707` | Institutions must be discovered from evidence per question. |
+| invented populations, relations, nine-member panels | `activation_synthesis.py` | Fabricated structure. |
+| canned personas | `qualitative_actor.py:275` | Actors are grounded in cited evidence or refused. |
+| regex → preset-prior table | `phase3b_reference_priors.py:25` | Dead in the donor, and must never revive. |
+
+### Notable non-findings
+
+The donor has **no** official-domain query reserve (the core's `authoritative_query_reserve`
+already exceeds it), **no** PDF, table, JSON-LD or pagination reader, and **no** role
+attachment; its contradiction detector records a graph that is hashed and never read, and
+it verifies spans against a 400-character RSS blurb rather than the article. Nothing was
+taken from those paths because there was nothing there to take.

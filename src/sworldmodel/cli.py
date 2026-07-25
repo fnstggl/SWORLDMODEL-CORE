@@ -27,10 +27,12 @@ from typing import Any
 
 from .api import run_forecast
 from .config import ForecastConfig
+from .diagnosis import ForecastRefused, RunDiagnosis
 from .engine import RunBudget
 from .ids import canonical_json
 from .live_research import ResearchBudget
 from .models import ForecastResult
+from .source_fetch import requires_archived_copy
 from .tracing import TraceContext
 
 
@@ -163,6 +165,11 @@ def _print_coverage(cov: dict[str, Any]) -> None:
 def cmd_forecast(args: argparse.Namespace) -> int:
     as_of = datetime.fromisoformat(args.as_of)
     horizon = datetime.fromisoformat(args.horizon)
+    process_started = datetime.now(as_of.tzinfo)
+    archive_only = requires_archived_copy(as_of, process_started)
+    mode = "PASTCAST (archive-only)" if archive_only else "NOWCAST (current pages admissible)"
+    print(f"Retrieval mode: {mode}")
+    print(f"Process started: {process_started.isoformat()}  requested as_of: {as_of.isoformat()}")
     out = Path(args.trace) if args.trace else None
 
     config = ForecastConfig.live(
@@ -185,7 +192,31 @@ def cmd_forecast(args: argparse.Namespace) -> int:
         return 2
 
     start = time.monotonic()
-    result, ctx = run_forecast(args.question, as_of, horizon, config)
+    try:
+        result, ctx = run_forecast(args.question, as_of, horizon, config)
+    except ForecastRefused as refusal:
+        # A refusal is a result about the world-supply pipeline, and it is the result
+        # most worth reading. Writing only a traceback made the four questions that
+        # refused the least diagnosable part of the system.
+        wall = time.monotonic() - start
+        diagnosis = RunDiagnosis(
+            question=args.question,
+            as_of=as_of,
+            horizon=horizon,
+            bundle=refusal.bundle,
+            repair_log=refusal.repair_log,
+            failure=refusal.__cause__ or refusal,
+            failure_stage=refusal.stage,
+            wall_seconds=wall,
+            model_calls=config.gateway.call_count,
+        )
+        _write_diagnosis(out, diagnosis, refusal)
+        print(f"REFUSED at {refusal.stage}: {refusal.__cause__ or refusal}", file=sys.stderr)
+        for cause in diagnosis.root_cause():
+            print(f"  root cause: {cause['cause']} — {cause['why']}", file=sys.stderr)
+        if out is not None:
+            print(f"  diagnosis: {out / 'diagnosis.json'}", file=sys.stderr)
+        return 1
     wall = time.monotonic() - start
 
     forecast_hash = ""
@@ -193,9 +224,60 @@ def cmd_forecast(args: argparse.Namespace) -> int:
     if out is not None:
         forecast_hash = ctx.write(out, sealed_names=args.seal, gateway_calls=config.gateway.calls)
         (out / "run_audit.json").write_text(canonical_json(audit) + "\n")
+        (out / "diagnosis.json").write_text(
+            canonical_json(
+                RunDiagnosis(
+                    question=args.question,
+                    as_of=as_of,
+                    horizon=horizon,
+                    bundle=ctx.bundle,
+                    compiled=ctx.compiled,
+                    run_result=ctx.run_result,
+                    repair_log=ctx.repair_log,
+                    world_review=ctx.world_review,
+                    wall_seconds=wall,
+                    model_calls=config.gateway.call_count,
+                ).as_dict()
+            )
+            + "\n"
+        )
     _print_summary(result, forecast_hash, out)
     _print_audit(audit)
     return 0
+
+
+def _write_diagnosis(out: Path | None, diagnosis: RunDiagnosis, refusal: ForecastRefused) -> None:
+    """Write everything the refused run learned before it stopped."""
+
+    if out is None:
+        return
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "diagnosis.json").write_text(canonical_json(diagnosis.as_dict()) + "\n")
+    if refusal.bundle is not None:
+        (out / "research_trace.json").write_text(
+            canonical_json(refusal.bundle.live_trace or {}) + "\n"
+        )
+        (out / "evidence_store.json").write_text(
+            canonical_json(
+                [
+                    {
+                        "id": c.id,
+                        "proposition": c.proposition,
+                        "normalized_value": c.normalized_value,
+                        "entities": list(c.entities),
+                        "epistemic_type": c.epistemic_type.value,
+                        "source_url": c.source_url,
+                        "supporting_excerpt": c.supporting_excerpt,
+                        "available_at": c.available_at.isoformat(),
+                    }
+                    for c in refusal.bundle.evidence_store.all()
+                ]
+            )
+            + "\n"
+        )
+        (out / "compiled_world.json").write_text(
+            canonical_json(diagnosis.world_compilation()) + "\n"
+        )
 
 
 # ---------------------------------------------------------------------------
