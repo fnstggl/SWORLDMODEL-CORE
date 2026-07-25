@@ -1190,6 +1190,7 @@ def enforce_coverage(report: CompilationCoverageReport) -> None:
     raise WorldIntegrityError(
         "verified evidence was lost during world compilation — simulation refused",
         details={
+            "failure": "coverage_incomplete",
             "missing_material_candidates": list(report.missing_material_candidates),
             "material_candidates": report.material_candidates,
             "included": report.included_candidates,

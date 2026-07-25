@@ -56,6 +56,7 @@ def verify_reality(
             "no external or operational process whose behavior could produce this "
             "outcome, so there is nothing to simulate",
             details={
+                "failure": "no_causal_producer",
                 "verified and represented participants": 0,
                 "external processes": 0,
                 "recompilable": True,
@@ -99,6 +100,7 @@ def verify_reality(
                 "the compiled world omits participants the verified evidence names — "
                 "simulation refused",
                 details={
+                    "failure": "participants_omitted",
                     "participants named by evidence": list(named),
                     "compiled entities": list(entity_names),
                     "compiled actor roster": list(roster_names),
@@ -130,6 +132,7 @@ def verify_reality(
             "participant roster does not match the count the compiled world declares "
             "for itself — simulation refused",
             details={
+                "failure": "roster_count_contradiction",
                 "declared by the compiled world": declared,
                 "verified and represented participants": represented,
                 "difference": (declared - represented),
@@ -142,7 +145,8 @@ def verify_reality(
     dupes = sorted({n for n in names if n and names.count(n) > 1})
     if dupes:
         raise WorldIntegrityError(
-            "duplicated participant detected — refused", details={"duplicated": dupes}
+            "duplicated participant detected — refused",
+            details={"failure": "duplicate_participant", "duplicated": dupes},
         )
 
     # 4. Every required reality fact must be satisfied by available evidence.
@@ -188,7 +192,11 @@ def verify_reality(
             )
         raise WorldIntegrityError(
             "required reality facts are unverified — simulation refused",
-            details={"missing": manifest.missing_required_facts},
+            details={
+                "failure": "required_facts_unverified",
+                "recompilable": True,
+                "missing": list(manifest.missing_required_facts),
+            },
         )
     return manifest
 

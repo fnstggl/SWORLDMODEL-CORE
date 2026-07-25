@@ -83,7 +83,11 @@ def build_base_world(
         raise WorldIntegrityError(
             f"actors {orphans} were compiled without a matching entity. Every actor must be "
             "a declared entity carrying its own evidence citations.",
-            details={"orphan_actors": orphans},
+            details={
+                "failure": "orphan_actors",
+                "recompilable": True,
+                "orphan_actors": orphans,
+            },
         )
     actor_states: dict[str, ActorState] = {}
     for aspec in spec.actors:
@@ -621,7 +625,7 @@ def enforce_outcome_is_produced(
         raise WorldIntegrityError(
             "the compiled world has no actions and no external processes — nobody can "
             "do anything and nothing runs, so the outcome cannot be produced",
-            details={"recompilable": True},
+            details={"failure": "nothing_can_act", "recompilable": True},
         )
     if not spec.process.nodes and not spec.external_processes:
         # A world may legitimately be driven entirely by external processes and wake
@@ -630,7 +634,7 @@ def enforce_outcome_is_produced(
         raise WorldIntegrityError(
             "the compiled world has no process and no external processes — nothing is "
             "scheduled to happen, so no actor will ever be in a position to act",
-            details={"recompilable": True},
+            details={"failure": "nothing_scheduled", "recompilable": True},
         )
 
     # Every terminal term must have at least one producer. A world where actors act
@@ -658,6 +662,7 @@ def enforce_outcome_is_produced(
                 "take moves any of them. Either the actors belong in the causal path "
                 "or they do not belong in the world",
                 details={
+                    "failure": "actors_cannot_reach_terminal",
                     "recompilable": True,
                     "actors": [a.entity_id for a in spec.actors],
                     "terminal reads fields": sorted(terminal_fields),
@@ -675,6 +680,7 @@ def enforce_outcome_is_produced(
         "branch resolves without anything happening and the answer would be the branch "
         "weights rather than the simulation",
         details={
+            "failure": "terminal_has_no_producer",
             "recompilable": True,
             "terminal terms with no producer": orphans,
             "terminal reads fields": sorted(terminal_fields),

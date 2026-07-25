@@ -34,6 +34,7 @@ from .engine import RunResult, run
 from .errors import GatewayError, WorldIntegrityError
 from .models import ForecastResult, ResolutionContract
 from .outcomes import aggregate
+from .repair import RepairLog, RepairPlan, plan_repair
 from .research import ResearchBundle, assemble_bundle
 from .structures import (
     StructuralAlternative,
@@ -62,6 +63,12 @@ def _build_contract(
     )
 
 
+# A ceiling on repair attempts, not a policy. Repair stops when it stops making
+# progress; this only bounds a pathological alternation between two failures that each
+# "fix" the other. It is deliberately far above the number of rounds real repair takes.
+_REPAIR_CEILING = 12
+
+
 def _compile_with_repair(
     question: str,
     as_of: datetime,
@@ -69,19 +76,28 @@ def _compile_with_repair(
     bundle: ResearchBundle,
     config: ForecastConfig,
     *,
-    max_attempts: int = 3,
+    log: RepairLog | None = None,
 ) -> tuple[ResearchBundle, CompiledWorld]:
-    """Compile the world, and if the coverage gate finds a materially relevant
-    candidate missing, run targeted follow-up research and recompile before giving up.
+    """Compile the world; when a gate refuses, repair the exact element it named.
 
-    The gate itself is non-negotiable: if the missing candidates still cannot be
-    represented after the backend has exhausted its follow-up research, the final
-    :class:`WorldIntegrityError` propagates and simulation is refused. A backend that
-    cannot augment (offline corpus/mock) simply blocks on the first failure.
+    Each refusal carries a machine-readable ``failure`` code. :func:`plan_repair` turns
+    that code into targeted research (a missing office-holder sends the researcher after
+    rosters; a missing mechanism sends it after procedural rules) and a specific compiler
+    instruction. Where the failure is the compiler contradicting itself or dropping
+    something already in the evidence store, no research is warranted and only the
+    instruction changes.
+
+    The loop continues while repair is *achieving something*: while each attempt either
+    changes the diagnosed failure or adds new claims to the evidence store. When an
+    attempt does neither, there is no further defensible source or representation path,
+    and the refusal is real rather than an artifact of the attempt budget. Then it
+    propagates: the gates themselves are never negotiable.
     """
 
-    backend = config.research_backend
-    for attempt in range(max_attempts):
+    log = log if log is not None else RepairLog()
+    seen_failures: set[str] = set()
+
+    for _ in range(_REPAIR_CEILING):
         evidence_view = bundle.evidence_store.view(as_of)
         contract = _build_contract(question, as_of, horizon, bundle)
         try:
@@ -98,38 +114,79 @@ def _compile_with_repair(
             )
             return bundle, compiled
         except WorldIntegrityError as exc:
-            if attempt == max_attempts - 1:
-                raise
-            # A compilation that contradicts itself — declaring one roster size and
-            # emitting another — is a defect in that compilation, not a fact about the
-            # world. Recompiling is the honest response; accepting it or filling the
-            # gap would not be. Nothing about the evidence or the question changes.
-            if exc.details.get("recompilable"):
-                recompiled = _recompile(
-                    question,
-                    as_of,
-                    horizon,
-                    bundle,
-                    config,
-                    "A previous compilation of this question was rejected. Fix exactly "
-                    "this and change nothing else about how you read the evidence:\n"
-                    f"{exc}\n"
-                    "Do not invent support for anything. If the evidence genuinely does "
-                    "not establish who decides this, compile no actors and say so.",
+            failure = str(exc.details.get("failure") or "unclassified")
+            before = len(bundle.evidence_store.claims)
+            plan = plan_repair(exc, question)
+            if plan is None:
+                log.record(
+                    None,
+                    failure=failure,
+                    message=str(exc),
+                    claims_before=before,
+                    claims_after=before,
+                    outcome="no repair plan for this failure",
                 )
-                if recompiled is None:
-                    raise
-                bundle = recompiled
-                continue
-            missing = exc.details.get("missing_material_candidates")
-            augment = getattr(backend, "augment_for_coverage", None)
-            if not isinstance(missing, list) or augment is None:
                 raise
-            augmented = augment(question, as_of, horizon, [str(m) for m in missing], bundle)
-            if augmented is None:
+
+            repaired = _repair_once(question, as_of, horizon, bundle, config, plan)
+            after = len(repaired.evidence_store.claims) if repaired else before
+            if repaired is None:
+                log.record(
+                    plan,
+                    failure=failure,
+                    message=str(exc),
+                    claims_before=before,
+                    claims_after=before,
+                    outcome="repair could not be attempted (no live gateway or backend)",
+                )
                 raise
-            bundle = augmented
+
+            # Progress means new evidence, or a failure we have not diagnosed before.
+            # Repeating a diagnosis with nothing new to read is the definition of a
+            # reroll, and it is where an honest run stops.
+            new_evidence = after > before
+            new_diagnosis = failure not in seen_failures
+            seen_failures.add(failure)
+            log.record(
+                plan,
+                failure=failure,
+                message=str(exc),
+                claims_before=before,
+                claims_after=after,
+                outcome=(
+                    "retrying"
+                    if (new_evidence or new_diagnosis)
+                    else "no new evidence and no new diagnosis — repair exhausted"
+                ),
+            )
+            if not (new_evidence or new_diagnosis):
+                raise
+            bundle = repaired
     raise AssertionError("unreachable")  # pragma: no cover
+
+
+def _repair_once(
+    question: str,
+    as_of: datetime,
+    horizon: datetime,
+    bundle: ResearchBundle,
+    config: ForecastConfig,
+    plan: RepairPlan,
+) -> ResearchBundle | None:
+    """Carry out one repair: targeted research if the plan calls for it, then recompile
+    with the plan's specific instruction.
+
+    Research extends the existing evidence store — every previously verified claim keeps
+    its id and lineage — so a follow-up search can only ever add to what is known.
+    """
+
+    if plan.needs_research:
+        augment = getattr(config.research_backend, "augment_targeted", None)
+        if augment is not None:
+            extended = augment(question, as_of, horizon, list(plan.queries), bundle)
+            if extended is not None:
+                bundle = extended
+    return _recompile(question, as_of, horizon, bundle, config, plan.instruction)
 
 
 def _recompile(
@@ -140,11 +197,12 @@ def _recompile(
     config: ForecastConfig,
     reason: str,
 ) -> ResearchBundle | None:
-    """Compile the world again from the same verified evidence.
+    """Compile the world again, with an instruction naming exactly what to fix.
 
-    Used only when a compilation is internally inconsistent. The evidence store is
-    unchanged, so this is a second reading of the same facts — not a second search for
-    facts that fit.
+    The evidence store is whatever the repair left it as — unchanged when the failure
+    was the compiler's, extended when targeted research found more. Either way this is a
+    fresh reading of a known body of facts, never a search for facts that fit a
+    conclusion.
     """
 
     if not getattr(config.gateway, "is_live", False):
@@ -156,7 +214,12 @@ def _recompile(
             as_of,
             horizon,
             bundle.evidence_store.view(as_of),
-            extra_instruction=reason,
+            extra_instruction=(
+                "A previous compilation of this question was rejected. Fix exactly this "
+                "and change nothing else about how you read the evidence:\n"
+                f"{reason}\n"
+                "Do not invent support for anything."
+            ),
             structure_id="primary",
         )
     except (GatewayError, WorldIntegrityError, ValueError, KeyError):

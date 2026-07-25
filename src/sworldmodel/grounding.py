@@ -321,9 +321,7 @@ class ActorGroundingProfile:
                 policy,
             )
 
-        named = tuple(
-            i for i in self.all_items() if i.is_supported and _any_name(i.content, keys)
-        )
+        named = tuple(i for i in self.all_items() if i.is_supported and _any_name(i.content, keys))
         if named:
             return self._assess(
                 GroundingLevel.CONTEMPORANEOUS_REPORTING,
@@ -640,6 +638,7 @@ def enforce_actor_grounding(report: ActorGroundingReport) -> None:
         details={
             # Grounding failed for this compilation. Compiling again from the same
             # evidence is legitimate; inventing support for an actor is not.
+            "failure": "actors_ungrounded",
             "recompilable": True,
             "ungrounded_actors": list(report.ungrounded_actors),
             "misattributed_evidence": list(report.misattributed),

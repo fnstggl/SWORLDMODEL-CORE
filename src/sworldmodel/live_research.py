@@ -250,8 +250,31 @@ class LiveResearchBackend:
         both passes.
         """
 
-        queries = tuple(q for q in (_missing_query(m) for m in missing) if q)
-        if not queries:
+        queries = [q for q in (_missing_query(m) for m in missing) if q]
+        return self.augment_targeted(question, as_of, horizon, queries, prior)
+
+    def augment_targeted(
+        self,
+        question: str,
+        as_of: datetime,
+        horizon: datetime,
+        queries: list[str],
+        prior: ResearchBundle,
+    ) -> ResearchBundle | None:
+        """Run a specific set of follow-up queries and rebuild the bundle.
+
+        This is the general form of targeted repair: the caller has diagnosed exactly
+        what is missing — an office-holder, a procedure, a production pathway — and hands
+        over the queries that would establish it.
+
+        The store is carried forward and appended to, never replaced, so previously
+        verified claims keep their ids, their lineage and their epistemic labels. If the
+        pass adds nothing, ``None`` says so: that is the signal that this line of enquiry
+        is exhausted, and the caller must not read it as a reason to try again.
+        """
+
+        wanted = tuple(dict.fromkeys(q.strip() for q in queries if q and q.strip()))
+        if not wanted:
             return None
         store = prior.evidence_store
         trace = ResearchTrace.resume(prior.live_trace)
@@ -259,11 +282,8 @@ class LiveResearchBackend:
         if plan is None:
             plan = plan_research(self.gateway, question, as_of, horizon)
         before = len(store.claims)
-        self._run_rounds(question, as_of, plan, store, trace, queries)
+        self._run_rounds(question, as_of, plan, store, trace, wanted)
         if len(store.claims) == before:
-            # Nothing new was found. The caller must still get the prior bundle back
-            # rather than a rebuilt one, so returning None keeps the gate's own
-            # "augmentation cannot help" path intact.
             return None
         return self._compile(question, as_of, horizon, plan, store, trace)
 
