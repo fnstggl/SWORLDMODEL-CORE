@@ -234,16 +234,6 @@ def verify_claim(
     if exc not in doc:
         return "supporting excerpt does not appear verbatim in the fetched document"
 
-    # Dates are compared as dates, and only the *proposition* is held to the excerpt.
-    #
-    # Two corrections to one rule, both from real discarded evidence. A page that says
-    # "Brussels, 17 January 2026" supports a claim about that date, but the ISO form
-    # 2026-01-17 decomposes into the tokens 2026, 1 and 17 — and the phantom "1" from the
-    # month can never appear in prose that writes "January", so the claim was refused for
-    # its own formatting. And `normalized_value` is *our* canonical encoding of the
-    # claim, not a quotation from the page: requiring it to appear literally in prose
-    # asks the world to be written in our notation. What must be supported is what the
-    # proposition asserts about the world.
     # The supporting span is the quoted sentence *and its immediate neighbourhood*.
     #
     # Real sources put the date in a dateline and the fact in the next sentence, and put
@@ -254,7 +244,13 @@ def verify_claim(
     # next to the sentence the claim was built from.
     region = _supporting_region(doc, exc)
 
-    asserted_dates = _dates(proposition)
+    # Dates are compared as dates. A page that says "Brussels, 17 January 2026" supports
+    # a claim about that day, but the ISO form 2026-01-17 decomposes into the tokens
+    # 2026, 1 and 17 — and the phantom "1" from the month can never appear in prose that
+    # writes "January", so such claims were refused for their own formatting. Comparing
+    # the *dates* is both looser about notation and stricter about the day: a claim
+    # asserting the wrong date still fails.
+    asserted_dates = _dates(proposition) | _dates(normalized_value)
     unsupported_dates = sorted(d.isoformat() for d in asserted_dates - _dates(region))
     if unsupported_dates:
         return (
@@ -262,7 +258,15 @@ def verify_claim(
             f"{', '.join(unsupported_dates)}"
         )
 
-    asserted = _numbers(proposition) - _date_component_numbers(proposition)
+    # Every remaining quantity the claim asserts — in the proposition and in the value it
+    # will be stored under — must be carried by the span. The normalized value is checked
+    # because it is what downstream readers see: a claim whose proposition says "the rate
+    # was held" and whose value says "8.50" would otherwise put an unsupported number
+    # into the compiler's evidence listing. Only its *date components* are exempt, and
+    # only because the date check above is stricter than they are.
+    asserted = (_numbers(proposition) | _numbers(normalized_value)) - (
+        _date_component_numbers(proposition) | _date_component_numbers(normalized_value)
+    )
     unsupported = sorted(asserted - _numbers(region))
     if unsupported:
         return (

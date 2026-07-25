@@ -389,3 +389,62 @@ def test_an_actor_without_a_matching_entity_is_refused() -> None:
     with pytest.raises(WorldIntegrityError) as exc:
         build_base_world(bundle.spec, contract, bundle.evidence_store.view(AS_OF), ())
     assert dropped in str(exc.value)
+
+
+# --------------------------------------------------------------------------- #
+# 6. Verification is loose about notation and strict about support.
+# --------------------------------------------------------------------------- #
+
+
+def test_a_date_written_in_prose_supports_a_claim_normalized_to_iso() -> None:
+    """The exact claim a live EU–Mercosur run discarded, which was its whole store.
+
+    A Council page reading "Brussels, 17 January 2026 — ... signed ..." was refused
+    because the ISO form 2026-01-17 decomposes into 2026, 1 and 17, and the phantom "1"
+    from the month can never appear in prose that writes "January". The claim was
+    rejected for its own formatting, the store was left empty, the compiler was handed
+    nothing, and the run reported that no decision-maker could be found.
+    """
+
+    from sworldmodel.source_extract import verify_claim
+
+    document = (
+        "Brussels, 17 January 2026 - The European Union and Mercosur signed the "
+        "Partnership Agreement at a ceremony in Brazil."
+    )
+    assert (
+        verify_claim(
+            proposition="The European Union and Mercosur signed the trade agreement",
+            normalized_value="2026-01-17",
+            entities=("European Union", "Mercosur"),
+            excerpt="The European Union and Mercosur signed the Partnership Agreement",
+            document=document,
+        )
+        == ""
+    )
+
+
+def test_verification_still_refuses_an_unsupported_value_and_a_wrong_date() -> None:
+    """Loosening notation may not loosen support. Both of these must still fail — the
+    second is the hole that opens if `normalized_value` stops being checked at all,
+    since the compiler's evidence listing shows exactly that value."""
+
+    from sworldmodel.source_extract import verify_claim
+
+    wrong_date = verify_claim(
+        proposition="the agreement was signed",
+        normalized_value="2026-02-17",
+        entities=("agreement",),
+        excerpt="the agreement was signed on 17 January 2026",
+        document="the agreement was signed on 17 January 2026",
+    )
+    assert "date" in wrong_date
+
+    smuggled = verify_claim(
+        proposition="the rate was held",
+        normalized_value="8.50",
+        entities=("Committee",),
+        excerpt="the Committee held the rate unchanged",
+        document="the Committee held the rate unchanged",
+    )
+    assert "value" in smuggled
