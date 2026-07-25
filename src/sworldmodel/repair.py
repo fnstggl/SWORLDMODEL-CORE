@@ -351,6 +351,26 @@ def _actors_cannot_reach_terminal(exc: WorldIntegrityError, subject: str) -> Rep
 
 
 def _nothing_can_act(exc: WorldIntegrityError, subject: str) -> RepairPlan:
+    idle = _strings(exc.details.get("actors_without_actions"))
+    if idle:
+        # The world is not empty — it has actors with nothing to do. This is the more
+        # common and more fixable case, and it needs no research: the actions are the
+        # things the actor's own role lets it do, which the compiler already knows.
+        return RepairPlan(
+            failure="nothing_can_act",
+            missing_element=f"actions for {idle}",
+            queries=(),
+            instruction=(
+                f"You compiled {idle} as actor(s) and gave them no actions, so they can "
+                "do nothing and the outcome cannot be produced. Do not empty the world "
+                "and do not add a process to declare the answer. Give each actor the "
+                "action its role lets it take toward this outcome — for a person whose "
+                "public statement is the question, an action whose effect sets the field "
+                "the terminal reads; for a body that decides, an action that records its "
+                "decision. The action's effect must write, by name, a term the terminal "
+                "reads, or it is a name and not a mechanism."
+            ),
+        )
     return RepairPlan(
         failure="nothing_can_act",
         missing_element="actions or processes",

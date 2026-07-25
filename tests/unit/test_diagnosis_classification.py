@@ -171,3 +171,36 @@ def test_a_blocked_search_channel_is_named_rather_than_blamed_on_the_compiler() 
 
     d2 = _Healthy(question="q", as_of=AS_OF, horizon=HORIZON, failure=_gate("no_causal_producer"))
     assert [c["cause"] for c in d2.root_cause()] == ["actor_discovery_failure"]
+
+
+def test_nothing_can_act_with_idle_actors_gets_a_no_research_action_repair() -> None:
+    """A live Bank of England run compiled Andrew Bailey as an actor and gave him no
+    action — no way to make the very statement the question is about — and repair kept
+    re-emptying the world instead of adding his one action. An actor with nothing to do
+    is a different, more fixable defect than an empty world, and the repair for it needs
+    no research: the action is the thing the actor's role already lets it do."""
+
+    from sworldmodel.repair import plan_repair
+
+    idle = WorldIntegrityError(
+        "nothing can act",
+        details={
+            "failure": "nothing_can_act",
+            "recompilable": True,
+            "actors_without_actions": ["andrew_bailey"],
+        },
+    )
+    plan = plan_repair(idle, "Will Andrew Bailey signal support for a cut?")
+    assert plan is not None
+    assert plan.queries == ()  # no research: the action is known from the role
+    assert "andrew_bailey" in plan.instruction
+    assert "gave them no actions" in plan.instruction
+
+    # The genuinely empty world still gets the research-backed repair.
+    empty = WorldIntegrityError(
+        "nothing can act",
+        details={"failure": "nothing_can_act", "recompilable": True, "actors_without_actions": []},
+    )
+    empty_plan = plan_repair(empty, "Will OPEC+ raise quotas?")
+    assert empty_plan is not None
+    assert empty_plan.queries  # research for the missing producer

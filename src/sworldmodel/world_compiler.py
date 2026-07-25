@@ -1160,10 +1160,22 @@ def enforce_outcome_is_produced(
     terminal_fields = _expr_fields(spec.terminal.yes_when)
     terminal_colls = _expr_collections(spec.terminal.yes_when)
     if not spec.actions and not spec.external_processes:
+        # Whether the world has actors changes what is wrong and what the repair is. A
+        # world with actors but no actions compiled people and gave them nothing to do —
+        # a live Bank of England run put Andrew Bailey in the world with no way to make
+        # the very statement the question is about, and repair kept re-emptying the world
+        # rather than adding his one action. A world with neither is missing its
+        # producer entirely. The detail carries the distinction so the repair can act on
+        # the real defect.
+        has_actors = bool(spec.actors)
         raise WorldIntegrityError(
             "the compiled world has no actions and no external processes — nobody can "
             "do anything and nothing runs, so the outcome cannot be produced",
-            details={"failure": "nothing_can_act", "recompilable": True},
+            details={
+                "failure": "nothing_can_act",
+                "recompilable": True,
+                "actors_without_actions": [a.entity_id for a in spec.actors] if has_actors else [],
+            },
         )
     if not spec.process.nodes and not spec.external_processes:
         # A world may legitimately be driven entirely by external processes and wake
