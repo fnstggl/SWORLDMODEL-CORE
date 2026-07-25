@@ -29,7 +29,9 @@ from __future__ import annotations
 import sys
 import time
 from collections import deque
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any
@@ -320,10 +322,33 @@ class LiveResearchBackend:
         if plan is None:
             plan = plan_research(self.gateway, question, as_of, horizon)
         before = len(store.claims)
-        self._run_rounds(question, as_of, plan, store, trace, wanted)
+        # A follow-up looks for one named thing, so it gets a follow-up's budget rather
+        # than a fresh survey's. Repair may now run several rounds, and giving each of
+        # them the full opening budget is how a question that was answerable ran out of
+        # wall clock before it ever reached the simulation.
+        with self._followup_budget():
+            self._run_rounds(question, as_of, plan, store, trace, wanted)
         if len(store.claims) == before:
             return None
         return self._compile(question, as_of, horizon, plan, store, trace)
+
+    @contextmanager
+    def _followup_budget(self) -> Iterator[None]:
+        """Run one targeted follow-up under a reduced budget, then restore the original."""
+
+        original = self.budget
+        self.budget = replace(
+            original,
+            max_rounds=1,
+            max_queries=max(4, original.max_queries // 3),
+            max_seconds=max(60.0, original.max_seconds / 3),
+            max_fetches=max(6, original.max_fetches // 2),
+            max_extract_calls=max(8, original.max_extract_calls // 2),
+        )
+        try:
+            yield
+        finally:
+            self.budget = original
 
     # -- research loop ----------------------------------------------------------
 
