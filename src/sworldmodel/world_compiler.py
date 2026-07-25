@@ -681,10 +681,33 @@ def terminal_producers(spec: WorldSpec) -> dict[str, tuple[str, ...]]:
     An uncertainty is deliberately not a producer. A branch condition may influence a
     producer; it may not stand in for one. A terminal term whose only writer is an
     uncertainty's ``field_effects`` is the answer wearing the costume of a world state.
+
+    Verified evidence *is* a producer, and this is the fourth case rather than an
+    exception to the first three. Asked in July whether the EU and Mercosur will sign
+    their trade agreement before October, a run found the European Commission's own page,
+    Wikipedia and five other sources all recording that they signed it on 17 January.
+    Nothing inside the window produces that; it was produced before the window opened,
+    by the world. A world that must schedule a future signing to satisfy this gate is a
+    less faithful world, and refusing is worse still — the system would refuse the one
+    question its research had already answered. What makes it admissible is the citation:
+    an initial value carrying claim ids is a fact the record establishes, and an initial
+    value carrying none is the compiler asserting an outcome, which stays an orphan.
     """
 
     terms = _expr_terms(spec.terminal.yes_when)
     producers: dict[str, list[str]] = {t: [] for t in terms}
+
+    for f in spec.fields:
+        if f.initial is not None and f.evidence_claim_ids and f"field:{f.field_id}" in producers:
+            producers[f"field:{f.field_id}"].append(f"evidence:{','.join(f.evidence_claim_ids)}")
+    for doc in spec.documents:
+        if not doc.evidence_claim_ids:
+            continue
+        cite = f"evidence:{','.join(doc.evidence_claim_ids)}"
+        for name, value in doc.fields:
+            term = f"document:{doc.document_id}.{name}"
+            if value is not None and term in producers:
+                producers[term].append(cite)
 
     def record(label: str, effects: Any) -> None:
         written: set[str] = set()
@@ -1052,6 +1075,17 @@ def enforce_outcome_is_produced(
         # this gate passed it because *some* action could in principle have written the
         # term. In a world with actors, a term the terminal reads may not be set to a
         # constant by the scenery.
+        # A question the record has already answered. Every term the terminal reads is
+        # established by verified claims available at the cutoff, so there is nothing
+        # left for anyone in this world to produce and the checks below — which exist to
+        # stop a world from *pretending* the answer was produced — have nothing to
+        # protect. Asked in July whether the EU and Mercosur will sign before October,
+        # with seven sources recording that they signed in January, the honest world is
+        # one that starts from that and resolves; demanding that actors reach a term the
+        # world established before they existed would force a future signing to be
+        # invented for a signing that already happened.
+        if all(who and all(w.startswith("evidence:") for w in who) for who in producers.values()):
+            return
         preset = _environment_preset_terminal_terms(spec, set(producers))
         if spec.actors and preset:
             raise WorldIntegrityError(

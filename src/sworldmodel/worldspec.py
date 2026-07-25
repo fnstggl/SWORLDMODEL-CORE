@@ -243,9 +243,19 @@ class ChannelSpec:
 
 @dataclass(frozen=True)
 class DocumentSpec:
+    """A document or object the world contains.
+
+    ``evidence_claim_ids`` cite the verified claims that establish its initial contents.
+    A document whose fields are already true when the window opens — an agreement the
+    record shows was signed in January, asked about in July — is only admissible with
+    them: the citation is what separates a fact the world starts from and a fact the
+    compiler asserted.
+    """
+
     document_id: str
     fields: tuple[tuple[str, Any], ...] = ()
     description: str = ""
+    evidence_claim_ids: tuple[str, ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -749,6 +759,7 @@ def parse_world_spec(d: dict[str, Any]) -> WorldSpec:
                 document_id=str(doc["document_id"]),
                 fields=_items(doc.get("fields")),
                 description=str(doc.get("description", "")),
+                evidence_claim_ids=_strs(doc.get("evidence_claim_ids")),
             )
             for doc in as_objects(d.get("documents"))
         ),

@@ -330,7 +330,15 @@ universal operators. Every term it reads must be written by something that runs:
 takes, a process node, or an external/operational process. Check each term before you finish — if
 nothing writes it, the world is incomplete. Use `unresolved_when` for states where the process
 genuinely did not determine the answer — an undetermined world must report as unresolved, never be
-rounded to NO."""
+rounded to NO.
+
+There is a fourth producer, and it is the verified evidence itself. If the record already
+establishes what the question asks — the agreement was signed four months before the cutoff, the
+figure has been reported, the meeting has happened — do not invent a future event to produce it
+again. Put the established value in the field or document the terminal reads and cite the claim ids
+that establish it, on that field or document. The citation is what makes it admissible: an initial
+value with claim ids is a fact the record establishes, and an initial value without them is you
+asserting an outcome, which will be refused. Do not use this for something you merely expect."""
 
 
 _WORLD_SCHEMA = """Return a SINGLE JSON object:
@@ -357,7 +365,7 @@ _WORLD_SCHEMA = """Return a SINGLE JSON object:
    "fields":[{"field_id":"snake","value_type":"number|string|bool","initial":<v>,"description":"..."}],
    "resources":[{"resource_id":"snake","holder_entity_id":"<entity>","quantity":<n>}],
    "channels":[{"channel_id":"snake","participants":["..."]}],
-   "documents":[{"document_id":"snake","fields":{"k":v}}],
+   "documents":[{"document_id":"snake","fields":{"k":v},"evidence_claim_ids":["..."]}],
    "actions":[{"action_id":"snake_verb","meaning":"...","eligible_actors":["*"|"role:X"|"<entity>"],
                "required_authority":["capability_token"],"parameters":[{"name":"","type":"option|string|number",
                "required":true,"choices":[...]}],"preconditions":{"op":"...","args":[...]},

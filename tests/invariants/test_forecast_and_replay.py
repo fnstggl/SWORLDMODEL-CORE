@@ -662,3 +662,44 @@ def test_a_terminal_term_nothing_writes_at_all_is_still_reported_as_an_orphan() 
         _compile(data, gw)
     assert "the outcome is an input" in str(exc.value)
     assert exc.value.details["terminal terms with no producer"] == ["never_written"]
+
+
+def test_a_question_the_record_has_already_answered_compiles_from_its_citations() -> None:
+    """Asked in July whether the EU and Mercosur would sign before October, a live run
+    found the Commission's own page, Wikipedia and five other sources recording that they
+    signed on 17 January. Nothing inside the window produces that. Demanding a producer
+    would force a future signing to be invented for a signing that already happened, and
+    refusing would refuse the one question the research had already answered.
+
+    The citation is the whole rule: an initial value carrying claim ids is a fact the
+    record establishes, and the same value carrying none is the compiler asserting an
+    outcome."""
+
+    from sworldmodel.errors import WorldIntegrityError
+    from sworldmodel.world_compiler import terminal_producers
+
+    data = _split_world()
+    cited = data["claims"][0]["id"]
+    data["world_spec"]["documents"] = [
+        {
+            "document_id": "agreement",
+            "fields": {"signed": True},
+            "evidence_claim_ids": [cited],
+        }
+    ]
+    data["world_spec"]["terminal"]["yes_when"] = {
+        "op": "equals",
+        "args": [{"op": "document_field", "args": ["agreement", "signed"]}, True],
+    }
+    data["uncertainties"] = []
+
+    gw = _gateway(_signal_sensitive)
+    _, compiled = _compile(data, gw)
+    producers = terminal_producers(compiled.spec)
+    assert producers["document:agreement.signed"] == (f"evidence:{cited}",)
+
+    # Strip the citation and the same world is the compiler asserting the answer.
+    data["world_spec"]["documents"][0]["evidence_claim_ids"] = []
+    with pytest.raises(WorldIntegrityError) as exc:
+        _compile(data, _gateway(_signal_sensitive))
+    assert exc.value.details["failure"] == "terminal_has_no_producer"

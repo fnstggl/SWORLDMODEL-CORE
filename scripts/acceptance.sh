@@ -26,7 +26,14 @@ run() {
     --max-branches 4 --max-queries 20 --research-rounds 3 --research-seconds 420 \
     --max-structures 2 --trace "artifacts/acceptance/$name/run_trace" \
     > "artifacts/acceptance/$name/run.log" 2>&1
-  echo "=== $name exit=$? wall=$((SECONDS - t0))s ===" >> "$STATUS"
+  local rc=$?
+  # The three records a case is judged on, beside its trace. Written by both the
+  # completed and the refused path, so a case always has them or visibly does not.
+  for f in diagnosis.json research_trace.json compiled_world.json evidence_store.json; do
+    [ -f "artifacts/acceptance/$name/run_trace/$f" ] &&
+      cp "artifacts/acceptance/$name/run_trace/$f" "artifacts/acceptance/$name/$f"
+  done
+  echo "=== $name exit=$rc wall=$((SECONDS - t0))s ===" >> "$STATUS"
 }
 
 now() { date -u -d '+1 minute' +%Y-%m-%dT%H:%M:%S+00:00; }
