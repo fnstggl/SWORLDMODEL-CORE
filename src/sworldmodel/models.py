@@ -322,6 +322,10 @@ def make_payload(data: dict[str, Any]) -> tuple[tuple[str, Any], ...]:
 # ---------------------------------------------------------------------------
 
 PROBABILITY_SOURCE = "weighted_simulated_trajectories"
+# The point estimate materially depends on branch weights that were never grounded in
+# any evidence (symmetric ignorance / sensitivity enumeration). The scenario average is
+# still reported for reference, but the honest answer is the bounds.
+PROBABILITY_SOURCE_UNGROUNDED_WEIGHTS = "scenario_enumeration_ungrounded_weights"
 
 
 @dataclass(frozen=True)
@@ -336,6 +340,17 @@ class BranchOutcome:
     key_conditions: tuple[tuple[str, str], ...]
     records: tuple[tuple[str, str], ...] = ()  # highlighted (label, value) for the report
     event_count: int = 0
+    # What the terminal already said for the *initialized* branch world — its uncertain
+    # values applied, but before any actor decision or process/action effect ran. This
+    # is the branch's answer with the simulation deleted; comparing it with ``outcome``
+    # is how the aggregate knows whether the trajectories added any information.
+    pre_outcome: str | None = None  # "YES" | "NO" | None
+    pre_resolved: bool = False
+    # False when this branch's weight rests on symmetric-ignorance or sensitivity-only
+    # enumeration rather than an identified distribution. The engine sets it explicitly
+    # from the scenario's provenance; the permissive default exists only so hand-built
+    # records (tests, replays) keep constructing.
+    weight_grounded: bool = True
 
 
 @dataclass(frozen=True)
@@ -346,6 +361,46 @@ class TrajectorySummary:
     narrative: str
     records: tuple[tuple[str, str], ...]
     key_conditions: tuple[tuple[str, str], ...]
+
+
+@dataclass(frozen=True)
+class ForecastIntegrity:
+    """Whether the reported number carries more information than its own initialization.
+
+    Built by :func:`sworldmodel.outcomes.aggregate` from the branch table alone. The
+    live failure this record exists for: a forecast whose branch weights were an
+    arbitrary 0.5/0.5 symmetric-ignorance split reported exactly 0.5000 — the number
+    was the prior, repeated, with the simulation as decoration.
+
+    ``probability_before_simulation`` is the same weighted aggregation taken over each
+    branch's pre-simulation terminal answer (conditional on pre-resolved mass);
+    branches whose initial world did not resolve contribute to ``pre_unresolved_mass``
+    instead. ``point_estimate_is_calibrated`` is False when the point estimate depends
+    materially on ungrounded weights (or when there is no point estimate at all).
+    """
+
+    probability_before_simulation: float | None
+    probability_after_simulation: float | None
+    simulation_shift: float | None
+    pre_resolved_mass: float
+    pre_unresolved_mass: float
+    weights_grounded_all: bool
+    ungrounded_variables: tuple[str, ...]
+    point_estimate_is_calibrated: bool
+    counterfactual_note: str
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "probability_before_simulation": self.probability_before_simulation,
+            "probability_after_simulation": self.probability_after_simulation,
+            "simulation_shift": self.simulation_shift,
+            "pre_resolved_mass": self.pre_resolved_mass,
+            "pre_unresolved_mass": self.pre_unresolved_mass,
+            "weights_grounded_all": self.weights_grounded_all,
+            "ungrounded_variables": list(self.ungrounded_variables),
+            "point_estimate_is_calibrated": self.point_estimate_is_calibrated,
+            "counterfactual_note": self.counterfactual_note,
+        }
 
 
 @dataclass(frozen=True)
@@ -369,6 +424,7 @@ class ForecastResult:
     token_usage: int = 0
     diagnostics: tuple[tuple[str, str], ...] = ()
     probability_source: str = PROBABILITY_SOURCE
+    integrity: ForecastIntegrity | None = None
 
     def diagnostics_dict(self) -> dict[str, str]:
         return dict(self.diagnostics)

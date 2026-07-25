@@ -39,6 +39,8 @@ from typing import Any
 from .errors import GatewayError, WorldIntegrityError
 from .evidence import EvidenceClaim, EvidenceStore, EvidenceView
 from .gateway import GatewayRequest, ModelGateway
+from .gnews_decode import GoogleNewsDecoder
+from .gnews_decode import article_id_of as article_id_of_link
 from .http import (
     DEFAULT_POLICY,
     FetchPolicy,
@@ -48,11 +50,18 @@ from .http import (
     UrlRejected,
     check_url_shape,
 )
-from .ids import content_id
+from .ids import content_id, sha256_hex
 from .models import AuthorityLevel, EpistemicType, SourceType
+from .providers import (
+    ProviderHealth,
+    jina_reader,
+    jina_title_search,
+    serper_search,
+)
 from .research import ResearchBundle, assemble_bundle
 from .research_planner import ResearchPlan, followup_queries, plan_research
 from .rss import (
+    RssItem,
     discover_feed_links,
     feed_urls_for,
     google_news_rss_url,
@@ -63,7 +72,13 @@ from .rss import (
 )
 from .search import duckduckgo_search, site_query
 from .source_extract import ExtractedClaim, ExtractionResult, distinctive_terms, extract_claims
-from .source_fetch import FetchedSource, RetrievalMode, fetch_source
+from .source_fetch import (
+    FetchedSource,
+    RetrievalMode,
+    extract_text,
+    fetch_source,
+    requires_archived_copy,
+)
 from .world_compiler import compile_world_spec_live
 
 # A search engine's URL length limit; a query longer than this is truncated by the
@@ -84,6 +99,16 @@ class ResearchBudget:
     extract_concurrency: int = 4
     low_info_rounds_to_stop: int = 2
     max_contradiction_checks: int = 8
+    # Ceilings for the WHOLE question — the opening pass plus every repair round —
+    # rather than per pass. Repair used to receive a fresh reduced budget each time it
+    # ran, so a question that repaired six times could spend six times the opening
+    # allowance and still be inside "the budget"; one live OPEC+ run was killed from
+    # outside at forty minutes with 26 logical queries issued. Research stops when a
+    # question has cost what a question may cost, wherever in the run that happens.
+    total_queries: int = 40
+    total_fetches: int = 120
+    total_extract_calls: int = 90
+    total_seconds: float = 900.0
 
     @property
     def authoritative_query_reserve(self) -> int:
@@ -126,6 +151,12 @@ class ResearchTrace:
     rounds: int = 0
     fact_retrieval: dict[str, list[str]] = field(default_factory=dict)
     retrieval_mode: dict[str, Any] = field(default_factory=dict)
+    # Provider accounting, carried across passes so a run's retrieval cost is one number.
+    provider_requests: dict[str, int] = field(default_factory=dict)
+    provider_health: dict[str, Any] = field(default_factory=dict)
+
+    def bump(self, provider: str, n: int = 1) -> None:
+        self.provider_requests[provider] = self.provider_requests.get(provider, 0) + n
 
     def query_texts(self) -> list[str]:
         return [q["query"] for q in self.queries]
@@ -152,6 +183,8 @@ class ResearchTrace:
             "contradiction_checks": self.contradiction_checks,
             "extract_calls": self.extract_calls,
             "rounds": self.rounds,
+            "provider_requests": self.provider_requests,
+            "provider_health": self.provider_health,
             # Labeled for what it is: lexical retrieval over claim text, NOT a check
             # that a required fact is established. Nothing here asserts coverage.
             "required_fact_lexical_retrieval": {
@@ -187,6 +220,8 @@ class ResearchTrace:
             contradiction_checks=int(prior.get("contradiction_checks", 0)),
             extract_calls=int(prior.get("extract_calls", 0)),
             rounds=int(prior.get("rounds", 0)),
+            provider_requests=dict(prior.get("provider_requests") or {}),
+            provider_health=dict(prior.get("provider_health") or {}),
         )
 
 
@@ -235,6 +270,30 @@ class LiveResearchBackend:
         self.transport = transport or UrllibTransport()
         self.budget = budget or ResearchBudget()
         self._now = now  # injectable for tests; else datetime.now(tz) at call time
+        # Per-question retrieval state, shared across the opening pass and every repair
+        # round: the health ledger circuit-breaks a blocked provider once for the whole
+        # run, and the decoder caches each article id so a headline seen twice is
+        # resolved once. Created on the first public call.
+        self._health = ProviderHealth()
+        self._decoder = GoogleNewsDecoder(self.transport)
+        # Cumulative spend for this question, across the opening pass and every repair.
+        self._spent_queries = 0
+        self._spent_fetches = 0
+        self._spent_extracts = 0
+        self._started = time.monotonic()
+
+    def _cumulative_room(self) -> str:
+        """Which whole-question ceiling is exhausted, if any."""
+
+        if self._spent_queries >= self.budget.total_queries:
+            return f"question query budget exhausted ({self._spent_queries} logical queries)"
+        if self._spent_fetches >= self.budget.total_fetches:
+            return f"question fetch budget exhausted ({self._spent_fetches} pages)"
+        if self._spent_extracts >= self.budget.total_extract_calls:
+            return f"question extraction budget exhausted ({self._spent_extracts} calls)"
+        if time.monotonic() - self._started >= self.budget.total_seconds:
+            return f"question research clock exhausted ({self.budget.total_seconds:.0f}s)"
+        return ""
 
     # -- public API -------------------------------------------------------------
 
@@ -374,6 +433,10 @@ class LiveResearchBackend:
         while (
             not session.queues.empty() and rounds < self.budget.max_rounds and not self._time_up(t0)
         ):
+            exhausted = self._cumulative_room()
+            if exhausted:
+                trace.stop_reason = exhausted
+                break
             rounds += 1
             trace.rounds += 1
             candidates = self._collect_candidates(session, as_of, trace)
@@ -594,27 +657,63 @@ class LiveResearchBackend:
     def _collect_candidates(
         self, session: _Session, as_of: datetime, trace: ResearchTrace
     ) -> list[str]:
+        """Candidate publisher URLs for this round's queries, cheapest route first.
+
+        Per logical query the order is: Google News RSS (headlines for exactly this
+        query) with each opaque link resolved by the batchexecute decoder; then the
+        optional low-priority DuckDuckGo channel; and only when this round has produced
+        nothing does Serper act as the paid last resort. Every provider is behind the
+        run's health ledger, so one that is blocking is rested rather than re-asked.
+        """
+
         urls: list[str] = []
-        for channel, q in self._next_queries(session):
+        queries = self._next_queries(session)
+        for channel, q in queries:
             session.queries_used += 1
+            self._spent_queries += 1
             trace.queries.append({"query": q, "channel": channel})
-            urls.extend(self._rss_candidates(q, as_of, trace))
-            outcome = duckduckgo_search(self.transport, q, limit=self.budget.max_pages_per_query)
-            if outcome.ok:
-                urls.extend(outcome.urls)
-            else:
-                # A blocked or challenged search is a failure to search, not an empty
-                # result set, and it is surfaced instead of poisoning the queue.
-                trace.search_failures.append(
-                    {"query": q, "channel": channel, "error": outcome.error}
+            urls.extend(self._news_candidates(q, as_of, trace))
+            if self._health.usable("duckduckgo"):
+                outcome = duckduckgo_search(
+                    self.transport, q, limit=self.budget.max_pages_per_query
                 )
+                trace.bump("duckduckgo")
+                if outcome.ok:
+                    self._health.note_success("duckduckgo")
+                    urls.extend(outcome.urls)
+                else:
+                    self._health.note_block("duckduckgo")
+                    trace.search_failures.append(
+                        {"query": q, "channel": channel, "error": outcome.error}
+                    )
+        # Serper is the paid last resort: only when the free channels yielded nothing
+        # for this round's queries, and only while it is healthy.
+        if not urls and queries and self._health.usable("serper"):
+            for _channel, q in queries:
+                found = serper_search(
+                    self.transport, q, self._health, limit=self.budget.max_pages_per_query
+                )
+                trace.bump("serper")
+                if found:
+                    trace.queries.append({"query": q, "channel": "serper", "urls": len(found)})
+                    urls.extend(found)
+        trace.provider_health = self._health.as_dict()
         return self._policy_filtered(urls, trace)
 
-    def _rss_candidates(self, query: str, as_of: datetime, trace: ResearchTrace) -> list[str]:
-        """Google News RSS as a real discovery channel: resolve item links to publisher
-        URLs and hand them to the fetcher like any other candidate."""
+    def _news_candidates(self, query: str, as_of: datetime, trace: ResearchTrace) -> list[str]:
+        """Publisher URLs behind a Google News query.
+
+        RSS gives the headlines and opaque links for exactly this query. Each link is
+        resolved to its publisher URL by the batchexecute decoder — the old
+        ``resolve_item_url`` recovers nothing from a live feed now that Google encodes a
+        server-side reference in every id, which is why the whole news channel was
+        returning a hundred items and zero candidates. A link the decoder cannot resolve
+        falls back to exact-title Jina Search on the headline and publisher the item
+        already carries.
+        """
 
         rss_url = google_news_rss_url(query)
+        trace.bump("google_news_rss")
         try:
             resp = self.transport.get(rss_url, timeout=15)
             items = parse_rss(resp.text)
@@ -625,14 +724,18 @@ class LiveResearchBackend:
         # the cutoff cannot inform a pastcast and is dropped before any request is spent.
         within = [i for i in items if i.published is None or i.published <= as_of]
         resolved: list[str] = []
-        unresolved = 0
-        for item in within:
-            url = resolve_item_url(item)
-            if url:
-                resolved.append(url)
+        decoded = direct = via_search = 0
+        for item in within[: self.budget.max_pages_per_query]:
+            url = self._resolve_item(item, trace)
+            if url is None:
+                continue
+            resolved.append(url)
+            if url == item.link:
+                direct += 1
+            elif article_id_of_link(item.link):
+                decoded += 1
             else:
-                unresolved += 1
-        picked = resolved[: self.budget.max_pages_per_query]
+                via_search += 1
         trace.rss_requests.append(
             {
                 "query": query,
@@ -640,11 +743,38 @@ class LiveResearchBackend:
                 "items": len(items),
                 "within_cutoff": len(within),
                 "resolved_to_publisher": len(resolved),
-                "unresolvable_redirects": unresolved,
-                "urls_queued": picked,
+                "decoded": decoded,
+                "recovered_via_title_search": via_search,
+                "urls_queued": resolved,
             }
         )
-        return picked
+        return resolved
+
+    def _resolve_item(self, item: RssItem, trace: ResearchTrace) -> str | None:
+        """One RSS item to a publisher URL: decoder first, then exact-title recovery."""
+
+        # A non-Google link (rare, from a plain feed) is already the publisher URL.
+        plain = resolve_item_url(item)
+        if plain and not is_google_redirect(plain):
+            return plain
+        if self._health.usable("google_news_decoder"):
+            result = self._decoder.decode(item.link)
+            trace.bump("google_news_decoder")
+            if result.ok:
+                self._health.note_success("google_news_decoder")
+                return result.publisher_url
+            if result.failure in ("challenge", "throttled"):
+                self._health.note_block("google_news_decoder")
+            else:
+                self._health.note_error("google_news_decoder")
+        # Decode failed: recover from the headline and publisher the item already names.
+        if item.title and item.source and self._health.usable("jina_search"):
+            found = jina_title_search(self.transport, item.title, item.source, self._health)
+            trace.bump("jina_search")
+            for url in found:
+                if not is_google_redirect(url):
+                    return url
+        return None
 
     def _policy_filtered(self, urls: list[str], trace: ResearchTrace) -> list[str]:
         """Drop URLs that must not be requested at all. These come off third-party HTML,
@@ -671,9 +801,13 @@ class LiveResearchBackend:
         trace: ResearchTrace,
     ) -> list[FetchedSource]:
         seen = session.seen_urls
-        todo = [u for u in dict.fromkeys(urls) if u not in seen][: self.budget.max_fetches]
+        room = max(0, self.budget.total_fetches - self._spent_fetches)
+        todo = [u for u in dict.fromkeys(urls) if u not in seen][
+            : min(self.budget.max_fetches, room)
+        ]
         for u in todo:
             seen.add(u)
+        self._spent_fetches += len(todo)
         results: list[FetchedSource] = []
         if not todo:
             return results
@@ -681,7 +815,16 @@ class LiveResearchBackend:
             fetched = list(
                 pool.map(lambda u: fetch_source(self.transport, u, now=now, as_of=as_of), todo)
             )
+        pastcast = requires_archived_copy(as_of, now)
         for src in fetched:
+            if not src.ok and not pastcast:
+                # A known URL that direct fetch could not read — blocked, empty,
+                # JavaScript-only or badly extracted — is exactly what Jina Reader is
+                # for. Only on a nowcast: Reader reads the live page, which cannot stand
+                # in for the archived pre-cutoff content a pastcast requires.
+                recovered = self._reader_fallback(src, now, trace)
+                if recovered is not None:
+                    src = recovered
             if src.ok:
                 results.append(src)
                 trace.fetched.append(
@@ -694,6 +837,7 @@ class LiveResearchBackend:
                         "archived_at": _iso(src.archived_at),
                         "observed_at": _iso(src.observed_at),
                         "content_sha256": src.content_hash,
+                        "via": "jina_reader" if src.fetched_url.startswith("jina:") else "direct",
                     }
                 )
             else:
@@ -705,6 +849,30 @@ class LiveResearchBackend:
                     }
                 )
         return results
+
+    def _reader_fallback(
+        self, failed: FetchedSource, now: datetime, trace: ResearchTrace
+    ) -> FetchedSource | None:
+        """Read a known publisher URL through Jina Reader when direct fetch failed."""
+
+        if not self._health.usable("jina_reader"):
+            return None
+        result = jina_reader(self.transport, failed.url, self._health)
+        trace.bump("jina_reader")
+        if not result.ok:
+            return None
+        text = extract_text(result.text) if "<" in result.text[:2000] else result.text
+        if not text.strip():
+            return None
+        return replace(
+            failed,
+            fetched_url=f"jina:{failed.url}",
+            status=200,
+            reachable=True,
+            text=text,
+            content_hash=sha256_hex(text),
+            rejection_reason="",
+        )
 
     def _extract_all(
         self,
@@ -741,8 +909,12 @@ class LiveResearchBackend:
                 )
             else:
                 fresh.append(s)
-        budget_left = max(0, self.budget.max_extract_calls - session.extract_calls)
+        budget_left = min(
+            max(0, self.budget.max_extract_calls - session.extract_calls),
+            max(0, self.budget.total_extract_calls - self._spent_extracts),
+        )
         chosen = fresh[:budget_left]
+        self._spent_extracts += len(chosen)
         for s in chosen:
             session.seen_hashes.add(s.content_hash)
         if not chosen:

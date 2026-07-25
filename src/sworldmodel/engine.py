@@ -54,7 +54,7 @@ from .schedule import (
     ScheduledEntry,
     make_entry,
 )
-from .uncertainty import Scenario
+from .uncertainty import Scenario, weights_grounded
 from .world import Delivery, WorldState
 from .worldspec import Effect, ProcessNode, TerminalExpression, WakeRule, WorldSpec
 

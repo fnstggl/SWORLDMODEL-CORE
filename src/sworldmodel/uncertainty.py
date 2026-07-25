@@ -50,6 +50,27 @@ class ScenarioSet:
     truncated_reason: str
 
 
+# Provenances that assert no identified distribution: a uniform split adopted for want
+# of information ("symmetric_ignorance_assumption" in live artifacts), or a branch kept
+# only to expose sensitivity. A weight from either is an enumeration artifact — it says
+# how many branches were written, not how likely any of them is.
+UNGROUNDED_PROVENANCES = frozenset(
+    {WeightProvenance.SYMMETRIC_IGNORANCE, WeightProvenance.SENSITIVITY_ONLY}
+)
+
+
+def weights_grounded(scenario: Scenario) -> bool:
+    """Whether this branch's weight is anchored in an identified distribution.
+
+    ``Scenario.provenance`` is already the *weakest* provenance across the variables the
+    branch combines (see :func:`_weakest`), so a single symmetric-ignorance component is
+    enough to make the whole branch weight ungrounded — multiplying an arbitrary factor
+    into an empirical one yields an arbitrary product.
+    """
+
+    return scenario.provenance not in UNGROUNDED_PROVENANCES
+
+
 def _weakest(provs: list[WeightProvenance]) -> WeightProvenance:
     return min(provs, key=lambda p: _PROVENANCE_STRENGTH[p])
 
