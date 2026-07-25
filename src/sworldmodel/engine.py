@@ -1379,7 +1379,7 @@ def _finalize(
 
 
 def terminal_lineage(
-    world: WorldState, terminal: TerminalExpression
+    world: WorldState, terminal: TerminalExpression, spec: WorldSpec | None = None
 ) -> tuple[dict[str, object], ...]:
     """For each term the terminal reads, what actually wrote it in *this* trajectory.
 
@@ -1408,9 +1408,16 @@ def terminal_lineage(
         for term in touched & set(terms):
             writers[term].append(ev)
 
+    # A term the record established before the window opened has no writer in this
+    # ledger and never will: the world produced it, months earlier, and the compiler
+    # cited the claims that say so. Reporting it as unproduced would read as the defect
+    # this function exists to expose, so its lineage is the citation.
+    established = _established_terms(spec)
+
     out: list[dict[str, object]] = []
     for term in terms:
         evs = writers[term]
+        cites = established.get(term, ())
         out.append(
             {
                 "terminal_term": term,
@@ -1427,10 +1434,29 @@ def terminal_lineage(
                 ],
                 "writer_count": len(evs),
                 "produced_by_an_actor": any(e.actor_id for e in evs),
-                "unproduced": not evs,
+                "established_by_evidence": list(cites),
+                "unproduced": not evs and not cites,
             }
         )
     return tuple(out)
+
+
+def _established_terms(spec: WorldSpec | None) -> dict[str, tuple[str, ...]]:
+    """Terminal terms whose initial value the compiled world cites evidence for."""
+
+    if spec is None:
+        return {}
+    out: dict[str, tuple[str, ...]] = {}
+    for f in spec.fields:
+        if f.initial is not None and f.evidence_claim_ids:
+            out[f.field_id] = f.evidence_claim_ids
+    for doc in spec.documents:
+        if not doc.evidence_claim_ids:
+            continue
+        for name, value in doc.fields:
+            if value is not None:
+                out[f"{doc.document_id}.{name}"] = doc.evidence_claim_ids
+    return out
 
 
 def evaluate_terminal(world: WorldState, terminal: TerminalExpression) -> TerminalEvaluation:

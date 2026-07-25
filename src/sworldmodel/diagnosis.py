@@ -308,7 +308,10 @@ class RunDiagnosis:
         from .engine import terminal_lineage
 
         return {
-            bid: [dict(x) for x in terminal_lineage(w, self.compiled.spec.terminal)]
+            bid: [
+                dict(x)
+                for x in terminal_lineage(w, self.compiled.spec.terminal, self.compiled.spec)
+            ]
             for bid, w in self.run_result.final_worlds.items()
         }
 
