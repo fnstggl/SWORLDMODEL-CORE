@@ -71,10 +71,12 @@ def main() -> int:
         print(f"\n=== {case} ===")
         print(f"question: {d['question']}")
         print(f"mode: {d['research_planning']['retrieval_mode'].get('mode')}")
-        print(f"queries: {len(d['research_planning']['queries_issued'])}"
-              f"  urls: {d['discovery']['urls_considered_count']}"
-              f"  official: {len(d['discovery']['official_domain_urls_found'])}"
-              f"  fetched: {d['fetching']['fetched_count']}")
+        print(
+            f"queries: {len(d['research_planning']['queries_issued'])}"
+            f"  urls: {d['discovery']['urls_considered_count']}"
+            f"  official: {len(d['discovery']['official_domain_urls_found'])}"
+            f"  fetched: {d['fetching']['fetched_count']}"
+        )
         print(f"epistemic: {d['epistemic_classification'].get('counts')}")
         comp = d["world_compilation"]
         if comp.get("compiled"):
@@ -84,13 +86,17 @@ def main() -> int:
             if orphan:
                 print(f"TERMS WITH NO PRODUCER: {orphan}")
         ig = d["integrity_and_grounding"]
-        print(f"repair attempts: {len(ig.get('repair_attempts', []))}"
-              f"  stopped at: {ig.get('stopped_at_gate')}")
+        print(
+            f"repair attempts: {len(ig.get('repair_attempts', []))}"
+            f"  stopped at: {ig.get('stopped_at_gate')}"
+        )
         rt = d["runtime"]
         if rt.get("ran"):
-            print(f"runtime: {rt['event_count']} events, {rt['actor_invocations']} actor calls, "
-                  f"{rt['resolved_branches']}/{rt['branches']} branches resolved, "
-                  f"unresolved mass {rt['unresolved_mass']}")
+            print(
+                f"runtime: {rt['event_count']} events, {rt['actor_invocations']} actor calls, "
+                f"{rt['resolved_branches']}/{rt['branches']} branches resolved, "
+                f"unresolved mass {rt['unresolved_mass']}"
+            )
             print(f"wake reasons: {rt['wake_reasons']}")
         print(f"root cause: {[c['cause'] for c in d['root_cause']]}")
     return 0
