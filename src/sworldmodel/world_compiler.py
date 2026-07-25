@@ -603,6 +603,44 @@ def terminal_producers(spec: WorldSpec) -> dict[str, tuple[str, ...]]:
     return {k: tuple(v) for k, v in producers.items()}
 
 
+def _environment_preset_terminal_terms(spec: WorldSpec, terminal_fields: set[str]) -> set[str]:
+    """Terminal terms a scheduled non-agent effect writes to a literal, unconditionally.
+
+    "Unconditionally" is the load-bearing part. A process node whose entry condition
+    reads a field an action can write is a *consequence* of what actors did — a session
+    that tallies the votes cast into it is exactly right. A node with no such condition,
+    writing a constant, is the compiler putting the answer on the calendar.
+    """
+
+    action_writes, _ = _action_writes(spec)
+    preset: set[str] = set()
+
+    def literal_targets(effects: Any) -> set[str]:
+        out: set[str] = set()
+        for eff in effects:
+            if eff.op not in ("set_field", "adjust_field"):
+                continue
+            params = eff.params_dict
+            name = params.get("field")
+            value = params.get("value", params.get("amount"))
+            # A value that references a parameter or another field is computed from the
+            # world; only a bare literal is the environment asserting an outcome.
+            if isinstance(name, str) and not (isinstance(value, str) and value.startswith("$")):
+                out.add(name)
+        return out
+
+    for node in spec.process.nodes:
+        if _expr_fields(node.entry_condition) & action_writes:
+            continue  # gated on something actors do
+        preset |= literal_targets(node.effects) & terminal_fields
+    for proc in spec.external_processes:
+        for occ in proc.occurrences:
+            if _expr_fields(occ.condition) & action_writes:
+                continue
+            preset |= literal_targets(occ.effects) & terminal_fields
+    return preset
+
+
 def enforce_outcome_is_produced(
     spec: WorldSpec, uncertainties: tuple[UncertaintySpec, ...]
 ) -> None:
@@ -649,6 +687,32 @@ def enforce_outcome_is_produced(
     written_fields, written_colls = _action_writes(spec)
 
     if not orphans:
+        # An environment that simply announces the answer is the third form of the same
+        # defect. A live run compiled a world in which a scheduled process node carried
+        # `set_field(<the terminal term>, True)` with a literal value and no entry
+        # condition: it fired before the actor was ever invoked, the terminal was already
+        # decided, and the actor — woken afterwards — observed that the thing had
+        # happened and waited. The forecast was 1.0000 with zero producing actions, and
+        # this gate passed it because *some* action could in principle have written the
+        # term. In a world with actors, a term the terminal reads may not be set to a
+        # constant by the scenery.
+        preset = _environment_preset_terminal_terms(spec, terminal_fields)
+        if spec.actors and preset:
+            raise WorldIntegrityError(
+                f"the environment writes the answer: {sorted(preset)} is set to a fixed "
+                "value by a scheduled process that no actor influences, so the terminal "
+                "is decided before anyone acts and the actors are observers of their own "
+                "outcome",
+                details={
+                    "failure": "environment_presets_terminal",
+                    "recompilable": True,
+                    "terms preset by the environment": sorted(preset),
+                    "actors": [a.entity_id for a in spec.actors],
+                    "producers by terminal term": {
+                        k: list(v) for k, v in sorted(producers.items())
+                    },
+                },
+            )
         # A world that compiled actors owes those actors a causal role. If every
         # terminal term is written only by processes while people deliberate over
         # fields the terminal never reads, the deliberation is decoration — the same

@@ -221,6 +221,22 @@ def _terminal_has_no_producer(exc: WorldIntegrityError, subject: str) -> RepairP
     )
 
 
+def _environment_presets_terminal(exc: WorldIntegrityError, subject: str) -> RepairPlan:
+    terms = _strings(exc.details.get("terms preset by the environment"))
+    return RepairPlan(
+        failure="environment_presets_terminal",
+        missing_element=f"a producer for {terms} other than the calendar",
+        queries=(f"{subject} how the decision is actually taken and recorded",),
+        instruction=(
+            f"A scheduled process in your world sets {terms} to a fixed value that no "
+            "actor influences, so the answer is decided before anyone acts. Remove that "
+            "effect. Model instead what the actors do that produces the outcome, and let "
+            "the process node record or tally the result of their actions — gate it on a "
+            "field their actions write, rather than asserting the value itself."
+        ),
+    )
+
+
 def _actors_cannot_reach_terminal(exc: WorldIntegrityError, subject: str) -> RepairPlan:
     return RepairPlan(
         failure="actors_cannot_reach_terminal",
@@ -321,6 +337,7 @@ _PLANS = {
     "roster_count_contradiction": _roster_count_contradiction,
     "terminal_has_no_producer": _terminal_has_no_producer,
     "actors_cannot_reach_terminal": _actors_cannot_reach_terminal,
+    "environment_presets_terminal": _environment_presets_terminal,
     "nothing_can_act": _nothing_can_act,
     "nothing_scheduled": _nothing_scheduled,
     "orphan_actors": _orphan_actors,

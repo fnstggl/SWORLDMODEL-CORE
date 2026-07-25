@@ -341,3 +341,52 @@ def test_the_schedule_is_serializable_for_the_trace_contract() -> None:
         # Every invocation names its cause and its effect on the world.
         assert d.wake_reason
         assert d.validation_status in ("started", "executed", "rejected", "failed", "wait")
+
+
+def test_the_environment_may_not_announce_the_answer_before_anyone_acts() -> None:
+    """The third shape of the same defect, taken from a live Bank of England run.
+
+    That world compiled a real actor with a real action, and also a scheduled process
+    node carrying ``set_field(<the terminal term>, True)`` with a literal value and no
+    entry condition. The node fired first, the terminal was already decided, and the
+    actor — woken afterwards — noted that the thing had happened and waited. The
+    reported forecast was 1.0000 from zero producing actions, and the outcome gate
+    passed it because *some* action could in principle have written the term.
+
+    A process that tallies what actors did is right and stays allowed; the difference is
+    whether it is gated on something an action writes.
+    """
+
+    from sworldmodel.errors import WorldIntegrityError
+
+    data = _split_world()
+    data["world_spec"]["fields"].append(
+        {"field_id": "signal_given", "value_type": "bool", "initial": False}
+    )
+    data["world_spec"]["terminal"]["yes_when"] = {
+        "op": "equals",
+        "args": [{"op": "field", "args": ["signal_given"]}, True],
+    }
+    # An action can write the term — so the previous gate is satisfied...
+    data["world_spec"]["actions"].append(
+        {
+            "action_id": "give_signal",
+            "meaning": "say it publicly",
+            "eligible_actors": ["*"],
+            "required_authority": [],
+            "parameters": [],
+            "effects": [{"op": "set_field", "field": "signal_given", "value": True}],
+            "evidence_claim_ids": [],
+        }
+    )
+    # ...but the calendar writes it too, unconditionally, and gets there first.
+    data["world_spec"]["process"]["nodes"][0]["effects"] = [
+        {"op": "set_field", "field": "signal_given", "value": True}
+    ]
+
+    gw = _gateway(_signal_sensitive)
+    with pytest.raises(WorldIntegrityError) as exc:
+        _compile(data, gw)
+    assert "the environment writes the answer" in str(exc.value)
+    assert exc.value.details["terms preset by the environment"] == ["signal_given"]
+    assert exc.value.details.get("recompilable") is True

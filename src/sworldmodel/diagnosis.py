@@ -376,7 +376,11 @@ class RunDiagnosis:
                     "why": f"the run stopped at the {gate} gate",
                 }
             )
-        if gate in ("terminal_has_no_producer", "actors_cannot_reach_terminal"):
+        if gate in (
+            "terminal_has_no_producer",
+            "actors_cannot_reach_terminal",
+            "environment_presets_terminal",
+        ):
             out.append(
                 {
                     "cause": "terminal_supplied_rather_than_produced",
