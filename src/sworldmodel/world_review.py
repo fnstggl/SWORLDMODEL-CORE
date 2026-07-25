@@ -90,6 +90,10 @@ class WorldReview:
     failed_blocking: tuple[str, ...] = ()
     concerns: tuple[str, ...] = ()
     error: str = ""
+    # What the caller did about it. A review recorded with blocking failures beside a
+    # world that was then recompiled describes a world nobody simulated, and reads as a
+    # run that ignored its own review.
+    disposition: str = "not acted on"
 
     @property
     def should_repair(self) -> bool:
@@ -101,6 +105,7 @@ class WorldReview:
             "blocking_failures": list(self.failed_blocking),
             "concerns": list(self.concerns),
             "error": self.error,
+            "disposition": self.disposition,
         }
 
     def repair_instruction(self) -> str:

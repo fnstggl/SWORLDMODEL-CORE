@@ -408,6 +408,7 @@ def run_forecast(
         evidence_render=render_evidence(bundle.evidence_store.view(as_of)),
     )
     if review.should_repair:
+        outcome = "recompile produced nothing; the reviewed world was simulated"
         repaired = _recompile(question, as_of, horizon, bundle, config, review.repair_instruction())
         if repaired is not None:
             try:
@@ -415,10 +416,14 @@ def run_forecast(
                     question, as_of, horizon, repaired, config, log=log
                 )
                 contract = _build_contract(question, as_of, horizon, bundle)
-            except SWorldModelError:
+                outcome = "recompiled; the world simulated is not the world reviewed here"
+            except SWorldModelError as exc:
                 # The review is advisory. A recompilation that the mechanical gates then
                 # refuse is worse than the world we already had, which they passed.
-                pass
+                outcome = (
+                    f"recompile refused by the gates ({exc}); the reviewed world was simulated"
+                )
+        review = replace(review, disposition=outcome)
 
     # Is this even the right world? Ordinary uncertainty asks what a value turns out to
     # be; this asks whether the causal structure we compiled is the one that decides the

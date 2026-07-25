@@ -1434,10 +1434,22 @@ def parse_required_facts(items: Any) -> tuple[RequiredRealityFact, ...]:
 
 
 def render_evidence(view: EvidenceView, *, limit: int = 160) -> str:
+    """Every available claim, with the names it attests.
+
+    The names matter as much as the proposition. A claim reading "Analyst highlights
+    major questions about EV demand" attests ``CFRA`` and ``Garrett Nelson`` in its
+    entity list, and without them a reader of this render sees an anonymous analyst: a
+    live Tesla run compiled both names, correctly and with that claim cited, and the
+    pre-rollout review — reading this same render — called them unsupported inventions
+    and spent a repair round on it. The compiler is in the same position when it decides
+    whether it may name someone at all.
+    """
+
     claims = sorted(view.available(), key=lambda c: (-int(c.authority_level), c.id))[:limit]
     return "\n".join(
         f"{c.id} | {c.proposition} = {c.normalized_value} "
         f"[auth {int(c.authority_level)}, {c.source_type.value}, {c.published_at.date()}]"
+        + (f" names: {', '.join(c.entities[:8])}" if c.entities else "")
         for c in claims
     )
 
