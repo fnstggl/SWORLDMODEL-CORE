@@ -30,9 +30,10 @@ run() {
     --max-structures 2 --trace "artifacts/acceptance/$name/run_trace" \
     > "artifacts/acceptance/$name/run.log" 2>&1
   local rc=$?
-  # The three records a case is judged on, beside its trace. Written by both the
-  # completed and the refused path, so a case always has them or visibly does not.
-  for f in diagnosis.json research_trace.json compiled_world.json evidence_store.json; do
+  # The records a case is judged on, beside its trace. Written by both the completed
+  # and the refused path, so a case always has them or visibly does not.
+  for f in diagnosis.json research_trace.json compiled_world.json evidence_store.json \
+           world_review.json trajectory_audit.json run_audit.json forecast.json; do
     [ -f "artifacts/acceptance/$name/run_trace/$f" ] &&
       cp "artifacts/acceptance/$name/run_trace/$f" "artifacts/acceptance/$name/$f"
   done
@@ -57,4 +58,5 @@ wait
 run committee "2026-05-14T23:59:59-06:00" "2026-06-25T23:59:59-06:00" \
   "Will Banco de Mexico's Governing Board vote unanimously to hold its policy interest rate unchanged at its June 25, 2026 monetary policy decision?"
 
+python3 scripts/acceptance_metrics.py > artifacts/acceptance/metrics.txt 2>&1 || true
 echo "ACCEPTANCE COMPLETE" >> "$STATUS"
