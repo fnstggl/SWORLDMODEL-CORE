@@ -464,3 +464,30 @@ def test_an_operational_process_that_accumulates_output_is_not_an_announcement()
     _, compiled = _compile(data, gw)  # must not raise
     producers = compiled.spec.external_processes
     assert producers and producers[0].process_id == "assembly_line"
+
+
+def test_the_pre_rollout_review_can_never_kill_a_run_that_passed_the_gates() -> None:
+    """It is advisory, and it runs after every mechanical gate has already passed.
+
+    A fault here can therefore only ever destroy a run that was otherwise sound — which
+    is what happened: a live Bank of England run compiled a real world, cleared every
+    gate, and died in the review's own summary helper because a compiled `at` is an ISO
+    string and the helper assumed a datetime. An opinion about a world must not be able
+    to stop it.
+    """
+
+    from sworldmodel.world_review import _when, review_world
+
+    # Compiled times arrive as ISO strings, not datetimes. Both must render.
+    assert _when("2026-06-25T00:00:00+00:00") == "2026-06-25T00:00:00+00:00"
+    assert _when(AS_OF) == AS_OF.isoformat()
+    assert _when(None) is None and _when("") is None
+
+    class Malformed:
+        @property
+        def spec(self) -> object:
+            raise RuntimeError("compiled world is malformed")
+
+    review = review_world(Malformed(), None, None, question="q", evidence_render="")
+    assert "could not run" in review.error
+    assert not review.should_repair  # a review that did not happen demands no repair

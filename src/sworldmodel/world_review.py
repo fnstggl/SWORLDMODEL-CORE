@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from .compiled import CompiledWorld
@@ -116,6 +117,22 @@ class WorldReview:
         return "\n".join(lines)
 
 
+def _when(value: Any) -> str | None:
+    """A compiled time, rendered for the summary.
+
+    ``ProcessNode.at`` and ``ExternalOccurrence.at`` are typed ``Any`` and hold the ISO
+    *string* the compiler emitted — the runtime parses them where it needs a datetime.
+    Assuming a datetime here crashed a live Bank of England run at the review call,
+    after the world had compiled and passed every gate.
+    """
+
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value)
+
+
 def summarize_world(compiled: CompiledWorld) -> dict[str, Any]:
     """The compiled world, small enough to review and complete enough to review from."""
 
@@ -143,14 +160,14 @@ def summarize_world(compiled: CompiledWorld) -> dict[str, Any]:
             for a in spec.actions
         ],
         "calendar": [
-            {"node": n.node_id, "at": n.at.isoformat() if n.at else None, "what": n.description}
+            {"node": n.node_id, "at": _when(n.at), "what": n.description}
             for n in spec.process.nodes
         ],
         "external_processes": [
             {
                 "id": p.process_id,
                 "what": p.description,
-                "occurrences": [o.at.isoformat() if o.at else None for o in p.occurrences],
+                "occurrences": [_when(o.at) for o in p.occurrences],
             }
             for p in spec.external_processes
         ],
@@ -170,9 +187,29 @@ def review_world(
     question: str,
     evidence_render: str,
 ) -> WorldReview:
-    """Ask whether this is the right world. Never raises: a review that cannot run is
-    recorded as not having run, and the rollout proceeds under the mechanical gates."""
+    """Ask whether this is the right world.
 
+    Never raises. This is an advisory step that runs *after* every mechanical gate has
+    already passed the world, so a fault here can only ever destroy a run that was
+    otherwise sound — which is exactly what happened: a live Bank of England run
+    compiled a real world, cleared every gate, and then died in this function's own
+    summary helper because a compiled ``at`` is an ISO string rather than a datetime.
+    An opinion about a world must never be able to stop it.
+    """
+
+    try:
+        return _review(compiled, gateway, question=question, evidence_render=evidence_render)
+    except Exception as exc:  # noqa: BLE001 — see the docstring: advisory, never fatal
+        return WorldReview(error=f"the review could not run: {type(exc).__name__}: {exc}")
+
+
+def _review(
+    compiled: CompiledWorld,
+    gateway: ModelGateway,
+    *,
+    question: str,
+    evidence_render: str,
+) -> WorldReview:
     body = "\n".join(f"{key}: {text}" for key, text, _ in _QUESTIONS)
     prompt = "\n\n".join(
         [
