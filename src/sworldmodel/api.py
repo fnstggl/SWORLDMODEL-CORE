@@ -363,6 +363,10 @@ def run_forecast(
         bundle = config.research_backend.research(question, as_of, horizon)
     except SWorldModelError as exc:
         raise ForecastRefused(exc, stage="research", repair_log=log) from exc
+    except (TypeError, ValueError, KeyError) as exc:
+        # A parser or provider shape nobody anticipated. It is still a run that stopped,
+        # and it still owes a diagnosis rather than a traceback.
+        raise ForecastRefused(exc, stage="research", repair_log=log) from exc
     try:
         bundle, compiled = _compile_with_repair(question, as_of, horizon, bundle, config, log=log)
     except SWorldModelError as exc:

@@ -68,7 +68,16 @@ def parse_expr(obj: Any) -> Expr:
         if "const" in obj:
             return Expr("const", (obj["const"],))
         if "op" in obj:
+            # `args` is a list by schema, and a model will nonetheless sometimes write
+            # the single argument bare: {"op": "const", "args": false}. Iterating that
+            # raises TypeError from inside a parser, which killed a live run before it
+            # could write any diagnosis at all. A lone argument is a one-argument list;
+            # reading it as one changes no meaning and costs nothing.
             raw_args = obj.get("args", [])
+            if raw_args is None:
+                raw_args = []
+            elif not isinstance(raw_args, (list, tuple)):
+                raw_args = [raw_args]
             args = tuple(_parse_arg(a) for a in raw_args)
             return Expr(str(obj["op"]), args)
         # Shorthands: a single-key dict {op_name: arg_or_args}.

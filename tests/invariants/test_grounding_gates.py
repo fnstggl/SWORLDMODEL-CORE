@@ -448,3 +448,43 @@ def test_verification_still_refuses_an_unsupported_value_and_a_wrong_date() -> N
         document="the Committee held the rate unchanged",
     )
     assert "value" in smuggled
+
+
+def test_a_lone_expression_argument_is_read_as_a_one_argument_list() -> None:
+    """`args` is a list by schema, and a model will still write the single argument
+    bare: {"op": "const", "args": false}. Iterating that raised TypeError from inside
+    the parser and killed a live Bank of England run before it could write any
+    diagnosis at all. Reading a lone argument as a one-argument list changes no meaning.
+    """
+
+    from sworldmodel.worldspec import parse_expr
+
+    assert parse_expr({"op": "const", "args": False}) == Expr("const", (False,))
+    assert parse_expr({"op": "field", "args": "rate"}) == Expr("field", ("rate",))
+    assert parse_expr({"op": "const", "args": None}) == Expr("const", ())
+    # The ordinary shape is unchanged.
+    nested = parse_expr({"op": "equals", "args": [{"op": "field", "args": ["x"]}, 3]})
+    assert nested.op == "equals" and nested.args[1] == 3
+
+
+def test_an_unparsable_compilation_is_a_refusal_the_repair_loop_can_act_on() -> None:
+    """A shape the parser cannot read is a defect in one compilation, not a fact about
+    the world. It must arrive as a recompilable refusal carrying its parser error —
+    never as a raw TypeError from inside a parser, which leaves no diagnosis behind."""
+
+    from sworldmodel.errors import WorldIntegrityError
+    from sworldmodel.repair import plan_repair
+
+    exc = WorldIntegrityError(
+        "the compiled world could not be parsed",
+        details={
+            "failure": "malformed_compilation",
+            "recompilable": True,
+            "parser_error": "TypeError: 'bool' object is not iterable",
+        },
+    )
+    plan = plan_repair(exc, "will x happen?")
+    assert plan is not None
+    assert not plan.needs_research  # nothing is missing from the evidence
+    assert "could not be parsed" in plan.instruction
+    assert "args" in plan.instruction  # it names the shape to fix

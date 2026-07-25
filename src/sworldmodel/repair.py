@@ -324,6 +324,22 @@ def _nothing_scheduled(exc: WorldIntegrityError, subject: str) -> RepairPlan:
     )
 
 
+def _malformed_compilation(exc: WorldIntegrityError, subject: str) -> RepairPlan:
+    return RepairPlan(
+        failure="malformed_compilation",
+        missing_element="a compilation the schema can read",
+        queries=(),
+        instruction=(
+            "Your previous compilation could not be parsed: "
+            f"{exc.details.get('parser_error')}. Emit the same world again with the "
+            'schema\'s exact shapes — every expression is {"op": "...", "args": [...]} '
+            "with args ALWAYS a list even when there is one argument, every *_ids field "
+            'is a list of strings, and every effect is an object with an "op". Change '
+            "nothing about what the world contains."
+        ),
+    )
+
+
 def _orphan_actors(exc: WorldIntegrityError, subject: str) -> RepairPlan:
     orphans = _strings(exc.details.get("orphan_actors"))
     return RepairPlan(
@@ -380,6 +396,7 @@ _PLANS = {
     "nothing_can_act": _nothing_can_act,
     "nothing_scheduled": _nothing_scheduled,
     "orphan_actors": _orphan_actors,
+    "malformed_compilation": _malformed_compilation,
     "required_facts_unverified": _required_facts_unverified,
     "coverage_incomplete": _coverage_incomplete,
 }

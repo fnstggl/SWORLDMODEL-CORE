@@ -36,7 +36,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any
 
-from .errors import GatewayError
+from .errors import GatewayError, WorldIntegrityError
 from .evidence import EvidenceClaim, EvidenceStore, EvidenceView
 from .gateway import GatewayRequest, ModelGateway
 from .http import (
@@ -988,7 +988,23 @@ Return JSON {{"decisive": true|false, "reason": "<one line>"}}."""
             },
             "_compile_responses": [resp],
         }
-        bundle = assemble_bundle(store, data)
+        try:
+            bundle = assemble_bundle(store, data)
+        except (TypeError, ValueError, KeyError) as exc:
+            # The compiler emitted a shape the parser cannot read. That is a defect in
+            # one compilation, not a fact about the world, and it must not surface as a
+            # raw TypeError from inside a parser — which is how a live run died before
+            # it could write any diagnosis at all. Raised as recompilable so the repair
+            # loop asks again, naming exactly what failed to parse.
+            raise WorldIntegrityError(
+                "the compiled world could not be parsed — the model emitted a shape "
+                f"the schema does not allow: {type(exc).__name__}: {exc}",
+                details={
+                    "failure": "malformed_compilation",
+                    "recompilable": True,
+                    "parser_error": f"{type(exc).__name__}: {exc}",
+                },
+            ) from exc
         return replace(bundle, live_trace=trace.to_dict(plan, store))
 
     def _time_up(self, t0: float) -> bool:
