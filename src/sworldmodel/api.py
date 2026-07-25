@@ -45,6 +45,7 @@ from .structures import (
 )
 from .tracing import TraceContext
 from .world_compiler import compile_world, compile_world_spec_live, render_evidence
+from .world_review import review_world
 
 
 def _build_contract(
@@ -371,6 +372,31 @@ def run_forecast(
         raise ForecastRefused(exc, stage="compilation", bundle=bundle, repair_log=log) from exc
     contract = _build_contract(question, as_of, horizon, bundle)
 
+    # Before the rollout budget: is this obviously not the right world? The gates are
+    # mechanical and have already passed it; this catches what they cannot check —
+    # a resolution condition that answers a nearby question, a detail nobody sourced, a
+    # date that was plausible rather than published. One call, and a clear "no" goes to
+    # repair rather than into several minutes of simulating the wrong thing.
+    review = review_world(
+        compiled,
+        bundle.evidence_store.view(as_of),
+        config.gateway,
+        question=question,
+        evidence_render=render_evidence(bundle.evidence_store.view(as_of)),
+    )
+    if review.should_repair:
+        repaired = _recompile(question, as_of, horizon, bundle, config, review.repair_instruction())
+        if repaired is not None:
+            try:
+                bundle, compiled = _compile_with_repair(
+                    question, as_of, horizon, repaired, config, log=log
+                )
+                contract = _build_contract(question, as_of, horizon, bundle)
+            except SWorldModelError:
+                # The review is advisory. A recompilation that the mechanical gates then
+                # refuse is worse than the world we already had, which they passed.
+                pass
+
     # Is this even the right world? Ordinary uncertainty asks what a value turns out to
     # be; this asks whether the causal structure we compiled is the one that decides the
     # question. When the evidence leaves that open, each structure is simulated.
@@ -444,6 +470,7 @@ def run_forecast(
         structure_response=structure_response,
     )
     ctx.repair_log = log
+    ctx.world_review = review
     return result, ctx
 
 

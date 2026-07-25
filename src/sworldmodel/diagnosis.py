@@ -91,6 +91,7 @@ class RunDiagnosis:
     compiled: CompiledWorld | None = None
     run_result: RunResult | None = None
     repair_log: RepairLog | None = None
+    world_review: Any = None
     failure: BaseException | None = None
     failure_stage: str = ""
     wall_seconds: float = 0.0
@@ -251,6 +252,8 @@ class RunDiagnosis:
             out["stopped_at_gate"] = details.get("failure") or type(self.failure).__name__
             out["gate_message"] = str(self.failure).splitlines()[0]
             out["gate_details"] = {k: v for k, v in details.items() if k != "failure"}
+        if self.world_review is not None:
+            out["pre_rollout_world_review"] = self.world_review.as_dict()
         if self.compiled is not None:
             m = self.compiled.manifest
             out["manifest"] = {

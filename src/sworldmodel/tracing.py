@@ -39,6 +39,8 @@ class TraceContext:
     structure_response: Any = None
     # The targeted-repair attempts this run made, for the diagnosis artifact.
     repair_log: Any = None
+    # The pre-rollout world audit: what it asked, and what it answered.
+    world_review: Any = None
     _calls_override: list[Any] = field(default_factory=list)
 
     # -- serializable payloads --------------------------------------------------

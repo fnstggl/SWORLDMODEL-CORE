@@ -228,6 +228,7 @@ def cmd_forecast(args: argparse.Namespace) -> int:
                     compiled=ctx.compiled,
                     run_result=ctx.run_result,
                     repair_log=ctx.repair_log,
+                    world_review=ctx.world_review,
                     wall_seconds=wall,
                     model_calls=config.gateway.call_count,
                 ).as_dict()
