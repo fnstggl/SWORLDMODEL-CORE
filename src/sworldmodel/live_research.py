@@ -394,7 +394,7 @@ class LiveResearchBackend:
             view = store.view(as_of)
             trace.claim_count = len(store.all())
             trace.admissible_claim_count = len(view.available())
-            self._detect_contradictions(store, as_of, trace)
+            self._detect_contradictions(store, as_of, trace, question=question, plan=plan)
             trace.contradictions = [f"{a}<>{b}" for a, b in store.contradictions()]
             unsupported = self._record_fact_retrieval(plan, view, trace)
 
@@ -853,7 +853,13 @@ class LiveResearchBackend:
     # -- contradiction detection ------------------------------------------------
 
     def _detect_contradictions(
-        self, store: EvidenceStore, as_of: datetime, trace: ResearchTrace
+        self,
+        store: EvidenceStore,
+        as_of: datetime,
+        trace: ResearchTrace,
+        *,
+        question: str = "",
+        plan: ResearchPlan | None = None,
     ) -> None:
         """Find claims that disagree about the same fact and record the decisive ones.
 
@@ -885,12 +891,42 @@ class LiveResearchBackend:
                     a, b = by_value[values[i]], by_value[values[j]]
                     if tuple(sorted((a.id, b.id))) in already:
                         continue
+                    if not (_is_observation(a) and _is_observation(b)):
+                        # A contradiction of *fact* needs two claims of fact. A live
+                        # Banxico run was refused because "Banxico is prioritizing
+                        # credibility over speed, implying gradual easing" was set
+                        # against "Banxico signaled an end to rate cuts": two readings of
+                        # the same posture, neither of them an observation, adjudicated
+                        # as something the world cannot have both ways.
+                        continue
                     trace.contradiction_checks += 1
-                    if self._is_decisive_conflict(a, b):
+                    if self._is_decisive_conflict(a, b, question=question, plan=plan):
                         store.record_contradiction(a.id, b.id)
                         already.add(tuple(sorted((a.id, b.id))))
 
-    def _is_decisive_conflict(self, a: EvidenceClaim, b: EvidenceClaim) -> bool:
+    def _is_decisive_conflict(
+        self,
+        a: EvidenceClaim,
+        b: EvidenceClaim,
+        *,
+        question: str = "",
+        plan: ResearchPlan | None = None,
+    ) -> bool:
+        asked = (
+            f"""
+THE QUESTION THIS EVIDENCE IS FOR: {question}
+The resolution event: {plan.resolution_event if plan else ""}
+The deadline: {plan.deadline if plan else ""}
+
+A difference that leaves the answer to that question unchanged is not decisive, whatever
+else it is. Two outlets reporting a signing on 17 January and on 18 January disagree, and
+a question asking whether the signing happens before 1 October is answered the same way by
+both, so blocking on it refuses a question the evidence has already settled. Decisive
+means the two claims imply different answers.
+"""
+            if question
+            else ""
+        )
         prompt = f"""Two evidence claims describe the same subject but carry different values.
 Decide whether they are DECISIVELY contradictory: whether both cannot be true of the
 same subject at the same time. Complementary facts, different aspects, different points
@@ -904,6 +940,7 @@ a direction of travel are not contradicting each other about reality; they are t
 uncertainty the simulation exists to resolve, and calling that decisive refuses a
 question that is merely genuinely open. Answer false for those.
 
+{asked}
 CLAIM A: {a.proposition}
   value: {a.normalized_value}
   source: {a.source_id} ({a.published_at.date()})
@@ -1034,6 +1071,17 @@ def _missing_query(label: str) -> str:
 
 def _topic(proposition: str) -> str:
     return proposition.split(":", 1)[0].strip().lower() if ":" in proposition else "fact"
+
+
+def _is_observation(claim: EvidenceClaim) -> bool:
+    """Whether this claim states a fact rather than reading one.
+
+    Only two statements of fact can contradict each other about reality. An inference
+    and a hypothesis are the system's own reasoning, and two of them disagreeing is the
+    uncertainty a simulation exists to resolve, not a reason to refuse one.
+    """
+
+    return claim.epistemic_type is EpistemicType.OBSERVATION
 
 
 def _subject_key(claim: EvidenceClaim) -> str:

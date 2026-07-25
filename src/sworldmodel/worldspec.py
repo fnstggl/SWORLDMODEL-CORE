@@ -542,6 +542,23 @@ def _strs(v: Any) -> tuple[str, ...]:
     return ()
 
 
+def _number(value: Any, default: float = 0.0) -> float:
+    """A quantity the compiler wrote, or the default when it wrote nothing usable.
+
+    ``d.get("quantity", 0.0)`` returns ``None`` when the key is present and null, which
+    is a shape a model produces routinely. A live OPEC+ run died on it — ``float(None)``
+    inside the parser, during a repair recompile, past every gate that would have turned
+    it into a diagnosis, leaving a traceback and no artifacts at all.
+    """
+
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _pairs(value: Any) -> tuple[tuple[str, float], ...]:
     """``[[resource, amount], ...]`` — keeping only the entries that are actually pairs.
 
@@ -741,7 +758,7 @@ def parse_world_spec(d: dict[str, Any]) -> WorldSpec:
             ResourceSpec(
                 resource_id=str(r["resource_id"]),
                 holder_entity_id=str(r["holder_entity_id"]),
-                quantity=float(r.get("quantity", 0.0)),
+                quantity=_number(r.get("quantity")),
                 description=str(r.get("description", "")),
             )
             for r in as_objects(d.get("resources"))

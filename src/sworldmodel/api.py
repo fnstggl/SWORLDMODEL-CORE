@@ -145,7 +145,11 @@ def _compile_with_repair(
                     message=str(exc),
                     claims_before=before,
                     claims_after=before,
-                    outcome="repair could not be attempted (no live gateway or backend)",
+                    outcome=(
+                        "the repaired compilation could not be produced or read — no "
+                        "live gateway, a provider error, or a world the parser could "
+                        "not make sense of"
+                    ),
                 )
                 raise
 
@@ -268,14 +272,21 @@ def _recompile(
             ),
             structure_id="primary",
         )
-    except (GatewayError, WorldIntegrityError, ValueError, KeyError):
+        # Carry the research record forward. A compiler-only repair does no new
+        # research, so `assemble_bundle` has no trace to build — and without this the
+        # record of every query, source and rejection made before the repair was dropped
+        # on the floor. The run that first completed reported "0 queries, 0 sources
+        # fetched, 0 claims" in its own diagnosis while its audit showed 38 extractions
+        # and 399 HTTP requests.
+        #
+        # Parsing is inside the try for a reason. A live OPEC+ run died on
+        # `float(None)` in the resource parser *here*, during a repair recompile, where
+        # nothing was catching it — past every gate that would have turned it into a
+        # diagnosis, out through run_forecast, leaving a traceback and no artifacts at
+        # all. A repair that cannot be read is a repair that did not happen.
+        return replace(assemble_bundle(bundle.evidence_store, data), live_trace=bundle.live_trace)
+    except (GatewayError, WorldIntegrityError, ValueError, KeyError, TypeError, IndexError):
         return None
-    # Carry the research record forward. A compiler-only repair does no new research, so
-    # `assemble_bundle` has no trace to build — and without this the record of every
-    # query, source and rejection made before the repair was dropped on the floor. The
-    # run that first completed reported "0 queries, 0 sources fetched, 0 claims" in its
-    # own diagnosis while its audit showed 38 extractions and 399 HTTP requests.
-    return replace(assemble_bundle(bundle.evidence_store, data), live_trace=bundle.live_trace)
 
 
 def _limitations(config: ForecastConfig, run_result: RunResult) -> tuple[str, ...]:
@@ -421,6 +432,18 @@ def run_forecast(
         bundle, compiled = _compile_with_repair(
             question, as_of, horizon, bundle, config, log=log, attempted=attempted
         )
+    except (TypeError, ValueError, KeyError, IndexError, AttributeError) as exc:
+        # Not a gate: a shape nobody anticipated, from a parser or a provider payload.
+        # It is still a run that stopped, and it still owes a diagnosis rather than a
+        # traceback — a live OPEC+ run died on `float(None)` inside the resource parser
+        # and wrote no artifacts at all, which is precisely the failure mode this whole
+        # run exists to remove.
+        raise ForecastRefused(
+            exc,
+            stage="compilation",
+            bundle=attempted[-1] if attempted else bundle,
+            repair_log=log,
+        ) from exc
     except SWorldModelError as exc:
         # Everything the run learned before it stopped travels with the refusal, so the
         # caller can write a diagnosis. A refusal that leaves only a traceback is how

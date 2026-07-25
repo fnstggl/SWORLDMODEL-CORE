@@ -185,3 +185,32 @@ def test_coercion_never_invents_content() -> None:
     assert as_objects(None) == []  # absent is empty, not a placeholder
     assert as_objects("text") == []  # a non-object is dropped, never guessed at
     assert as_objects([{"a": 1}, "junk", None]) == [{"a": 1}]  # partial input keeps what is real
+
+
+def test_a_null_quantity_is_read_as_none_written_not_as_a_crash() -> None:
+    """A live OPEC+ run died on `float(None)` in the resource parser, during a repair
+    recompile, past every gate that would have turned it into a diagnosis — out through
+    the entry point, leaving a traceback and no artifacts at all. `d.get(k, 0.0)` returns
+    None when the key is present and null, which is a shape a model produces routinely."""
+
+    from sworldmodel.worldspec import parse_world_spec
+
+    spec = parse_world_spec(
+        {
+            "title": "t",
+            "entities": [{"entity_id": "a", "name": "A", "kind": "organization"}],
+            "actors": [],
+            "fields": [],
+            "resources": [
+                {"resource_id": "quota", "holder_entity_id": "a", "quantity": None},
+                {"resource_id": "spare", "holder_entity_id": "a", "quantity": "1.5"},
+                {"resource_id": "junk", "holder_entity_id": "a", "quantity": "n/a"},
+            ],
+            "channels": [],
+            "documents": [],
+            "actions": [],
+            "process": {"nodes": []},
+            "terminal": {"yes_when": {"op": "const", "args": [True]}},
+        }
+    )
+    assert [r.quantity for r in spec.resources] == [0.0, 1.5, 0.0]

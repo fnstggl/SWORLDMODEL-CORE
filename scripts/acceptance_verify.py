@@ -140,28 +140,43 @@ def checks(case: str) -> list[tuple[str, str, str]]:
         f"unresolved mass {unresolved}",
     )
 
-    # 8. Every terminal term names what wrote it, per branch.
+    # 8. Every terminal term names what wrote it — where that is what the answer needed.
+    #
+    #    A branch that resolved NO because the producing action was never taken has an
+    #    unwritten term, and that is the honest record of a person who declined to act:
+    #    a live Bank of England branch resolved NO because Bailey waited, saying his July
+    #    signal still stood. What may never happen is a branch resolving YES on a term
+    #    nothing wrote — that is the answer arriving without being produced — or a term
+    #    no branch anywhere could produce.
     lineage = rt.get("terminal_producer_lineage") or {}
-    unproduced = sorted(
+    forecast = load(case, "forecast.json") or {}
+    yes_branches = {
+        str(b.get("branch_id"))
+        for b in (forecast.get("branches") or [])
+        if str(b.get("outcome") or "").upper() == "YES"
+    }
+    unproduced_in_yes = sorted(
         {
-            str(rec.get("terminal_term"))
-            for recs in lineage.values()
+            f"{bid}:{rec.get('terminal_term')}"
+            for bid, recs in lineage.items()
             for rec in recs
-            if rec.get("unproduced")
+            if rec.get("unproduced") and bid in yes_branches
         }
     )
-    written = sorted(
-        {
-            str(rec.get("terminal_term"))
-            for recs in lineage.values()
-            for rec in recs
-            if not rec.get("unproduced")
-        }
-    )
+    produced_somewhere = {
+        str(rec.get("terminal_term"))
+        for recs in lineage.values()
+        for rec in recs
+        if not rec.get("unproduced")
+    }
+    all_terms = {str(rec.get("terminal_term")) for recs in lineage.values() for rec in recs}
+    never = sorted(all_terms - produced_somewhere)
     check(
-        "terminal lineage names a writer for every term",
-        bool(lineage) and not unproduced,
-        f"written {written}" if not unproduced else f"unproduced {unproduced}",
+        "every YES was produced, and every term was producible",
+        bool(lineage) and not unproduced_in_yes and not never,
+        f"produced {sorted(produced_somewhere)}"
+        + (f"; never produced in any branch {never}" if never else "")
+        + (f"; YES with no writer {unproduced_in_yes}" if unproduced_in_yes else ""),
     )
 
     # 9. Actors and processes were actually invoked — the trace is a run, not a shape.
