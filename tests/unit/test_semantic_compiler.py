@@ -535,7 +535,6 @@ def test_a_chained_operational_process_actually_fires_through_the_real_engine() 
 
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from _fakes import ProgrammableGateway, build_bundle
-
     from sworldmodel.engine import run
     from sworldmodel.models import ResolutionContract
     from sworldmodel.world_compiler import compile_world
@@ -723,7 +722,6 @@ def test_a_pure_factual_resolution_lowers_and_clears_the_gates() -> None:
 
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from _fakes import ProgrammableGateway, build_bundle
-
     from sworldmodel.models import ResolutionContract
     from sworldmodel.world_compiler import compile_world
 
@@ -888,3 +886,33 @@ def test_the_lowered_world_clears_the_existing_gates_unchanged() -> None:
         max_branches=4,
     )
     assert compiled.spec.actions and compiled.spec.process.nodes
+
+
+def test_an_occurrence_at_or_before_the_cutoff_is_refused() -> None:
+    """The simulation cannot re-perform history: a t0 occurrence that records the
+    resolving event let a branch resolve YES off a re-enactment nobody produced."""
+
+    data = harbor_plan()
+    data["processes"].append(
+        {
+            "name": "pre-window recording",
+            "meaning": "records the authorization at the cutoff",
+            "kind": "operational",
+            "occurrences": [
+                {
+                    "description": "t0 re-enactment",
+                    "at": AS_OF.isoformat(),
+                    "changes": [
+                        {
+                            "op": "record_event",
+                            "target": "night docking authorization",
+                            "detail": "already authorized",
+                        }
+                    ],
+                }
+            ],
+            "evidence_claim_ids": ["c-r1"],
+        }
+    )
+    errors = _valid(data)
+    assert any("re-perform history" in e for e in errors)

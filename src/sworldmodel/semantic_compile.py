@@ -170,6 +170,9 @@ CONSISTENCY REQUIREMENTS (checked mechanically; a violation costs a revision rou
 - only actor_moment processes have participants, and every actor with an affordance
   must be a participant of at least one actor_moment — that dated occasion is the only
   thing that ever invokes them;
+- every occurrence and every actor_moment is dated STRICTLY AFTER the cutoff:
+  anything already done by the cutoff is a cited initial state value or a world_facts
+  entry, never a simulated occurrence — the simulation cannot re-perform history;
 - every causally material item the EVIDENCE contains must appear somewhere in the plan:
   as an entity, a state, a process, an uncertainty — or, when it is verified context
   that shapes the world without being part of the mechanism, as a world_facts entry

@@ -800,12 +800,32 @@ def validate_semantic_plan(
                 errors.append(f"{where}: needs 'at' or 'after_process'")
             if o.after_process is not None and o.after_process not in process_names:
                 errors.append(f"{where}: after_process {o.after_process!r} is not declared")
-            if o.at is not None and _parse_when(o.at) is None:
+            o_when = _parse_when(o.at)
+            if o.at is not None and o_when is None:
                 errors.append(f"{where}: 'at' is not an ISO datetime: {o.at!r}")
+            if o_when and as_of and o_when <= as_of:
+                # The simulation window opens at the cutoff; an occurrence dated at or
+                # before it is the world re-performing history. A live run scheduled a
+                # t0 occurrence that recorded the very event the question asks about —
+                # the record already established it — and the branch resolved YES off a
+                # simulated re-enactment nobody in the world produced.
+                errors.append(
+                    f"{where}: dated {o.at}, at or before the cutoff "
+                    f"{as_of.isoformat()} — the simulation cannot re-perform history. "
+                    "If the record establishes this outcome, put it in a cited initial "
+                    "state value (or world_facts); otherwise date the occurrence "
+                    "strictly after the cutoff"
+                )
             check_changes(o.changes, where)
         when = _parse_when(p.at)
         if p.at is not None and when is None:
             errors.append(f"process {p.name!r}: 'at' is not an ISO datetime: {p.at!r}")
+        if when and as_of and when <= as_of and p.kind == "actor_moment":
+            errors.append(
+                f"process {p.name!r}: actor_moment dated {p.at}, at or before the "
+                f"cutoff {as_of.isoformat()} — a moment to act must lie inside the "
+                "question's open window"
+            )
         if when and horizon and when > horizon:
             errors.append(
                 f"process {p.name!r}: occurs at {p.at} which is after the horizon "
