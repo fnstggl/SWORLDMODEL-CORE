@@ -631,3 +631,65 @@ def test_every_gate_failure_code_has_a_repair_plan() -> None:
     # not something more evidence or a rewritten instruction can fix.
     unplanned = emitted - set(_PLANS)
     assert unplanned == {"duplicate_participant"}, unplanned
+
+
+def test_a_committee_still_needs_every_member_the_evidence_names() -> None:
+    """The relaxation below must not touch collective decisions.
+
+    Several actors can perform the terminal-producing action here, so this is not one
+    person's own act and every named member is still required.
+    """
+
+    actors = {"ada": _actor("ada", "Ada North"), "ben": _actor("ben", "Ben East")}
+    with pytest.raises(WorldIntegrityError) as exc:
+        verify_reality(_contract(), _people_view(), actors, _spec(actors))
+    assert "Cara West" in str(exc.value)
+
+
+def test_one_persons_own_act_does_not_require_the_people_around_them() -> None:
+    """Asked whether one named person will do something, the people around them are
+    context, not co-producers.
+
+    A live Bank of England run compiled Andrew Bailey — whose own statement is the
+    entire outcome — and was refused for omitting two other committee members the
+    evidence names in role terms. The compiler then correctly resisted adding them
+    through three repair rounds, because they do not produce Bailey's statement. The
+    demand belongs to worlds whose outcome is produced collectively.
+    """
+
+    from sworldmodel.worldspec import ActionDefinition, Effect
+
+    entity = EntitySpec(
+        "ada", "Ada North", "person", is_actor=True, role="member", authority=("speak",)
+    )
+    actors = {"ada": ActorState.from_spec(entity, ActorSpec("ada"), default_time=AS_OF)}
+    spec = WorldSpec(
+        title="one person's own act",
+        entities=(entity,),
+        actors=(ActorSpec("ada"),),
+        fields=(),
+        resources=(),
+        channels=(),
+        documents=(),
+        # Only Ada can perform the action that writes the terminal term.
+        actions=(
+            ActionDefinition(
+                action_id="speak",
+                meaning="say it publicly",
+                eligible_actors=("ada",),
+                effects=(Effect("set_field", (("field", "said"), ("value", True))),),
+            ),
+        ),
+        process=ProcessGraph(()),
+        terminal=TerminalExpression(
+            Expr("equals", (Expr("field", ("said",)), True)), Expr("const", (False,))
+        ),
+    )
+    contract = _contract(subject_entity="Ada North")
+
+    # Ben and Cara are named in role terms by the evidence and are not in the world.
+    manifest = verify_reality(contract, _people_view(), actors, spec)
+    assert manifest.integrity_verdict.value == "verified"
+    # Nothing is silent: the manifest records who was named and why they were omitted.
+    assert any("named but not modelled" in n for n in manifest.notes)
+    assert any("Ben East" in n and "Cara West" in n for n in manifest.notes)

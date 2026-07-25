@@ -706,6 +706,20 @@ def terminal_producers(spec: WorldSpec) -> dict[str, tuple[str, ...]]:
     return {k: tuple(v) for k, v in producers.items()}
 
 
+def terminal_producing_actions(spec: WorldSpec) -> list[Any]:
+    """The compiled actions whose effects write a term the terminal reads."""
+
+    terms = _expr_terms(spec.terminal.yes_when)
+    out = []
+    for action in spec.actions:
+        written: set[str] = set()
+        for eff in action.effects:
+            written |= _effect_produces(eff)
+        if written & terms:
+            out.append(action)
+    return out
+
+
 def _actions_gate_a_producer(spec: WorldSpec, terminal_terms: set[str]) -> bool:
     """Whether what the actors do decides *whether* a producer of the outcome fires.
 

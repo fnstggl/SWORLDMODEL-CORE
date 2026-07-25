@@ -112,6 +112,22 @@ def verify_reality(
                     "represented through their institution: "
                     + "; ".join(f"{p} (via {org})" for p, org in sorted(covered))
                 )
+        # Asked whether one named person will do something, the people around them are
+        # context, not co-producers. A live Bank of England run compiled Andrew Bailey,
+        # whose own statement is the entire outcome, and was refused for omitting two
+        # other committee members the evidence happens to name in role terms — then the
+        # compiler correctly resisted adding them through three repair rounds, because
+        # they do not produce Bailey's statement. The demand belongs to worlds whose
+        # outcome is produced collectively.
+        if absent and _single_subject_world(spec, contract):
+            notes.append(
+                "named but not modelled: "
+                + "; ".join(sorted(absent))
+                + " — the evidence names them in role terms, and this world's outcome is "
+                f"produced by {contract.subject_entity} alone, so they are context rather "
+                "than participants"
+            )
+            absent = ()
         if absent:
             raise WorldIntegrityError(
                 "the compiled world omits participants the verified evidence names — "
@@ -240,6 +256,39 @@ def verify_reality(
             },
         )
     return manifest
+
+
+def _single_subject_world(spec: WorldSpec, contract: ResolutionContract) -> bool:
+    """Whether this world's outcome is produced by the question's own named subject.
+
+    Read off the compiled program, not assumed: the terminal's producing actions must be
+    performable by exactly one actor, and that actor must be the contract's subject. A
+    committee whose members each record a vote has several such actors and is unaffected
+    — every member it names is still required.
+    """
+
+    from .world_compiler import terminal_producing_actions
+
+    actions = terminal_producing_actions(spec)
+    if not actions:
+        return False
+    eligible: set[str] = set()
+    actor_ids = {a.entity_id for a in spec.actors}
+    roles = {e.entity_id: e.role for e in spec.entities}
+    for action in actions:
+        for sel in action.eligible_actors:
+            if sel == "*":
+                eligible |= actor_ids
+            elif sel.startswith("role:"):
+                eligible |= {a for a in actor_ids if roles.get(a) == sel[5:]}
+            elif sel in actor_ids:
+                eligible.add(sel)
+    if len(eligible) != 1:
+        return False
+    names = {e.entity_id: e.name for e in spec.entities}
+    only = names.get(next(iter(eligible)), "")
+    subject = contract.subject_entity.strip().lower()
+    return bool(subject) and (only.strip().lower() in subject or subject in only.strip().lower())
 
 
 def _covered_by_an_organization(
