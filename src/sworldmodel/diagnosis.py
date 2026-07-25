@@ -403,6 +403,13 @@ class RunDiagnosis:
                     "why": f"the run stopped at the {gate} gate",
                 }
             )
+        if gate == "decisive_evidence_contradiction":
+            out.append(
+                {
+                    "cause": "claim_verification_too_weak",
+                    "why": "two verified claims contradict each other about a matter of fact",
+                }
+            )
         if gate == "coverage_incomplete":
             out.append(
                 {"cause": "compiler_omission", "why": "the run stopped at the coverage gate"}

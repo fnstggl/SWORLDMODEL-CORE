@@ -896,6 +896,14 @@ Decide whether they are DECISIVELY contradictory: whether both cannot be true of
 same subject at the same time. Complementary facts, different aspects, different points
 in time, or differing levels of detail are NOT contradictions.
 
+Neither is a disagreement about what WILL happen. A decisive contradiction is about a
+matter of present or past fact that the world cannot have both ways — a body with five
+members and nine members, a rate held and cut on the same date, a person in office and
+not in office. Two sources differing about a future decision, a forecast, an intention or
+a direction of travel are not contradicting each other about reality; they are the
+uncertainty the simulation exists to resolve, and calling that decisive refuses a
+question that is merely genuinely open. Answer false for those.
+
 CLAIM A: {a.proposition}
   value: {a.normalized_value}
   source: {a.source_id} ({a.published_at.date()})

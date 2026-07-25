@@ -24,7 +24,7 @@ import re
 
 from .actors import ActorState
 from .coverage import evidence_named_participants, participants_absent_from
-from .errors import EvidenceError, WorldIntegrityError
+from .errors import WorldIntegrityError
 from .evidence import EvidenceView
 from .models import IntegrityVerdict, RealityManifest, ResolutionContract
 from .worldspec import WorldSpec
@@ -204,8 +204,32 @@ def verify_reality(
 
     if verdict is IntegrityVerdict.REFUSED:
         if conflicts:
-            raise EvidenceError(
-                "decisive evidence contradictions block rollout: " + "; ".join(conflicts)
+            # A decisive contradiction is about a matter of fact the world cannot have
+            # both ways, and simulating either reading would be simulating a world we
+            # know might not exist. But the first response is to go and find out which is
+            # true, not to give up: the refusal carries the contested claims and a
+            # failure code, so targeted research can look for a source that settles them
+            # and only a contradiction that survives that ends the run.
+            claims = {c.id: c for c in evidence.available()}
+
+            def describe(pair: str) -> str:
+                a, _, b = pair.partition(" <> ")
+                left = claims.get(a)
+                right = claims.get(b)
+                return (
+                    f"{left.proposition if left else a} [{left.source_id if left else '?'}]"
+                    f"  <>  {right.proposition if right else b} "
+                    f"[{right.source_id if right else '?'}]"
+                )
+
+            raise WorldIntegrityError(
+                "decisive evidence contradictions block rollout: " + "; ".join(conflicts),
+                details={
+                    "failure": "decisive_evidence_contradiction",
+                    "recompilable": True,
+                    "contradictions": [describe(c) for c in conflicts],
+                    "claim pairs": list(conflicts),
+                },
             )
         raise WorldIntegrityError(
             "required reality facts are unverified — simulation refused",

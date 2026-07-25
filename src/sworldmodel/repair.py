@@ -356,6 +356,27 @@ def _unknown_expression_operator(exc: WorldIntegrityError, subject: str) -> Repa
     )
 
 
+def _decisive_evidence_contradiction(exc: WorldIntegrityError, subject: str) -> RepairPlan:
+    pairs = _strings(exc.details.get("contradictions"))
+    return RepairPlan(
+        failure="decisive_evidence_contradiction",
+        missing_element=f"an authoritative source settling {pairs[:3]}",
+        queries=(
+            f"{subject} official statement confirmed",
+            f"{subject} press release announcement official",
+            f"{subject} latest confirmed decision",
+        ),
+        instruction=(
+            f"Two verified claims contradict each other about a matter of fact: {pairs}. "
+            "If newly retrieved evidence settles it, compile the world the authoritative "
+            "source supports and cite it. If the disagreement is really about what will "
+            "happen rather than what is the case, it is not a contradiction at all — "
+            "represent it as an uncertainty with both outcomes and let the simulation "
+            "resolve it. Do not pick a side without a source."
+        ),
+    )
+
+
 def _orphan_actors(exc: WorldIntegrityError, subject: str) -> RepairPlan:
     orphans = _strings(exc.details.get("orphan_actors"))
     return RepairPlan(
@@ -412,6 +433,7 @@ _PLANS = {
     "nothing_can_act": _nothing_can_act,
     "nothing_scheduled": _nothing_scheduled,
     "orphan_actors": _orphan_actors,
+    "decisive_evidence_contradiction": _decisive_evidence_contradiction,
     "unknown_expression_operator": _unknown_expression_operator,
     "malformed_compilation": _malformed_compilation,
     "required_facts_unverified": _required_facts_unverified,

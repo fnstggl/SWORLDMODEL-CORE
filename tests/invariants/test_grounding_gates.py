@@ -564,3 +564,34 @@ def test_a_quantity_must_come_from_the_quoted_sentence_or_an_adjacent_line() -> 
         )
         == ""
     )
+
+
+def test_a_decisive_contradiction_is_repairable_before_it_is_fatal() -> None:
+    """A live OPEC+ run was refused because one source reported quotas held for 2026 and
+    another said cuts would be unwound in 2026 — a report of a decision and a projection
+    about what comes next, which are not even inconsistent.
+
+    Two properties follow. A disagreement about what *will* happen is the uncertainty
+    the simulation exists to resolve, so it is not decisive at all. And a genuine
+    contradiction about a matter of fact should first send the researcher after a source
+    that settles it: only one that survives that ends the run.
+    """
+
+    from sworldmodel.repair import plan_repair
+
+    exc = WorldIntegrityError(
+        "decisive evidence contradictions block rollout: a <> b",
+        details={
+            "failure": "decisive_evidence_contradiction",
+            "recompilable": True,
+            "contradictions": ["the board has five members <> the board has nine members"],
+            "claim pairs": ["a <> b"],
+        },
+    )
+    plan = plan_repair(exc, "will the board decide x?", subject_entity="the board")
+    assert plan is not None
+    assert plan.needs_research, "a contradiction should send us looking for what settles it"
+    assert any("official" in q for q in plan.queries)
+    # And the instruction offers the honest alternative rather than forcing a choice.
+    assert "uncertainty" in plan.instruction
+    assert "without a source" in plan.instruction
