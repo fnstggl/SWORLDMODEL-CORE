@@ -1435,6 +1435,20 @@ def _normalize_compilation(
 
     _filter(ws)
     data["world_spec"] = ws
+
+    # A required reality fact the model NAMES but cannot cite is not a verified
+    # load-bearing fact, and treating it as one refuses runs for the compiler's own
+    # rhetoric: a live Federal Reserve question died on "fomc_has_authority: no evidence
+    # attached". A fact that DOES cite evidence is left untouched, so a citation that is
+    # unavailable by the cutoff still refuses the run — the gate is un-regressed, not
+    # weakened.
+    grounded_facts = []
+    for rf in as_objects(data.get("required_reality_facts")):
+        cited = [str(i) for i in (rf.get("evidence_claim_ids") or []) if str(i) in available]
+        rf["evidence_claim_ids"] = cited
+        if cited:
+            grounded_facts.append(rf)
+    data["required_reality_facts"] = grounded_facts
     data["subject_entity"] = _s(data.get("subject_entity")) or _s(ws.get("title")) or "the subject"
     data["resolution_units"] = _s(data.get("resolution_units")) or "the outcome"
     data["target_outcome"] = _s(data.get("target_outcome")) or "the YES condition"

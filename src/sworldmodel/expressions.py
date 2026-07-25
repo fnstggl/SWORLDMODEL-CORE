@@ -30,6 +30,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
+from .errors import UndeterminedExpressionError
 from .worldspec import Expr
 
 
@@ -271,9 +272,14 @@ def _as_list(v: Any) -> list[Any]:
 
 def _time(v: Any) -> datetime:
     if isinstance(v, str):
-        v = datetime.fromisoformat(v)
+        try:
+            v = datetime.fromisoformat(v)
+        except ValueError as exc:
+            raise UndeterminedExpressionError(f"not a usable time value: {v!r}") from exc
     if isinstance(v, datetime):
         # Normalize to timezone-aware UTC so a model-emitted naive datetime never
         # crashes a comparison against the (timezone-aware) as_of / horizon.
         return v if v.tzinfo is not None else v.replace(tzinfo=UTC)
-    raise ValueError(f"not a time value: {v!r}")
+    # The world never set this time. Comparing against it cannot yield an honest
+    # answer, so the caller turns this into an unresolved branch rather than a NO.
+    raise UndeterminedExpressionError(f"not a usable time value: {v!r}")

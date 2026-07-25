@@ -60,3 +60,12 @@ class GatewayError(SWorldModelError):
     A gateway failure must leave explicitly *unresolved* mass — it must never be
     converted into a prior or a default action.
     """
+
+
+class UndeterminedExpressionError(SWorldModelError):
+    """Raised when a declarative expression reads a value the world never determined.
+
+    This is not a defect in the world: a compiled terminal may legitimately reference a
+    date or field that a given branch never sets. The honest outcome is an *unresolved*
+    branch — never a crash, and never a fabricated YES/NO.
+    """

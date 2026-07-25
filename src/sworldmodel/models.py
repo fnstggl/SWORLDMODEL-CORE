@@ -54,6 +54,7 @@ class EpistemicType(StrEnum):
     OBSERVATION = "observation"  # directly supported by evidence
     INFERENCE = "inference"  # reasoned implication from cited observations
     HYPOTHESIS = "hypothesis"  # unobserved possibility represented as uncertainty
+    UNSUPPORTED = "unsupported"  # retained only in diagnostics; never enters the world
 
 
 class WeightProvenance(StrEnum):
