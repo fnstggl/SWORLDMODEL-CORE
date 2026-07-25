@@ -58,7 +58,7 @@ from .prompts import render_world_compile_prompt
 from .reality import verify_reality
 from .uncertainty import enumerate_scenarios
 from .world import WorldFact, WorldState
-from .worldspec import ActorSpec, EntitySpec, WorldSpec
+from .worldspec import ActorSpec, EntitySpec, WorldSpec, as_objects
 
 _VALID_PROVENANCE = {p.value for p in WeightProvenance}
 
@@ -910,12 +910,31 @@ def _uncertainty_variables(
 # ---------------------------------------------------------------------------
 
 
+def _field_effects(value: Any) -> tuple[tuple[str, Any], ...]:
+    """``[[field, value], ...]`` — however the compiler wrote it.
+
+    A single pair written flat as ``["field", 1]`` instead of ``[["field", 1]]`` used to
+    raise ValueError from a tuple unpack. Pairs that are not pairs are dropped: a
+    half-written effect names no field to set.
+    """
+
+    if not isinstance(value, (list, tuple)):
+        return ()
+    if len(value) == 2 and all(not isinstance(x, (list, tuple)) for x in value):
+        return ((str(value[0]), value[1]),)
+    out: list[tuple[str, Any]] = []
+    for pair in value:
+        if isinstance(pair, (list, tuple)) and len(pair) == 2:
+            out.append((str(pair[0]), pair[1]))
+    return tuple(out)
+
+
 def parse_uncertainties(
     items: Any, available_ids: set[str] | None = None
 ) -> tuple[UncertaintySpec, ...]:
     out: list[UncertaintySpec] = []
-    for u in items or []:
-        outcomes = u.get("outcomes") or []
+    for u in as_objects(items):
+        outcomes = as_objects(u.get("outcomes"))
         total = sum(float(o.get("weight", 0)) for o in outcomes)
         if total <= 0 or not outcomes:
             continue
@@ -938,7 +957,7 @@ def parse_uncertainties(
                         provenance=provenance,
                         source_detail=str(o.get("source_detail", o.get("description", ""))),
                     ),
-                    field_effects=tuple((str(k), v) for k, v in (o.get("field_effects") or [])),
+                    field_effects=_field_effects(o.get("field_effects")),
                     description=str(o.get("description", "")),
                 )
             )
@@ -988,7 +1007,7 @@ def _epistemic(raw: object, has_citations: bool) -> EpistemicType:
 
 def parse_world_facts(items: Any, default_time: datetime) -> tuple[WorldFact, ...]:
     facts: list[WorldFact] = []
-    for i, wf in enumerate(items or []):
+    for i, wf in enumerate(as_objects(items)):
         at = wf.get("available_at")
         cites = tuple(str(c) for c in (wf.get("evidence_claim_ids") or []))
         facts.append(
@@ -1010,7 +1029,7 @@ def parse_required_facts(items: Any) -> tuple[RequiredRealityFact, ...]:
             description=str(rf.get("description", "")),
             evidence_claim_ids=tuple(rf.get("evidence_claim_ids", []) or []),
         )
-        for rf in (items or [])
+        for rf in as_objects(items)
     )
 
 
