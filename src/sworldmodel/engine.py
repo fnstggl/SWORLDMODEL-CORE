@@ -1390,22 +1390,17 @@ def terminal_lineage(
     anything that happened — whatever the spec promised.
     """
 
-    from .world_compiler import _expr_collections, _expr_fields
+    from .world_compiler import _expr_terms
 
-    terms = sorted(_expr_fields(terminal.yes_when) | _expr_collections(terminal.yes_when))
+    # The same namespaced terms the compile-time gate reads, so the two halves of
+    # producer lineage cannot disagree about what the terminal even reads. Walking only
+    # bare field and collection names left a terminal built on a document field, a
+    # resource or an event count with *no* lineage at all — vacuously clean, on the
+    # question where "what produced this" matters most.
+    terms = sorted(_expr_terms(terminal.yes_when))
     writers: dict[str, list[Event]] = {t: [] for t in terms}
     for ev in world.event_history:
-        payload = ev.payload_dict
-        touched: set[str] = set()
-        for key in ("field", "collection"):
-            name = payload.get(key)
-            if isinstance(name, str):
-                touched.add(name)
-        for key in ("fields", "data", "levels"):
-            sub = payload.get(key)
-            if isinstance(sub, dict):
-                touched.update(str(k) for k in sub)
-        for term in touched & set(terms):
+        for term in _event_writes(ev) & set(terms):
             writers[term].append(ev)
 
     # A term the record established before the window opened has no writer in this
@@ -1441,6 +1436,46 @@ def terminal_lineage(
     return tuple(out)
 
 
+def _event_writes(ev: Event) -> set[str]:
+    """The namespaced terms one applied event actually wrote.
+
+    The mirror of ``world_compiler._effect_produces``, which asks the same question of a
+    compiled effect before anything runs. Both must name a term the same way or a term
+    the gate cleared would look unproduced here.
+    """
+
+    payload = ev.payload_dict
+    out: set[str] = set()
+    name = payload.get("field")
+    if ev.kind in ("set_field", "adjust_field") and isinstance(name, str):
+        out.add(f"field:{name}")
+    coll = payload.get("collection")
+    if ev.kind == "append_record" and isinstance(coll, str):
+        out.add(f"collection:{coll}")
+    if ev.kind == "create_or_update_document":
+        doc = payload.get("document")
+        sub = payload.get("fields")
+        if isinstance(doc, str) and isinstance(sub, dict):
+            out |= {f"document:{doc}.{k}" for k in sub}
+    if ev.kind in ("create_event", "schedule_event"):
+        etype = payload.get("event_type")
+        if isinstance(etype, str):
+            out.add(f"event:{etype}")
+    if ev.kind in ("transfer_resource", "consume_resource"):
+        res = payload.get("resource")
+        if isinstance(res, str):
+            out.add(f"resource:{res}")
+    if ev.kind == "release_data":
+        sub = payload.get("fields")
+        if isinstance(sub, dict):
+            out |= {f"field:{k}" for k in sub}
+    if ev.kind == "deliver_information":
+        sub = payload.get("info_fields")
+        if isinstance(sub, dict):
+            out |= {f"field:{k}" for k in sub}
+    return out
+
+
 def _established_terms(spec: WorldSpec | None) -> dict[str, tuple[str, ...]]:
     """Terminal terms whose initial value the compiled world cites evidence for."""
 
@@ -1449,13 +1484,13 @@ def _established_terms(spec: WorldSpec | None) -> dict[str, tuple[str, ...]]:
     out: dict[str, tuple[str, ...]] = {}
     for f in spec.fields:
         if f.initial is not None and f.evidence_claim_ids:
-            out[f.field_id] = f.evidence_claim_ids
+            out[f"field:{f.field_id}"] = f.evidence_claim_ids
     for doc in spec.documents:
         if not doc.evidence_claim_ids:
             continue
         for name, value in doc.fields:
             if value is not None:
-                out[f"{doc.document_id}.{name}"] = doc.evidence_claim_ids
+                out[f"document:{doc.document_id}.{name}"] = doc.evidence_claim_ids
     return out
 
 
