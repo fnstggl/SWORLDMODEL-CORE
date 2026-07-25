@@ -26,6 +26,7 @@ No ``corpus.json`` is read. This is the production research path.
 
 from __future__ import annotations
 
+import sys
 import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
@@ -52,7 +53,7 @@ from .research_planner import ResearchPlan, followup_queries, plan_research
 from .rss import google_news_rss_url, parse_rss, resolve_item_url
 from .search import duckduckgo_search, site_query
 from .source_extract import ExtractedClaim, ExtractionResult, distinctive_terms, extract_claims
-from .source_fetch import FetchedSource, fetch_source
+from .source_fetch import FetchedSource, RetrievalMode, fetch_source
 from .world_compiler import compile_world_spec_live
 
 # A search engine's URL length limit; a query longer than this is truncated by the
@@ -107,12 +108,14 @@ class ResearchTrace:
     extract_calls: int = 0
     rounds: int = 0
     fact_retrieval: dict[str, list[str]] = field(default_factory=dict)
+    retrieval_mode: dict[str, Any] = field(default_factory=dict)
 
     def query_texts(self) -> list[str]:
         return [q["query"] for q in self.queries]
 
     def to_dict(self, plan: ResearchPlan, store: EvidenceStore) -> dict[str, Any]:
         return {
+            "retrieval_mode": self.retrieval_mode,
             "plan": plan.to_dict(),
             "process_summary": plan.process_summary,
             "resolution_event": plan.resolution_event,
@@ -152,6 +155,7 @@ class ResearchTrace:
         if not prior:
             return cls()
         return cls(
+            retrieval_mode=dict(prior.get("retrieval_mode") or {}),
             queries=list(prior.get("queries", [])),
             rss_requests=list(prior.get("rss_requests", [])),
             search_failures=list(prior.get("search_failures", [])),
@@ -217,6 +221,18 @@ class LiveResearchBackend:
 
     # -- public API -------------------------------------------------------------
 
+    def retrieval_mode(self, as_of: datetime) -> RetrievalMode:
+        """Decide nowcast-vs-pastcast once, against the moment this run started.
+
+        Pinning ``self._now`` here is the point: every later fetch compares the cutoff
+        against the same instant, so a run cannot begin as a nowcast and become a
+        pastcast because the clock moved past its own cutoff mid-session.
+        """
+
+        if self._now is None:
+            self._now = datetime.now(as_of.tzinfo)
+        return RetrievalMode.decide(as_of, self._now)
+
     def research(
         self,
         question: str,
@@ -225,9 +241,14 @@ class LiveResearchBackend:
         *,
         extra_queries: tuple[str, ...] = (),
     ) -> ResearchBundle:
+        mode = self.retrieval_mode(as_of)
+        # Printed before a single request is spent. The previous acceptance run passed a
+        # cutoff hours in the past, silently got archive-only retrieval, and the
+        # resulting refusals read as a research problem rather than a mode error.
+        print(mode.describe(), file=sys.stderr, flush=True)
         plan = plan_research(self.gateway, question, as_of, horizon)
         store = EvidenceStore()
-        trace = ResearchTrace()
+        trace = ResearchTrace(retrieval_mode=mode.as_dict())
         self._run_rounds(question, as_of, plan, store, trace, extra_queries)
         return self._compile(question, as_of, horizon, plan, store, trace)
 
@@ -276,8 +297,10 @@ class LiveResearchBackend:
         wanted = tuple(dict.fromkeys(q.strip() for q in queries if q and q.strip()))
         if not wanted:
             return None
+        mode = self.retrieval_mode(as_of)
         store = prior.evidence_store
         trace = ResearchTrace.resume(prior.live_trace)
+        trace.retrieval_mode = mode.as_dict()
         plan = ResearchPlan.from_dict((prior.live_trace or {}).get("plan"))
         if plan is None:
             plan = plan_research(self.gateway, question, as_of, horizon)

@@ -35,6 +35,31 @@ _TAG = re.compile(r"<[^>]+>")
 _WS = re.compile(r"[ \t\r\f\v]+")
 _MULTINL = re.compile(r"\n{3,}")
 _TITLE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
+
+# Page furniture. These elements exist on every site and carry no claim about anything:
+# site navigation, headers and footers, sidebars, search forms, and the cookie and
+# consent dialogs that now open most institutional pages.
+_CHROME = re.compile(
+    r"<(nav|header|footer|aside|form|noscript|svg|select|button)\b[^>]*>.*?</\1>"
+    r"|<[a-z]+\b[^>]*\brole=[\"'](?:navigation|banner|contentinfo|search|dialog|menu"
+    r"|menubar|complementary)[\"'][^>]*>.*?</[a-z]+>"
+    r"|<[a-z]+\b[^>]*\b(?:id|class)=[\"'][^\"']*(?:cookie|consent|gdpr|onetrust|skip-link"
+    r"|breadcrumb|site-nav|mega-menu|social-share)[^\"']*[\"'][^>]*>.*?</[a-z]+>",
+    re.IGNORECASE | re.DOTALL,
+)
+
+# Where a document's own content lives, most specific first. Non-greedy so a wrapper
+# does not swallow the footer, and checked for plausibility by the caller.
+_MAIN_REGIONS = (
+    re.compile(r"<main\b[^>]*>.*?</main>", re.IGNORECASE | re.DOTALL),
+    re.compile(r"<[a-z]+\b[^>]*\brole=[\"']main[\"'][^>]*>.*?</[a-z]+>", re.IGNORECASE | re.DOTALL),
+    re.compile(r"<article\b[^>]*>.*?</article>", re.IGNORECASE | re.DOTALL),
+    re.compile(
+        r"<[a-z]+\b[^>]*\b(?:id|class)=[\"'][^\"']*(?:main-content|page-content|article-body"
+        r"|content-block|rich-text)[^\"']*[\"'][^>]*>.*?</[a-z]+>",
+        re.IGNORECASE | re.DOTALL,
+    ),
+)
 _META_TIME = re.compile(
     r'<meta[^>]+(?:property|name)=["\'](?:article:published_time|datePublished|pubdate|date)["\'][^>]*content=["\']([^"\']+)["\']',
     re.IGNORECASE,
@@ -118,9 +143,81 @@ def requires_archived_copy(as_of: datetime | None, now: datetime) -> bool:
     researching, the live page may have changed since, and only an archived capture at
     or before the cutoff demonstrates what it said. A nowcast (``as_of`` at or after the
     moment research runs, which is what "forecast from today" means) fetches live.
+
+    ``now`` must be the moment the *run* started, not the moment this call happens — see
+    :class:`RetrievalMode`.
     """
 
     return as_of is not None and as_of < now
+
+
+@dataclass(frozen=True)
+class RetrievalMode:
+    """Nowcast or pastcast, decided once and carried for the whole run.
+
+    Deciding this per fetch is a trap the previous acceptance run fell into from two
+    directions. A cutoff a few hours in the past silently turned an intended nowcast
+    into archive-only retrieval, and every un-archived official page was refused —
+    which then looked like a research-recall problem rather than the mode error it was.
+    And a cutoff set to "now" at launch flips to a pastcast the moment the clock passes
+    it, so the same run could fetch live pages early and demand archives later.
+
+    Fixing the comparison instant at process start removes both. It is not a tolerance
+    window: a genuine pastcast is exactly as strict as before, since its cutoff is long
+    past whenever the process happened to start.
+    """
+
+    as_of: datetime
+    started_at: datetime
+    archived_only: bool
+
+    @classmethod
+    def decide(cls, as_of: datetime, started_at: datetime) -> RetrievalMode:
+        return cls(
+            as_of=as_of,
+            started_at=started_at,
+            archived_only=requires_archived_copy(as_of, started_at),
+        )
+
+    @property
+    def name(self) -> str:
+        return "pastcast" if self.archived_only else "nowcast"
+
+    @property
+    def lag_seconds(self) -> float:
+        return (self.started_at - self.as_of).total_seconds()
+
+    @property
+    def admissible_sources(self) -> str:
+        if self.archived_only:
+            return (
+                "archived captures at or before the cutoff only; a URL with no such "
+                "capture is refused and never fetched live"
+            )
+        return "current pages, fetched live; claims published after the cutoff stay inadmissible"
+
+    def describe(self) -> str:
+        lag = self.lag_seconds
+        when = (
+            f"{abs(lag) / 3600:.1f}h {'before' if lag > 0 else 'after'} the cutoff"
+            if abs(lag) >= 60
+            else "at the cutoff"
+        )
+        return (
+            f"RETRIEVAL MODE: {self.name.upper()} — cutoff {self.as_of.isoformat()}, "
+            f"run started {self.started_at.isoformat()} ({when}). "
+            f"Admissible: {self.admissible_sources}."
+        )
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "mode": self.name,
+            "as_of": self.as_of.isoformat(),
+            "process_started_at": self.started_at.isoformat(),
+            "cutoff_lag_seconds": self.lag_seconds,
+            "archived_captures_required": self.archived_only,
+            "admissible_sources": self.admissible_sources,
+        }
 
 
 def fetch_source(
@@ -302,12 +399,49 @@ def _refused(url: str, now: datetime, reason: str, *, fetched_url: str = "") -> 
 
 
 def extract_text(html: str) -> str:
-    without_scripts = _SCRIPT_STYLE.sub(" ", html)
-    without_tags = _TAG.sub("\n", without_scripts)
+    """The document's readable text, with the furniture removed and the body first.
+
+    This used to strip tags and return whatever fell out, in source order. On a modern
+    institutional site that means the first several thousand characters are a cookie
+    banner, a skip-link list and a mega-menu — and since the extractor reads a bounded
+    window, the model was handed navigation and asked what the page established. It
+    answered, correctly, that it established nothing: in one acceptance run every single
+    page from the Bank of England's site — the minutes, the Monetary Policy Report and
+    three speeches — yielded zero claims.
+
+    Two cheap, general steps fix it without a parser dependency. Chrome elements (nav,
+    header, footer, aside, forms, cookie dialogs) are dropped by tag and by the ARIA
+    roles that mark them. Then, if the markup labels its main content — ``<main>``,
+    ``role="main"``, ``<article>``, or the near-universal ``id/class`` containing
+    "content" — that region is hoisted to the front, so the window spends itself on the
+    document rather than on the site around it.
+    """
+
+    body = _SCRIPT_STYLE.sub(" ", html)
+    body = _CHROME.sub(" ", body)
+    main = _main_region(body)
+    if main:
+        # Keep the rest: a date, a byline or a breadcrumb can sit outside the main
+        # region, and this text is also what the verifier checks excerpts against.
+        body = main + "\n\n" + body
+    without_tags = _TAG.sub("\n", body)
     unescaped = _unescape(without_tags)
     lines = [_WS.sub(" ", line).strip() for line in unescaped.splitlines()]
     joined = "\n".join(line for line in lines if line)
     return _MULTINL.sub("\n\n", joined).strip()
+
+
+def _main_region(html: str) -> str:
+    """The labeled main-content region, if the markup declares one."""
+
+    for pattern in _MAIN_REGIONS:
+        m = pattern.search(html)
+        if m:
+            region = m.group(0)
+            # A wrapper that spans essentially the whole document has told us nothing.
+            if len(region) < len(html) * 0.95:
+                return region
+    return ""
 
 
 def extract_title(html: str) -> str:
