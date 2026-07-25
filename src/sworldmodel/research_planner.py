@@ -99,7 +99,11 @@ def plan_research(
     gateway: ModelGateway, question: str, as_of: datetime, horizon: datetime
 ) -> ResearchPlan:
     prompt = f"""You are planning targeted evidence research for a forecasting question.
-Work BACKWARD from the outcome: outcome <- terminal decision/action <- actor choices
+Work BACKWARD from the outcome: outcome <- terminal-producing events <- causal producers
+<- their inputs, authority, constraints and observations. Causal producers may be people,
+organizations, institutional bodies, populations, networks, markets, production/logistics systems,
+administrative processes or external physical/economic processes. Do not assume a person decides
+an aggregate quantity.
 <- proposal/alternatives <- interaction <- prior positions <- incoming information.
 
 QUESTION: {question}

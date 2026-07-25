@@ -46,6 +46,7 @@ person, org, rule, document, resource, event, channel, variable, or requirement.
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -64,7 +65,18 @@ ExclusionReviewer = Callable[["EvidenceCandidate"], bool]
 
 
 def _norm(text: str) -> str:
-    return " ".join(_WORD.findall(text.lower()))
+    """Case-folded word tokens, with accents folded onto their base letters.
+
+    The token pattern is ASCII, so without the fold "Rodríguez" tokenized to "rodr guez"
+    and never matched "Rodriguez" — one source spelling a name with its diacritic and
+    another without was enough to make the same person two people, and then to refuse a
+    roster for omitting one of them. Names are the primary key of this whole system; they
+    have to survive a source that drops an accent.
+    """
+
+    folded = unicodedata.normalize("NFKD", text.lower())
+    stripped = "".join(ch for ch in folded if not unicodedata.combining(ch))
+    return " ".join(_WORD.findall(stripped))
 
 
 # ---------------------------------------------------------------------------
@@ -280,6 +292,17 @@ _ORG_WORDS = _lex(
     " institute administration coalition alliance panel"
 )
 _ORG_SUFFIX = ("inc", "ltd", "llc", "plc", "corp", "co", "sa", "ag", "nv", "gmbh")
+# Nouns that name an *instrument* — a thing drafted, signed, published or enacted. A
+# name ending in one of these is a document, not somebody. This is a fact about English
+# noun phrases, not about any subject area.
+_INSTRUMENT_NOUNS = _lex(
+    "agreement treaty accord protocol pact deal contract convention covenant memorandum"
+    " communique communiqué declaration statement report minutes bill act ordinance"
+    " decree resolution ruling judgment judgement opinion decision letter release note"
+    " paper review summary transcript filing prospectus"
+)
+# Lowercase particles that belong inside a personal name.
+_NAME_PARTICLES = _lex("van von de del della der den di da dos das du la le bin ibn al of and")
 _POPULATION_WORDS = _lex(
     "voters electorate population households respondents citizens consumers workers residents"
     " members constituents demographic public shareholders taxpayers"
@@ -329,29 +352,90 @@ _ACTION_WORDS = _lex(
 )
 
 
+# Language that treats a name as an acting body rather than a place, product or month.
+# Deliberately about *agency* — deciding, producing, announcing, meeting, reporting —
+# because that is what makes something a causal element of somebody's world.
+_BODY_CONTEXT = _ACTION_WORDS | _EVENT_WORDS | _ORG_WORDS | _RULE_PROCEDURE_WORDS
+
+
+def _near(identity: str, text: str, lexicon: frozenset[str], *, before: bool = False) -> bool:
+    """Whether a word from ``lexicon`` appears next to this name, inside one clause.
+
+    A bag-of-words test over the whole passage would call any capitalized token in a
+    sentence about a decision an organization — including the month the decision falls
+    in and the country it happens in. Requiring the word to sit within a short span of
+    the name is the difference between "Mercosur signed" and "signed in Brazil".
+
+    ``before`` also accepts the word preceding the name, which is where English puts a
+    title: "Governor Andrew Bailey" attests a role exactly as "Andrew Bailey, Governor
+    of the Bank of England" does.
+    """
+
+    name = rf"(?<![a-z0-9]){re.escape(identity.lower())}(?![a-z0-9])"
+    words = rf"\b(?:{'|'.join(sorted(lexicon))})\b"
+    low = text.lower()
+    if re.search(rf"{name}[^.;]{{0,48}}?{words}", low):
+        return True
+    return before and re.search(rf"{words}[^.;]{{0,48}}?{name}", low) is not None
+
+
+def _acts_in(identity: str, propositions: str) -> bool:
+    """Whether the evidence shows this name *doing* something, close to the name itself."""
+
+    return _near(identity, propositions, _BODY_CONTEXT)
+
+
 def _entity_kind(entity: str, propositions: str) -> CandidateKind | None:
     """Classify a named entity by its surface form + the language used about it."""
 
-    words = entity.split()
-    low = entity.lower()
+    # "Andrew Bailey, Governor of the Bank of England" is a person with their office
+    # appended. Classifying the whole string reads the office and calls the person an
+    # organization, so the identity is taken from before the appositive — but only when
+    # what precedes the comma is already a full name. "Smith, John" is one name written
+    # backwards, and truncating it to "Smith" loses the person.
+    head = entity.split(",")[0].strip()
+    identity = head if len(head.split()) > 1 else entity
+    words = identity.split()
+    low = identity.lower()
     tokens = set(_WORD.findall(low))
-    if tokens & _ORG_WORDS or low.split()[-1] in _ORG_SUFFIX:
+    if tokens & _ORG_WORDS or (low.split() and low.split()[-1] in _ORG_SUFFIX):
         return CandidateKind.ORGANIZATION
-    # An all-caps acronym referenced as a body (FOMC, ECB, SCOTUS, UN). ``isalpha``
-    # already excludes anything with a space, so no length ceiling is needed to keep
-    # a shouted sentence out; a single letter is excluded because it is an initial,
-    # not an organization.
-    if len(entity) > 1 and entity.isupper() and entity.isalpha():
+    # An acronym referenced as a body (FOMC, ECB, OPEC+, S&P). Punctuation is stripped
+    # before the shape test, because an organization does not stop being one for having
+    # a "+" in its name — and OPEC+ was the subject of an entire acceptance question
+    # that this inventory could not see. A single letter stays excluded: that is an
+    # initial, not an organization.
+    squashed = "".join(ch for ch in identity if ch.isalnum())
+    if len(squashed) > 1 and squashed.isupper() and squashed.isalpha():
         return CandidateKind.ORGANIZATION
     if tokens & _POPULATION_WORDS:
         return CandidateKind.POPULATION_GROUP
-    # A capitalized name of more than one token is person-like. The shape is the whole
-    # rule and there is no threshold to tune: a single capitalized token is as likely a
-    # month, a place or a product, and reading it as a person would manufacture a
-    # participant that the reality gate then demands a seat for. The cost is that a
-    # mononym is only recognized when the evidence also uses organization or population
-    # language about it, or the compiled world names it as a focal identity.
-    if len(words) > 1 and entity[:1].isupper():
+    # A capitalized single token — Tesla, Mercosur, Banxico — is a real name that the
+    # shape alone cannot tell from a month, a place or a product. The evidence can: when
+    # the claims about it speak of it acting, deciding, producing or announcing, it is a
+    # body. It is classified as an ORGANIZATION and never as a person, which is what
+    # makes this safe — organizations are not counted as participants, so recognizing a
+    # mononym can never manufacture a seat the reality gate then demands be filled.
+    if (
+        len(words) == 1
+        and identity[:1].isupper()
+        and not _is_calendar_shaped(identity)
+        and _acts_in(identity, propositions)
+    ):
+        return CandidateKind.ORGANIZATION
+    # An instrument: a thing that is signed, published or enacted. Names ending in one
+    # of these are documents whatever else they look like, and reading them as people is
+    # how a live EU–Mercosur run came to demand a seat for the "Mercosur Agreement" and
+    # for the "Signed Trade Agreement" the world had already compiled as a document.
+    if low.split() and low.split()[-1] in _INSTRUMENT_NOUNS:
+        return CandidateKind.DOCUMENT
+    # A capitalized name of more than one token is person-like — but *every* token has
+    # to be capitalized. "EU member states" is a collective written the way collectives
+    # are written, and calling it a person made the reality gate demand a seat for it
+    # beside the European Union and the European Council, which is where its member
+    # states already were. Lowercase particles are part of how names are written and do
+    # not break the rule.
+    if len(words) > 1 and all(w[:1].isupper() or w.lower() in _NAME_PARTICLES for w in words):
         return CandidateKind.PERSON
     return None
 
@@ -559,6 +643,11 @@ def _entity_candidates(
             kind = _entity_kind(ent, prop)
             if kind is None:
                 continue
+            # A date is never a world entity. The guard existed only where the roster
+            # was checked, so the checklist handed to the compiler could still open with
+            # "person | Q3 2026" — asking it to model a quarter as somebody.
+            if _is_calendar_shaped(ent):
+                continue
             norm_id = _norm(ent)
             group = grouped.setdefault((kind, norm_id), _EntityGroup(kind=kind, identity=ent))
             group.claims[c.id] = c
@@ -569,8 +658,13 @@ def _entity_candidates(
                 group.role = True
                 # Attested in role or authority terms — a much stronger signal than
                 # merely appearing beside the subject, and the only one strong enough
-                # to demand a seat at the table.
-                group.role_attested = True
+                # to demand a seat at the table. Which is why the role word has to sit
+                # next to the name: read across a whole claim, "EU member states must
+                # ratify what the board agreed" attests a role for every capitalized
+                # thing in it.
+                group.role_attested = group.role_attested or _near(
+                    ent, prop, _ROLE_WORDS, before=True
+                )
             elif ctx.mentions_focal(prop):
                 group.role = True
 
@@ -1060,9 +1154,14 @@ def _record_exclusion(
 ) -> None:
     """Record an EXCLUDED_IRRELEVANT disposition — unless an independent reviewer says
     the item could still matter, in which case the exclusion is invalid and it becomes
-    UNCERTAIN and blocks (the exclusion challenge)."""
+    UNCERTAIN and blocks (the exclusion challenge).
 
-    if reviewer is not None and reviewer(cand):
+    Source provenance is not put to the reviewer at all. There is no compiled world in
+    which "the document was published on 18 September 2025" could be represented, so a
+    challenge to it could only ever be unsatisfiable — the compiler would be told to
+    include something that is not world content, and no recompile could comply."""
+
+    if reviewer is not None and not _is_source_provenance(cand) and reviewer(cand):
         a.dispositions.append(
             CandidateDisposition(
                 candidate_id=cand.candidate_id,
@@ -1155,9 +1254,48 @@ def _label(cand: EvidenceCandidate, why: str) -> str:
 
 
 def _exclusion_reason(cand: EvidenceCandidate) -> str:
+    if _is_source_provenance(cand):
+        return "provenance of a source, not a thing inside the world"
     if cand.kind is CandidateKind.PERSON:
         return "named incidentally; no role, vote, or membership signal in the evidence"
     return f"no outcome-relevant signal for this {cand.kind.value} in the evidence"
+
+
+# A self-referential subject: the extractor talking about the page it was handed rather
+# than about anything in the world. "The Bank of England published its minutes" names a
+# real body and is world content; "the document was published" names nothing.
+_SELF_REFERENCE = re.compile(
+    r"\b(?:the|this)\s+(?:document|article|page|web\s?page|website|site|text|source|url)\b"
+)
+_PROVENANCE_PREDICATE = re.compile(
+    r"\b(?:was|is|were|are|has\s+been)\s+(?:last\s+)?"
+    r"(?:published|posted|updated|modified|dated|titled|entitled|written|authored|"
+    r"bylined|retrieved|accessed|hosted|archived|captured)\b"
+    r"|\b(?:appears?|appeared)\s+(?:on|at)\b"
+    r"|\bcarries\s+a\s+byline\b"
+    r"|\bhas\s+the\s+(?:url|title)\b"
+)
+
+
+def _is_source_provenance(cand: EvidenceCandidate) -> bool:
+    """Whether this candidate describes a *source* rather than the world.
+
+    When a page went online, who bylined it, what it is titled, where it lives: that is
+    provenance. It is already recorded against every claim the page supports, and it is
+    not a thing that exists inside the simulated world, so it can be neither material
+    nor challenged into blocking a run. A live Bank of England run was refused because
+    an independent reviewer challenged the exclusion of "The document was published on
+    September 18, 2025" — there is no compiled world in which that could be represented.
+
+    Both halves are required: a self-referential subject *and* a provenance predicate.
+    A named body publishing a named document is an event in the world and is untouched.
+    """
+
+    text = " ".join(cand.description.split()).lower()
+    # Drop the extractor's topic namespace ("context: ...") before matching.
+    _, _, body = text.partition(": ")
+    body = body or text
+    return bool(_SELF_REFERENCE.search(body) and _PROVENANCE_PREDICATE.search(body))
 
 
 def _report(candidates: tuple[EvidenceCandidate, ...], a: _Assessment) -> CompilationCoverageReport:
@@ -1190,6 +1328,7 @@ def enforce_coverage(report: CompilationCoverageReport) -> None:
     raise WorldIntegrityError(
         "verified evidence was lost during world compilation — simulation refused",
         details={
+            "failure": "coverage_incomplete",
             "missing_material_candidates": list(report.missing_material_candidates),
             "material_candidates": report.material_candidates,
             "included": report.included_candidates,

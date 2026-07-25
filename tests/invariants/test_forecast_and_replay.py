@@ -225,7 +225,12 @@ def test_a_world_whose_outcome_is_an_input_is_refused() -> None:
     gw = _gateway(_signal_sensitive)
     with pytest.raises(WorldIntegrityError) as exc:
         _compile(data, gw)
-    assert "no actions" in str(exc.value)
+    # Diagnosed at its cause: the branch condition IS the answer.
+    assert "an uncertainty writes the answer" in str(exc.value)
+    details = exc.value.details
+    assert details["failure"] == "uncertainty_writes_terminal"
+    assert details["terminal terms written by an uncertainty"] == ["rate_decision"]
+    assert details["producers by terminal term"] == {"rate_decision": []}
     assert exc.value.details.get("recompilable") is True
 
 
@@ -276,12 +281,10 @@ def test_a_world_full_of_actions_that_cannot_reach_the_outcome_is_refused() -> N
     gw = _gateway(_signal_sensitive)
     with pytest.raises(WorldIntegrityError) as exc:
         _compile(data, gw)
-    assert "the outcome is an input" in str(exc.value)
+    assert "an uncertainty writes the answer" in str(exc.value)
     details = exc.value.details
-    assert details["terminal reads fields"] == ["rate_decision"]
-    assert "rate_decision" not in details["fields any action can write"]
-    # The refusal names exactly which terms were supplied instead of produced.
-    assert details["terminal terms supplied by uncertainty instead"] == ["rate_decision"]
+    assert details["failure"] == "uncertainty_writes_terminal"
+    assert details["terminal terms written by an uncertainty"] == ["rate_decision"]
     assert details.get("recompilable") is True
 
 
@@ -336,3 +339,367 @@ def test_the_schedule_is_serializable_for_the_trace_contract() -> None:
         # Every invocation names its cause and its effect on the world.
         assert d.wake_reason
         assert d.validation_status in ("started", "executed", "rejected", "failed", "wait")
+
+
+def test_the_environment_may_not_announce_the_answer_before_anyone_acts() -> None:
+    """The third shape of the same defect, taken from a live Bank of England run.
+
+    That world compiled a real actor with a real action, and also a scheduled process
+    node carrying ``set_field(<the terminal term>, True)`` with a literal value and no
+    entry condition. The node fired first, the terminal was already decided, and the
+    actor — woken afterwards — noted that the thing had happened and waited. The
+    reported forecast was 1.0000 from zero producing actions, and the outcome gate
+    passed it because *some* action could in principle have written the term.
+
+    A process that tallies what actors did is right and stays allowed; the difference is
+    whether it is gated on something an action writes.
+    """
+
+    from sworldmodel.errors import WorldIntegrityError
+
+    data = _split_world()
+    data["world_spec"]["fields"].append(
+        {"field_id": "signal_given", "value_type": "bool", "initial": False}
+    )
+    data["world_spec"]["terminal"]["yes_when"] = {
+        "op": "equals",
+        "args": [{"op": "field", "args": ["signal_given"]}, True],
+    }
+    # An action can write the term — so the previous gate is satisfied...
+    data["world_spec"]["actions"].append(
+        {
+            "action_id": "give_signal",
+            "meaning": "say it publicly",
+            "eligible_actors": ["*"],
+            "required_authority": [],
+            "parameters": [],
+            "effects": [{"op": "set_field", "field": "signal_given", "value": True}],
+            "evidence_claim_ids": [],
+        }
+    )
+    # ...but the calendar writes it too, unconditionally, and gets there first.
+    data["world_spec"]["process"]["nodes"][0]["effects"] = [
+        {"op": "set_field", "field": "signal_given", "value": True}
+    ]
+
+    gw = _gateway(_signal_sensitive)
+    with pytest.raises(WorldIntegrityError) as exc:
+        _compile(data, gw)
+    assert "the environment writes the answer" in str(exc.value)
+    assert exc.value.details["terms preset by the environment"] == ["signal_given"]
+    assert exc.value.details.get("recompilable") is True
+
+
+def test_every_terminal_term_names_what_actually_wrote_it() -> None:
+    """The runtime half of producer lineage.
+
+    The compile-time gate asks whether something *could* write each terminal term. This
+    walks the branch's own ledger and names what did: the event, the actor behind it and
+    its causal parents. A world spec cannot satisfy this by looking plausible.
+    """
+
+    from sworldmodel.engine import terminal_lineage
+
+    gw = _gateway(_signal_sensitive)
+    contract, compiled = _compile(_split_world(), gw)
+    result = run(compiled, gw, seed=0)
+
+    for branch_id, world in result.final_worlds.items():
+        lineage = terminal_lineage(world, compiled.spec.terminal)
+        assert lineage, branch_id
+        for term in lineage:
+            assert not term["unproduced"], (branch_id, term["terminal_term"])
+            # The positions the terminal counts were written by the actors themselves.
+            assert term["produced_by_an_actor"], (branch_id, term["terminal_term"])
+            for writer in term["written_by"]:
+                assert writer["event_id"] and writer["kind"]
+
+
+def test_an_operational_process_that_accumulates_output_is_not_an_announcement() -> None:
+    """The gate above must not refuse the world it exists to permit.
+
+    A production line that adds units per shift writes the same terminal term as a
+    process node that declares the answer — but accumulating toward a threshold is how
+    throughput is honestly modelled, and the question is whether the quantity is
+    *reached* or *asserted*. Only `set_field` to a literal is an announcement.
+    """
+
+    data = _split_world()
+    data["world_spec"]["fields"].append(
+        {"field_id": "units_built", "value_type": "number", "initial": 0}
+    )
+    data["world_spec"]["terminal"]["yes_when"] = {
+        "op": "greater_than",
+        "args": [{"op": "field", "args": ["units_built"]}, 100],
+    }
+    data["world_spec"]["actions"].append(
+        {
+            "action_id": "authorize_overtime",
+            "meaning": "add a shift",
+            "eligible_actors": ["*"],
+            "required_authority": [],
+            "parameters": [],
+            "effects": [{"op": "adjust_field", "field": "units_built", "amount": 10}],
+            "evidence_claim_ids": [],
+        }
+    )
+    data["world_spec"]["external_processes"] = [
+        {
+            "process_id": "assembly_line",
+            "description": "the line builds a fixed number of units per shift",
+            "occurrences": [
+                {
+                    "at": "2026-06-01T00:00:00+00:00",
+                    "description": "a shift",
+                    "effects": [{"op": "adjust_field", "field": "units_built", "amount": 40}],
+                }
+            ],
+            "evidence_claim_ids": [],
+        }
+    ]
+
+    gw = _gateway(_signal_sensitive)
+    _, compiled = _compile(data, gw)  # must not raise
+    producers = compiled.spec.external_processes
+    assert producers and producers[0].process_id == "assembly_line"
+
+
+def test_the_pre_rollout_review_can_never_kill_a_run_that_passed_the_gates() -> None:
+    """It is advisory, and it runs after every mechanical gate has already passed.
+
+    A fault here can therefore only ever destroy a run that was otherwise sound — which
+    is what happened: a live Bank of England run compiled a real world, cleared every
+    gate, and died in the review's own summary helper because a compiled `at` is an ISO
+    string and the helper assumed a datetime. An opinion about a world must not be able
+    to stop it.
+    """
+
+    from sworldmodel.world_review import _when, review_world
+
+    # Compiled times arrive as ISO strings, not datetimes. Both must render.
+    assert _when("2026-06-25T00:00:00+00:00") == "2026-06-25T00:00:00+00:00"
+    assert _when(AS_OF) == AS_OF.isoformat()
+    assert _when(None) is None and _when("") is None
+
+    class Malformed:
+        @property
+        def spec(self) -> object:
+            raise RuntimeError("compiled world is malformed")
+
+    review = review_world(Malformed(), None, None, question="q", evidence_render="")
+    assert "could not run" in review.error
+    assert not review.should_repair  # a review that did not happen demands no repair
+
+
+def test_a_terminal_that_reads_no_world_state_is_refused() -> None:
+    """The limiting case, and it used to pass in silence.
+
+    With no terms identified there are no orphans, so `yes_when = const(true)` — the
+    answer written as a constant — satisfied the very gate that exists to forbid it.
+    Allowing actor-free worlds exposed this, because the checks either side of it are
+    rightly conditioned on there being actors.
+    """
+
+    from sworldmodel.errors import WorldIntegrityError
+
+    for hardcoded in (
+        {"op": "const", "args": [True]},
+        {"op": "before", "args": [{"op": "now", "args": []}, {"op": "horizon", "args": []}]},
+    ):
+        data = _split_world()
+        data["world_spec"]["terminal"]["yes_when"] = hardcoded
+        gw = _gateway(_signal_sensitive)
+        with pytest.raises(WorldIntegrityError) as exc:
+            _compile(data, gw)
+        assert "reads no world state" in str(exc.value)
+        assert exc.value.details["failure"] == "terminal_reads_no_world_state"
+
+
+def test_terminal_terms_beyond_plain_fields_are_recognised_and_matched() -> None:
+    """`stage`, `event_count`, `resource` and `document_field` are all offered to the
+    compiler as terminal operators. Reading only `field` and the collection aggregates
+    had it both ways: those terminals named no terms, so an actor-free world passed
+    vacuously, while a world with actors was refused and told its actors could not
+    reach terms that had never been identified.
+
+    A document field is also kept distinct from a world field of the same name, because
+    the evaluator keeps them distinct — otherwise writing one satisfies a read of the
+    other.
+    """
+
+    from sworldmodel.world_compiler import _effect_produces, _expr_terms
+    from sworldmodel.worldspec import Effect, Expr
+
+    assert _expr_terms(Expr("stage", ())) == {"stage:"}
+    assert _expr_terms(Expr("event_count", ("signature",))) == {"event:signature"}
+    assert _expr_terms(Expr("resource", ("votes", "board"))) == {"resource:votes"}
+    assert _expr_terms(Expr("document_field", ("treaty", "signed"))) == {"document:treaty.signed"}
+
+    assert _effect_produces(Effect("create_event", (("event_type", "signature"),))) == {
+        "event:signature"
+    }
+    assert _effect_produces(Effect("transfer_resource", (("resource", "votes"),))) == {
+        "resource:votes"
+    }
+    # A document field is not the world field of the same name.
+    doc = _effect_produces(
+        Effect("create_or_update_document", (("document", "treaty"), ("fields", {"signed": True})))
+    )
+    assert doc == {"document:treaty.signed"}
+    assert "field:signed" not in doc
+
+
+def test_an_expression_the_evaluator_cannot_run_is_caught_at_compile_time() -> None:
+    """The evaluator raises on an unknown operator *while evaluating* — for a terminal,
+    that is while finalizing a branch, after research, after compilation, after every
+    actor has been invoked. A live Bank of England run died there on `{"op": "false"}`,
+    six minutes in, with a ValueError and no diagnosis.
+
+    Checking the whole program up front makes the same mistake cost one recompile.
+    """
+
+    from sworldmodel.errors import WorldIntegrityError
+    from sworldmodel.worldspec import parse_expr
+
+    # `true`/`false` are how a constant gets written by accident, and are read as one.
+    assert parse_expr({"op": "false"}).op == "const"
+    assert parse_expr({"op": "false"}).args == (False,)
+    assert parse_expr({"op": "true"}).args == (True,)
+
+    data = _split_world()
+    data["world_spec"]["terminal"]["unresolved_when"] = {"op": "approximately", "args": [1]}
+    gw = _gateway(_signal_sensitive)
+    with pytest.raises(WorldIntegrityError) as exc:
+        _compile(data, gw)
+    assert "cannot evaluate" in str(exc.value)
+    assert exc.value.details["failure"] == "unknown_expression_operator"
+    assert "approximately" in exc.value.details["unknown operators"]
+    assert exc.value.details.get("recompilable") is True
+
+
+def test_an_uncertainty_may_not_write_a_term_the_terminal_reads() -> None:
+    """The gap a live Bank of England run walked straight through.
+
+    The compiler declared an uncertainty literally named `bailey_choice_to_signal` whose
+    branch effects set `bailey_signaled_support` — the same field the actor's own action
+    writes. Because the action wrote it too there was no orphan, so the earlier check,
+    which only fired for terms nothing else wrote, passed the world. Both branches then
+    resolved YES, including the one whose branch condition was "no", for a reported
+    probability of 1.0000 with bounds [1.0000, 1.0000]. The actor's own decision had
+    been modelled as an exogenous coin flip and then overruled by the actor.
+
+    An uncertainty sets what the world does TO the actors. It never writes the answer,
+    whether or not something else writes it as well.
+    """
+
+    from sworldmodel.errors import WorldIntegrityError
+
+    data = _split_world()
+    data["world_spec"]["fields"].append(
+        {"field_id": "signaled", "value_type": "bool", "initial": False}
+    )
+    data["world_spec"]["terminal"]["yes_when"] = {
+        "op": "equals",
+        "args": [{"op": "field", "args": ["signaled"]}, True],
+    }
+    # An action writes it — so the orphan check is satisfied ...
+    data["world_spec"]["actions"].append(
+        {
+            "action_id": "signal",
+            "meaning": "say it publicly",
+            "eligible_actors": ["*"],
+            "effects": [{"op": "set_field", "field": "signaled", "value": True}],
+            "evidence_claim_ids": [],
+        }
+    )
+    # ... and the branch condition writes it too, which is the defect.
+    data["uncertainties"] = [
+        {
+            "variable": "choice_to_signal",
+            "why_unknown": "he has not said",
+            "reversal_capable": True,
+            "outcomes": [
+                {
+                    "value": "yes",
+                    "weight": 0.7,
+                    "provenance": "symmetric_ignorance_assumption",
+                    "field_effects": [["signaled", True]],
+                },
+                {
+                    "value": "no",
+                    "weight": 0.3,
+                    "provenance": "symmetric_ignorance_assumption",
+                    "field_effects": [["signaled", False]],
+                },
+            ],
+        }
+    ]
+
+    gw = _gateway(_signal_sensitive)
+    with pytest.raises(WorldIntegrityError) as exc:
+        _compile(data, gw)
+    assert exc.value.details["failure"] == "uncertainty_writes_terminal"
+    assert exc.value.details["terminal terms written by an uncertainty"] == ["signaled"]
+
+
+def test_a_terminal_term_nothing_writes_at_all_is_still_reported_as_an_orphan() -> None:
+    """The stricter uncertainty rule must not hide the plainer defect beneath it."""
+
+    from sworldmodel.errors import WorldIntegrityError
+
+    data = _split_world()
+    data["world_spec"]["fields"].append(
+        {"field_id": "never_written", "value_type": "bool", "initial": False}
+    )
+    data["world_spec"]["terminal"]["yes_when"] = {
+        "op": "equals",
+        "args": [{"op": "field", "args": ["never_written"]}, True],
+    }
+    data["uncertainties"] = []  # nothing supplies it either
+
+    gw = _gateway(_signal_sensitive)
+    with pytest.raises(WorldIntegrityError) as exc:
+        _compile(data, gw)
+    assert "the outcome is an input" in str(exc.value)
+    assert exc.value.details["terminal terms with no producer"] == ["never_written"]
+
+
+def test_a_question_the_record_has_already_answered_compiles_from_its_citations() -> None:
+    """Asked in July whether the EU and Mercosur would sign before October, a live run
+    found the Commission's own page, Wikipedia and five other sources recording that they
+    signed on 17 January. Nothing inside the window produces that. Demanding a producer
+    would force a future signing to be invented for a signing that already happened, and
+    refusing would refuse the one question the research had already answered.
+
+    The citation is the whole rule: an initial value carrying claim ids is a fact the
+    record establishes, and the same value carrying none is the compiler asserting an
+    outcome."""
+
+    from sworldmodel.errors import WorldIntegrityError
+    from sworldmodel.world_compiler import terminal_producers
+
+    data = _split_world()
+    cited = data["claims"][0]["id"]
+    data["world_spec"]["documents"] = [
+        {
+            "document_id": "agreement",
+            "fields": {"signed": True},
+            "evidence_claim_ids": [cited],
+        }
+    ]
+    data["world_spec"]["terminal"]["yes_when"] = {
+        "op": "equals",
+        "args": [{"op": "document_field", "args": ["agreement", "signed"]}, True],
+    }
+    data["uncertainties"] = []
+
+    gw = _gateway(_signal_sensitive)
+    _, compiled = _compile(data, gw)
+    producers = terminal_producers(compiled.spec)
+    assert producers["document:agreement.signed"] == (f"evidence:{cited}",)
+
+    # Strip the citation and the same world is the compiler asserting the answer.
+    data["world_spec"]["documents"][0]["evidence_claim_ids"] = []
+    with pytest.raises(WorldIntegrityError) as exc:
+        _compile(data, _gateway(_signal_sensitive))
+    assert exc.value.details["failure"] == "terminal_has_no_producer"

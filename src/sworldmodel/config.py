@@ -32,6 +32,13 @@ class ForecastConfig:
     max_structures: int = 3
     run_label: str = "run"
     budget: RunBudget = field(default_factory=RunBudget)
+    # A ceiling on the whole compile-and-repair phase. Repair stops when it stops making
+    # progress, which is the right rule and has no clock in it: a question whose compiler
+    # keeps producing genuinely different worlds can repair for as long as the research
+    # backend will feed it. A live OPEC+ run spent forty minutes there and was killed
+    # from outside with nothing written. Reaching this stops repairing and refuses with
+    # the last gate's own diagnosis, which is a result; being killed is not.
+    max_compile_seconds: float = 900.0
 
     @classmethod
     def live(
@@ -41,6 +48,7 @@ class ForecastConfig:
         trace_dir: Path | None = None,
         max_branches: int = 8,
         max_structures: int = 3,
+        max_compile_seconds: float = 900.0,
         research_budget: object | None = None,
         transport: object | None = None,
         now: datetime | None = None,
@@ -68,6 +76,7 @@ class ForecastConfig:
             trace_dir=trace_dir,
             max_branches=max_branches,
             max_structures=max_structures,
+            max_compile_seconds=max_compile_seconds,
             budget=budget or RunBudget(),
         )
 

@@ -144,3 +144,135 @@ def test_temporal_operators() -> None:
 def test_numeric_string_compares_equal_to_number() -> None:
     ctx = _Ctx(fields={"n": "5"})
     assert evaluate(_e({"op": "equals", "args": [{"field": "n"}, 5]}), ctx) is True
+
+
+# --------------------------------------------------------------------------- #
+# Effect parameters carrying a computed value
+# --------------------------------------------------------------------------- #
+
+
+def test_an_effect_value_that_is_an_expression_is_computed_not_stored() -> None:
+    """A live Tesla run compiled a world with no invented executive — deliveries were
+    produced by a delivery-cycle process, correctly — and the process set the quarter's
+    deliveries to ``Q1_deliveries * demand_multiplier``. The effect wrote the *formula*
+    into the field. The terminal then compared a dict against 400,000, could not, and
+    the forecast came back 1.0 unresolved on both branches: a hollow answer from a world
+    that held every number it needed."""
+
+    from sworldmodel.effects import _resolve
+
+    ctx = _Ctx(fields={"Q1_deliveries": 358023, "demand_multiplier": 1.2})
+    computed = _resolve(
+        {"op": "multiply", "args": [{"field": "Q1_deliveries"}, {"field": "demand_multiplier"}]},
+        {},
+        ctx,  # type: ignore[arg-type]
+    )
+    assert computed == 358023 * 1.2
+    assert evaluate(_e({"op": "greater_than", "args": [computed, 400000]}), ctx) is True
+
+    # Nested inside a payload, and reached through a list, on the same rule.
+    payload = _resolve(
+        {"fields": {"deliveries": {"field": "Q1_deliveries"}}, "seen": [{"field": "unset"}]},
+        {},
+        ctx,  # type: ignore[arg-type]
+    )
+    assert payload == {"fields": {"deliveries": 358023}, "seen": [None]}
+
+
+def test_a_payload_that_merely_looks_like_an_expression_stays_data() -> None:
+    """Recognition is closed over the operators the evaluator implements, so a document
+    field named ``op`` is still a document field."""
+
+    from sworldmodel.effects import _resolve
+
+    ctx = _Ctx(fields={})
+    data = {"op": "sign the agreement", "args": ["EU", "Mercosur"]}
+    assert _resolve(data, {}, ctx) == data  # type: ignore[arg-type]
+    assert _resolve({"field": "x", "note": "y"}, {}, ctx) == {  # type: ignore[arg-type]
+        "field": "x",
+        "note": "y",
+    }
+
+
+def test_an_undeterminable_effect_value_is_no_value_never_a_coerced_zero() -> None:
+    """Writing zero would state a quantity nobody produced; writing the formula would
+    state a dict as the field's value. Neither is the truth, which is that the world has
+    not determined it."""
+
+    from sworldmodel.effects import _resolve
+
+    ctx = _Ctx(fields={"known": 4})
+    undetermined = {"op": "multiply", "args": [{"field": "known"}, {"field": "never_set"}]}
+    assert _resolve(undetermined, {}, ctx) is None  # type: ignore[arg-type]
+
+
+def test_an_ordinary_payload_key_that_is_also_an_operator_stays_data() -> None:
+    """``count``, ``sum``, ``min`` and ``max`` are operators and also ordinary names for
+    a thing a document records. Reading ``{"count": 3}`` as the aggregate ``count(3)``
+    would quietly turn a recorded number into nothing."""
+
+    from sworldmodel.effects import _resolve
+
+    ctx = _Ctx(fields={"n": 7})
+    for key in ("count", "sum", "values", "min", "max", "exists", "contains"):
+        assert _resolve({key: 3}, {}, ctx) == {key: 3}  # type: ignore[arg-type]
+    # The explicit form is unambiguous and is still computed.
+    assert _resolve({"op": "add", "args": [{"field": "n"}, 1]}, {}, ctx) == 8  # type: ignore[arg-type]
+
+
+# --------------------------------------------------------------------------- #
+# A world that can never resolve
+# --------------------------------------------------------------------------- #
+
+
+def test_an_unresolved_condition_that_is_always_true_is_detected() -> None:
+    """A live Banco de Mexico run compiled
+    ``or(not_equals(board_decision,'hold'), not_equals(board_decision,'cut'))`` as its
+    unresolved condition. No value equals both, so one disjunct is always true: every
+    branch was unresolved before anything happened, and twenty-seven actor calls across
+    four branches could not have changed it. The compiler meant ``and``."""
+
+    from sworldmodel.world_compiler import _is_identically_true
+
+    def ex(o: dict) -> object:
+        return _e(o)
+
+    banxico = {
+        "op": "or",
+        "args": [
+            {"op": "not_equals", "args": [{"field": "d"}, "hold"]},
+            {"op": "not_equals", "args": [{"field": "d"}, "cut"]},
+        ],
+    }
+    assert _is_identically_true(ex(banxico))
+    assert _is_identically_true(ex({"op": "const", "args": [True]}))
+    assert _is_identically_true(
+        ex(
+            {
+                "op": "or",
+                "args": [
+                    {"op": "equals", "args": [{"field": "x"}, 1]},
+                    {"op": "not", "args": [{"op": "equals", "args": [{"field": "x"}, 1]}]},
+                ],
+            }
+        )
+    )
+
+    # What the compiler meant, and other honest unresolved conditions, are untouched.
+    meant = {**banxico, "op": "and"}
+    assert not _is_identically_true(ex(meant))
+    assert not _is_identically_true(ex({"op": "equals", "args": [{"field": "x"}, None]}))
+    assert not _is_identically_true(
+        ex({"op": "not", "args": [{"op": "equals", "args": [{"field": "s"}, "done"]}]})
+    )
+    assert not _is_identically_true(_e({"op": "const", "args": [False]}))
+
+    # Sound rather than complete: an operator a probe cannot decide is not flagged.
+    unprobeable = {
+        "op": "or",
+        "args": [
+            {"op": "not_equals", "args": [{"op": "count", "args": ["v"]}, 1]},
+            {"op": "not_equals", "args": [{"op": "count", "args": ["v"]}, 2]},
+        ],
+    }
+    assert not _is_identically_true(ex(unprobeable))

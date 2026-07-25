@@ -342,3 +342,92 @@ def test_the_runtime_carries_no_notion_of_representation_scale_behavior() -> Non
     entity = compiled.base_world.entities[0]
     assert entity.representation_scale == "organization"
     assert entity.represents_count == 4200
+
+
+def test_both_discovery_channels_get_their_share_of_the_query_budget() -> None:
+    """Authoritative discovery holds a reserve; it does not hold everything.
+
+    The reserve was documented as protecting official-domain queries and implemented as
+    an elif chain that drained them first, which made the general branch's cap
+    unreachable and starved the channel it was meant to bound. A live run spent all ten
+    of its queries on official domains, was blocked or 403'd on most, and never issued
+    any of its eleven queued news queries.
+    """
+
+    from collections import Counter, deque
+
+    from sworldmodel.live_research import (
+        LiveResearchBackend,
+        ResearchBudget,
+        _QueryQueues,
+        _Session,
+    )
+
+    backend = LiveResearchBackend.__new__(LiveResearchBackend)
+    backend.budget = ResearchBudget(max_queries=20, max_queries_per_round=20)
+
+    queues = _QueryQueues()
+    queues.authoritative = deque(f"auth{i}" for i in range(12))
+    queues.general = deque(f"gen{i}" for i in range(12))
+    picked = backend._next_queries(_Session(queues=queues, seen_urls=set(), seen_hashes=set()))
+    channels = Counter(channel for channel, _ in picked)
+    assert channels["authoritative"] == 10
+    assert channels["general"] == 10, "the general channel was starved"
+
+    # Whichever channel has no work leaves its share to the other.
+    only_general = _QueryQueues()
+    only_general.general = deque(f"gen{i}" for i in range(20))
+    picked = backend._next_queries(
+        _Session(queues=only_general, seen_urls=set(), seen_hashes=set())
+    )
+    assert Counter(c for c, _ in picked)["general"] == 20
+
+
+# The ten capabilities the reconciliation with PR #4 had to leave exactly one of. Each
+# is (capability, module, symbol). Asserting the symbol exists is the easy half; the
+# point is the second half, which asserts nothing *else* in the package defines a symbol
+# that would be a second one.
+_CANONICAL = (
+    ("forecast entry point", "api", "run_forecast"),
+    ("live research backend", "live_research", "LiveResearchBackend"),
+    ("evidence store", "evidence", "EvidenceStore"),
+    ("repair system", "repair", "plan_repair"),
+    ("world compiler", "world_compiler", "compile_world"),
+    ("actor grounding", "grounding", "assess_actor_grounding"),
+    ("producer-lineage gate", "world_compiler", "enforce_outcome_is_produced"),
+    ("event-driven engine", "engine", "run"),
+    ("terminal evaluator", "engine", "evaluate_terminal"),
+    ("diagnosis", "diagnosis", "RunDiagnosis"),
+)
+
+
+def test_each_capability_has_exactly_one_implementation() -> None:
+    """No duplicate module, alternate runtime, compatibility wrapper or parallel system.
+
+    A second implementation does not announce itself by name. What it looks like in a
+    package this size is a second module defining a symbol that plays the same part —
+    another `compile_world`, another `run_forecast`, another backend class — so the
+    check is that each of these names is defined in exactly one place.
+    """
+
+    import importlib
+
+    defined: dict[str, list[str]] = {}
+    for path in _python_sources():
+        tree = ast.parse(path.read_text())
+        for node in tree.body:  # top level only: a local helper is not an implementation
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                defined.setdefault(node.name, []).append(path.stem)
+
+    for capability, module, symbol in _CANONICAL:
+        where = defined.get(symbol, [])
+        assert where == [module], f"{capability}: {symbol} defined in {where}, expected [{module}]"
+        assert hasattr(importlib.import_module(f"sworldmodel.{module}"), symbol)
+
+    # A Protocol is an interface, not a second backend. Anything else claiming to be a
+    # research backend would be one.
+    backends = [n for n in defined if n.endswith("ResearchBackend")]
+    assert sorted(backends) == ["LiveResearchBackend", "ResearchBackend"], backends
+    from sworldmodel.research import ResearchBackend
+
+    assert getattr(ResearchBackend, "_is_protocol", False), "ResearchBackend must be a Protocol"

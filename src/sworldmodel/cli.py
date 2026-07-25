@@ -18,20 +18,47 @@ and what it returned.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
+import signal
 import sys
 import time
 from datetime import datetime
 from pathlib import Path
+from types import FrameType
 from typing import Any
 
 from .api import run_forecast
 from .config import ForecastConfig
+from .diagnosis import ForecastRefused, RunDiagnosis
 from .engine import RunBudget
+from .errors import RunInterrupted
 from .ids import canonical_json
 from .live_research import ResearchBudget
 from .models import ForecastResult
+from .research import ResearchBundle
 from .tracing import TraceContext
+
+
+def _install_stop_handler() -> None:
+    """Make an external stop arrive as an exception rather than as process death.
+
+    `timeout 2400` sends SIGTERM, and the default handler kills the process where it
+    stands: a live OPEC+ run spent forty minutes and left one line of output and no
+    artifacts at all — no trace, no diagnosis, nothing to read. Raising instead lets the
+    ordinary refusal path run and write what the run had learned.
+    """
+
+    def stop(signum: int, _frame: FrameType | None) -> None:
+        raise RunInterrupted(
+            f"the run was stopped by signal {signal.Signals(signum).name} before it "
+            "finished; the record below is what it had reached"
+        )
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        # Not the main thread, or a platform without the signal: nothing to install.
+        with contextlib.suppress(ValueError, OSError):
+            signal.signal(sig, stop)
 
 
 def _print_summary(result: ForecastResult, forecast_hash: str, out_dir: Path | None) -> None:
@@ -185,7 +212,53 @@ def cmd_forecast(args: argparse.Namespace) -> int:
         return 2
 
     start = time.monotonic()
-    result, ctx = run_forecast(args.question, as_of, horizon, config)
+    _install_stop_handler()
+    try:
+        result, ctx = run_forecast(args.question, as_of, horizon, config)
+    except RunInterrupted as stopped:
+        # A stop is a way a run ends, so it owes the same record as any other. Whatever
+        # stage it reached, the bundle and repair log it had are gone with the stack, so
+        # this writes what is still reachable rather than nothing at all.
+        wall = time.monotonic() - start
+        diagnosis = RunDiagnosis(
+            question=args.question,
+            as_of=as_of,
+            horizon=horizon,
+            failure=stopped,
+            failure_stage="interrupted",
+            wall_seconds=wall,
+            model_calls=config.gateway.call_count,
+        )
+        if out is not None:
+            out.mkdir(parents=True, exist_ok=True)
+            (out / "diagnosis.json").write_text(canonical_json(diagnosis.as_dict()) + "\n")
+        print(f"STOPPED after {wall:.0f}s: {stopped}", file=sys.stderr)
+        for cause in diagnosis.root_cause():
+            print(f"  root cause: {cause['cause']} — {cause['why']}", file=sys.stderr)
+        return 124
+    except ForecastRefused as refusal:
+        # A refusal is a result about the world-supply pipeline, and it is the result
+        # most worth reading. Writing only a traceback made the four questions that
+        # refused the least diagnosable part of the system.
+        wall = time.monotonic() - start
+        diagnosis = RunDiagnosis(
+            question=args.question,
+            as_of=as_of,
+            horizon=horizon,
+            bundle=refusal.bundle,
+            repair_log=refusal.repair_log,
+            failure=refusal.__cause__ or refusal,
+            failure_stage=refusal.stage,
+            wall_seconds=wall,
+            model_calls=config.gateway.call_count,
+        )
+        _write_diagnosis(out, diagnosis, refusal)
+        print(f"REFUSED at {refusal.stage}: {refusal.__cause__ or refusal}", file=sys.stderr)
+        for cause in diagnosis.root_cause():
+            print(f"  root cause: {cause['cause']} — {cause['why']}", file=sys.stderr)
+        if out is not None:
+            print(f"  diagnosis: {out / 'diagnosis.json'}", file=sys.stderr)
+        return 1
     wall = time.monotonic() - start
 
     forecast_hash = ""
@@ -193,9 +266,70 @@ def cmd_forecast(args: argparse.Namespace) -> int:
     if out is not None:
         forecast_hash = ctx.write(out, sealed_names=args.seal, gateway_calls=config.gateway.calls)
         (out / "run_audit.json").write_text(canonical_json(audit) + "\n")
+        diagnosis = RunDiagnosis(
+            question=args.question,
+            as_of=as_of,
+            horizon=horizon,
+            bundle=ctx.bundle,
+            compiled=ctx.compiled,
+            run_result=ctx.run_result,
+            repair_log=ctx.repair_log,
+            world_review=ctx.world_review,
+            wall_seconds=wall,
+            model_calls=config.gateway.call_count,
+        )
+        (out / "diagnosis.json").write_text(canonical_json(diagnosis.as_dict()) + "\n")
+        # The same three artifacts a refusal writes. A completed run is the one whose
+        # world most needs reading — a refusal at least says where it stopped, while a
+        # finished forecast can only be checked against the world that produced it.
+        (out / "compiled_world.json").write_text(
+            canonical_json(diagnosis.world_compilation()) + "\n"
+        )
+        if ctx.bundle is not None:
+            (out / "research_trace.json").write_text(
+                canonical_json(ctx.bundle.live_trace or {}) + "\n"
+            )
+            (out / "evidence_store.json").write_text(
+                canonical_json(_evidence_records(ctx.bundle)) + "\n"
+            )
     _print_summary(result, forecast_hash, out)
     _print_audit(audit)
     return 0
+
+
+def _write_diagnosis(out: Path | None, diagnosis: RunDiagnosis, refusal: ForecastRefused) -> None:
+    """Write everything the refused run learned before it stopped."""
+
+    if out is None:
+        return
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "diagnosis.json").write_text(canonical_json(diagnosis.as_dict()) + "\n")
+    if refusal.bundle is not None:
+        (out / "research_trace.json").write_text(
+            canonical_json(refusal.bundle.live_trace or {}) + "\n"
+        )
+        (out / "evidence_store.json").write_text(
+            canonical_json(_evidence_records(refusal.bundle)) + "\n"
+        )
+        (out / "compiled_world.json").write_text(
+            canonical_json(diagnosis.world_compilation()) + "\n"
+        )
+
+
+def _evidence_records(bundle: ResearchBundle) -> list[dict[str, Any]]:
+    return [
+        {
+            "id": c.id,
+            "proposition": c.proposition,
+            "normalized_value": c.normalized_value,
+            "entities": list(c.entities),
+            "epistemic_type": c.epistemic_type.value,
+            "source_url": c.source_url,
+            "supporting_excerpt": c.supporting_excerpt,
+            "available_at": c.available_at.isoformat(),
+        }
+        for c in bundle.evidence_store.all()
+    ]
 
 
 # ---------------------------------------------------------------------------

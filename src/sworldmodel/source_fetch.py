@@ -35,6 +35,42 @@ _TAG = re.compile(r"<[^>]+>")
 _WS = re.compile(r"[ \t\r\f\v]+")
 _MULTINL = re.compile(r"\n{3,}")
 _TITLE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
+
+# Page furniture: elements that exist on every site and carry no claim about anything.
+#
+# Deliberately a short list of well-formed tag pairs. Three things are *not* here, each
+# because it destroyed real pages:
+#
+#   `form`   — an ASP.NET WebForms page puts the entire <body> inside one <form>, which
+#              is the shape many government and central-bank sites still use. Stripping
+#              it under DOTALL extracted those pages to the empty string.
+#   `header` — a <header> inside an <article> is the headline and the dateline, and the
+#              dateline is exactly what the claim verifier looks for near a quote.
+#   role/class matching — those patterns closed on `</[a-z]+>`, which matches whatever
+#              closing tag comes first rather than the element's own. A cookie-policy
+#              wrapper therefore ran past its own heading and swallowed the document.
+#
+# What remains cannot span the body of a page, and :func:`extract_text` falls back to
+# the unfiltered text if this ever removes too much anyway.
+_CHROME = re.compile(
+    r"<(nav|footer|aside|noscript|svg|select|button)\b[^>]*>.*?</\1>",
+    re.IGNORECASE | re.DOTALL,
+)
+
+# If filtering leaves less than this share of the readable text, it removed the document
+# rather than its furniture, and the unfiltered text is used instead.
+_MIN_KEPT_SHARE = 0.35
+
+# Where a document's own content lives, most specific first. Non-greedy so a wrapper
+# does not swallow the footer, and checked for plausibility by the caller.
+# Only well-formed tag pairs. The role- and class-based variants terminated on
+# `</[a-z]+>`, which matches whichever closing tag comes first rather than the element's
+# own, so a "main content" region routinely turned out to be its first paragraph — and
+# hoisting one paragraph is worse than hoisting nothing.
+_MAIN_REGIONS = (
+    re.compile(r"<main\b[^>]*>.*?</main>", re.IGNORECASE | re.DOTALL),
+    re.compile(r"<article\b[^>]*>.*?</article>", re.IGNORECASE | re.DOTALL),
+)
 _META_TIME = re.compile(
     r'<meta[^>]+(?:property|name)=["\'](?:article:published_time|datePublished|pubdate|date)["\'][^>]*content=["\']([^"\']+)["\']',
     re.IGNORECASE,
@@ -118,9 +154,81 @@ def requires_archived_copy(as_of: datetime | None, now: datetime) -> bool:
     researching, the live page may have changed since, and only an archived capture at
     or before the cutoff demonstrates what it said. A nowcast (``as_of`` at or after the
     moment research runs, which is what "forecast from today" means) fetches live.
+
+    ``now`` must be the moment the *run* started, not the moment this call happens — see
+    :class:`RetrievalMode`.
     """
 
     return as_of is not None and as_of < now
+
+
+@dataclass(frozen=True)
+class RetrievalMode:
+    """Nowcast or pastcast, decided once and carried for the whole run.
+
+    Deciding this per fetch is a trap the previous acceptance run fell into from two
+    directions. A cutoff a few hours in the past silently turned an intended nowcast
+    into archive-only retrieval, and every un-archived official page was refused —
+    which then looked like a research-recall problem rather than the mode error it was.
+    And a cutoff set to "now" at launch flips to a pastcast the moment the clock passes
+    it, so the same run could fetch live pages early and demand archives later.
+
+    Fixing the comparison instant at process start removes both. It is not a tolerance
+    window: a genuine pastcast is exactly as strict as before, since its cutoff is long
+    past whenever the process happened to start.
+    """
+
+    as_of: datetime
+    started_at: datetime
+    archived_only: bool
+
+    @classmethod
+    def decide(cls, as_of: datetime, started_at: datetime) -> RetrievalMode:
+        return cls(
+            as_of=as_of,
+            started_at=started_at,
+            archived_only=requires_archived_copy(as_of, started_at),
+        )
+
+    @property
+    def name(self) -> str:
+        return "pastcast" if self.archived_only else "nowcast"
+
+    @property
+    def lag_seconds(self) -> float:
+        return (self.started_at - self.as_of).total_seconds()
+
+    @property
+    def admissible_sources(self) -> str:
+        if self.archived_only:
+            return (
+                "archived captures at or before the cutoff only; a URL with no such "
+                "capture is refused and never fetched live"
+            )
+        return "current pages, fetched live; claims published after the cutoff stay inadmissible"
+
+    def describe(self) -> str:
+        lag = self.lag_seconds  # positive when the run started AFTER the cutoff
+        when = (
+            f"{abs(lag) / 3600:.1f}h {'after' if lag > 0 else 'before'} the cutoff"
+            if abs(lag) >= 60
+            else "at the cutoff"
+        )
+        return (
+            f"RETRIEVAL MODE: {self.name.upper()} — cutoff {self.as_of.isoformat()}, "
+            f"run started {self.started_at.isoformat()} ({when}). "
+            f"Admissible: {self.admissible_sources}."
+        )
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "mode": self.name,
+            "as_of": self.as_of.isoformat(),
+            "process_started_at": self.started_at.isoformat(),
+            "cutoff_lag_seconds": self.lag_seconds,
+            "archived_captures_required": self.archived_only,
+            "admissible_sources": self.admissible_sources,
+        }
 
 
 def fetch_source(
@@ -302,12 +410,65 @@ def _refused(url: str, now: datetime, reason: str, *, fetched_url: str = "") -> 
 
 
 def extract_text(html: str) -> str:
-    without_scripts = _SCRIPT_STYLE.sub(" ", html)
-    without_tags = _TAG.sub("\n", without_scripts)
+    """The document's readable text, with the furniture removed and the body first.
+
+    This used to strip tags and return whatever fell out, in source order. On a modern
+    institutional site that means the first several thousand characters are a cookie
+    banner, a skip-link list and a mega-menu — and since the extractor reads a bounded
+    window, the model was handed navigation and asked what the page established. It
+    answered, correctly, that it established nothing: in one acceptance run every single
+    page from the Bank of England's site — the minutes, the Monetary Policy Report and
+    three speeches — yielded zero claims.
+
+    Two cheap, general steps fix it without a parser dependency. Chrome elements (nav,
+    header, footer, aside, forms, cookie dialogs) are dropped by tag and by the ARIA
+    roles that mark them. Then, if the markup labels its main content — ``<main>``,
+    ``role="main"``, ``<article>``, or the near-universal ``id/class`` containing
+    "content" — that region is hoisted to the front, so the window spends itself on the
+    document rather than on the site around it.
+    """
+
+    stripped = _SCRIPT_STYLE.sub(" ", html)
+    unfiltered = _to_text(stripped)
+
+    body = _CHROME.sub(" ", stripped)
+    main = _main_region(body)
+    if main:
+        # Move it, do not copy it. The extractor reads a bounded window of this text,
+        # so duplicating a long article spends more than half that window on the same
+        # words twice and pushes the tail out — the opposite of what hoisting is for.
+        # The remainder is kept after it, because a date, a byline or a breadcrumb can
+        # sit outside the main region and the verifier checks excerpts against all of it.
+        body = main + "\n\n" + body.replace(main, " ", 1)
+    text = _to_text(body)
+
+    # Filtering that removes most of the document removed the document. Falling back is
+    # not a heuristic about content — it is the difference between reading a page badly
+    # and reading nothing at all, and reading nothing is what produced zero claims.
+    if len(text) < len(unfiltered) * _MIN_KEPT_SHARE:
+        return unfiltered
+    return text
+
+
+def _to_text(html: str) -> str:
+    without_tags = _TAG.sub("\n", html)
     unescaped = _unescape(without_tags)
     lines = [_WS.sub(" ", line).strip() for line in unescaped.splitlines()]
     joined = "\n".join(line for line in lines if line)
     return _MULTINL.sub("\n\n", joined).strip()
+
+
+def _main_region(html: str) -> str:
+    """The labeled main-content region, if the markup declares one."""
+
+    for pattern in _MAIN_REGIONS:
+        m = pattern.search(html)
+        if m:
+            region = m.group(0)
+            # A wrapper that spans essentially the whole document has told us nothing.
+            if len(region) < len(html) * 0.95:
+                return region
+    return ""
 
 
 def extract_title(html: str) -> str:

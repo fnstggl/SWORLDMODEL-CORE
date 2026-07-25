@@ -20,6 +20,7 @@ from .errors import GatewayError
 from .gateway import GatewayRequest, GatewayResponse, ModelGateway
 from .http import HttpError, HttpTransport, UrllibTransport
 from .ids import prompt_hash
+from .jsonsalvage import salvage_json
 
 DEFAULT_BASE_URL = "https://api.deepseek.com"
 DEFAULT_MODEL = "deepseek-v4-flash"
@@ -34,6 +35,7 @@ DEFAULT_TEMPERATURES: dict[str, float] = {
     "compile_world_spec": 0.3,
     "interpret_novel": 0.2,
     "exclusion_challenge": 0.1,
+    "world_review": 0.2,
     "actor_decision": 0.7,
     "reflect": 0.5,
 }
@@ -48,6 +50,8 @@ DEFAULT_MAX_TOKENS: dict[str, int] = {
     "compile_world_spec": 16000,
     "interpret_novel": 2000,
     "exclusion_challenge": 800,
+    # Six judgements with a sentence of reasoning each, plus the model's own thinking.
+    "world_review": 3000,
     # An actor returns its plan disposition, plan update, intention, information needs,
     # commitments and revisit conditions — considerably more than a bare action.
     "actor_decision": 3000,
@@ -157,6 +161,46 @@ class DeepSeekGateway(ModelGateway):
             data, tokens_in, tokens_out, content = self._parse(resp.text)
             if data is None or not self._schema_ok(data, request.expected_keys):
                 truncated = self._looks_truncated(resp.text, content)
+                if truncated:
+                    # Salvage is the LAST resort, not the first.
+                    #
+                    # A recovered prefix is a real world with pieces missing — nine
+                    # entities become five, the `actors` key disappears entirely — and it
+                    # satisfies the schema check just as well as a complete one. Using it
+                    # while a larger budget is still available would silently simulate a
+                    # truncated roster. So retry with more room first, and fall back to
+                    # the prefix only when there is no room left; that still beats
+                    # discarding everything, which is how a provider limit came to be
+                    # reported as "no actors were compiled".
+                    room_left = body["max_tokens"] < self.max_output_tokens
+                    salvaged = salvage_json(content)
+                    if (
+                        not room_left
+                        and salvaged is not None
+                        and self._schema_ok(salvaged, request.expected_keys)
+                    ):
+                        validation_failures.append(
+                            f"truncated on attempt {attempt} with no output budget "
+                            "left; recovered the parsable prefix, which may be incomplete"
+                        )
+                        return GatewayResponse(
+                            task_kind=request.task_kind,
+                            data=salvaged,
+                            raw_text=content,
+                            model=self._model,
+                            params={
+                                "temperature": body["temperature"],
+                                "max_tokens": body["max_tokens"],
+                                "recovered_from_truncation": True,
+                            },
+                            seed=request.seed,
+                            prompt_hash=prompt_hash(request.prompt),
+                            tokens_in=tokens_in,
+                            tokens_out=tokens_out,
+                            retries=retries,
+                            validation_failures=tuple(validation_failures),
+                            latency_ms=latency,
+                        )
                 failure = (
                     f"{'truncated' if truncated else 'malformed/missing-keys'} on attempt {attempt}"
                 )
