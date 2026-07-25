@@ -17,7 +17,6 @@ import pytest
 
 from sworldmodel.semantic_lowering import LoweringGap, build_symbols, lower_plan
 from sworldmodel.semantic_plan import (
-    UNKNOWN,
     SemanticPlanError,
     parse_semantic_plan,
     validate_semantic_plan,
@@ -529,7 +528,6 @@ def test_the_lowered_world_clears_the_existing_gates_unchanged() -> None:
 
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from _fakes import ProgrammableGateway, build_bundle
-
     from sworldmodel.models import ResolutionContract
     from sworldmodel.world_compiler import compile_world
 
