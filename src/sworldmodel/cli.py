@@ -86,6 +86,25 @@ def _print_summary(result: ForecastResult, forecast_hash: str, out_dir: Path | N
         recs = ", ".join(f"{k}={v}" for k, v in b.records[:6])
         state = b.outcome if b.resolved else f"UNRESOLVED({b.unresolved_reason})"
         print(f"  - {b.branch_id} w={b.weight:.4f} [{recs}] -> {state}")
+    integ = result.integrity
+    if integ is not None:
+        before = (
+            "—"
+            if integ.probability_before_simulation is None
+            else (f"{integ.probability_before_simulation:.4f}")
+        )
+        after = (
+            "—"
+            if integ.probability_after_simulation is None
+            else (f"{integ.probability_after_simulation:.4f}")
+        )
+        print(
+            f"Integrity: p_before={before} -> p_after={after}  "
+            f"calibrated={integ.point_estimate_is_calibrated}"
+        )
+        if integ.ungrounded_variables:
+            print(f"  ungrounded weights: {integ.ungrounded_variables}")
+        print(f"  {integ.counterfactual_note}")
     if out_dir is not None:
         print(f"Artifacts: {out_dir}")
         if forecast_hash:
@@ -194,6 +213,9 @@ def cmd_forecast(args: argparse.Namespace) -> int:
 
     config = ForecastConfig.live(
         seed=args.seed,
+        # The trace directory reaches the pipeline so each stage can checkpoint into it
+        # as it completes. A later stage that dies then destroys nothing earlier.
+        trace_dir=out,
         max_branches=args.max_branches,
         max_structures=args.max_structures,
         research_budget=ResearchBudget(
@@ -275,6 +297,8 @@ def cmd_forecast(args: argparse.Namespace) -> int:
             run_result=ctx.run_result,
             repair_log=ctx.repair_log,
             world_review=ctx.world_review,
+            trajectory_audit=ctx.trajectory_audit,
+            forecast_integrity=result.integrity,
             wall_seconds=wall,
             model_calls=config.gateway.call_count,
         )
@@ -294,6 +318,12 @@ def cmd_forecast(args: argparse.Namespace) -> int:
             )
     _print_summary(result, forecast_hash, out)
     _print_audit(audit)
+    ta = ctx.trajectory_audit
+    if ta is not None:
+        print(f"\nTrajectory audit: {ta.classification}")
+        for f in ta.findings:
+            if f.severity in ("CRITICAL", "HIGH"):
+                print(f"  [{f.severity}] {f.key}: {f.finding}")
     return 0
 
 

@@ -184,6 +184,9 @@ class _BranchRun:
     decisions: list[ActorDecisionRecord]
     diagnostics: BranchDiagnostics
     failure: str = ""
+    # The terminal's answer for the initialized world, before anything simulated ran.
+    pre_resolved: bool = False
+    pre_outcome: str | None = None
 
 
 def run(
@@ -218,8 +221,32 @@ def run(
         diag = BranchDiagnostics()
         weight = BranchWeight(scenario.weight, scenario.provenance, scenario.provenance_detail)
         world = compiled.base_world.clone(new_branch_id=scenario.scenario_id, weight=weight)
+        pre_resolved = False
+        pre_outcome: str | None = None
         try:
             world = _seed_branch(world, compiled.spec, scenario, effects, ledger)
+            # PRE-SIMULATION OUTCOME. This is the exact point where the branch world is
+            # initialized but nothing has run. ``_seed_branch`` has (a) pushed the
+            # compiled calendar — process entry nodes, external occurrences, plan and
+            # commitment entries — onto the schedule *without firing any of it* (those
+            # only execute inside ``_event_loop``), and (b) applied this branch's
+            # hypothesis about its uncertain values inline: the scenario's
+            # ``release_data`` event is built and applied via ``world.apply`` right
+            # there, not queued through the event loop, so the branch condition fields
+            # are already in world state even when their public release date lies in
+            # the future. What follows from that release — deliveries, notices, actor
+            # decisions — is only *scheduled* at this point. So this evaluation sees
+            # exactly what the task requires: the branch condition values, and not one
+            # actor or process consequence. The clock of the evaluated copy is moved to
+            # the horizon (the copy is then discarded) so the evaluation answers the
+            # same question ``_finalize`` will answer — "what does the terminal say if
+            # nothing further happens before the horizon?" — instead of tripping
+            # time-window guards at ``as_of``.
+            pre_eval = evaluate_terminal(
+                world.with_time(world.contract.horizon), compiled.spec.terminal
+            )
+            pre_resolved = pre_eval.resolved
+            pre_outcome = pre_eval.outcome if pre_eval.resolved else None
             world = _event_loop(
                 world,
                 compiled.spec,
@@ -235,8 +262,25 @@ def run(
             world = _finalize(world, compiled.spec.terminal, effects, ledger, diag)
         except GatewayError as exc:
             diag.stop_reason = f"provider_failure: {exc}"
-            return _BranchRun(scenario, world, ledger, decisions, diag, f"provider_failure: {exc}")
-        return _BranchRun(scenario, world, ledger, decisions, diag)
+            return _BranchRun(
+                scenario,
+                world,
+                ledger,
+                decisions,
+                diag,
+                f"provider_failure: {exc}",
+                pre_resolved=pre_resolved,
+                pre_outcome=pre_outcome,
+            )
+        return _BranchRun(
+            scenario,
+            world,
+            ledger,
+            decisions,
+            diag,
+            pre_resolved=pre_resolved,
+            pre_outcome=pre_outcome,
+        )
 
     if workers == 1:
         runs = [run_one(s) for s in scenarios]
@@ -257,10 +301,24 @@ def run(
         ledger.extend(br.ledger)
         decisions.extend(br.decisions)
         if br.failure:
-            branch_outcomes.append(_unresolved_outcome(br.scenario, br.failure))
+            branch_outcomes.append(
+                _unresolved_outcome(
+                    br.scenario,
+                    br.failure,
+                    pre_resolved=br.pre_resolved,
+                    pre_outcome=br.pre_outcome,
+                )
+            )
             summaries.append(_unresolved_summary(br.scenario, br.failure))
         else:
-            branch_outcomes.append(_branch_outcome(br.world, br.scenario))
+            branch_outcomes.append(
+                _branch_outcome(
+                    br.world,
+                    br.scenario,
+                    pre_resolved=br.pre_resolved,
+                    pre_outcome=br.pre_outcome,
+                )
+            )
             summaries.append(_summary(br.world, br.scenario))
 
     return RunResult(
@@ -1626,7 +1684,13 @@ def _find(world: WorldState, event_id: str) -> Event:
     raise KeyError(event_id)
 
 
-def _branch_outcome(world: WorldState, scenario: Scenario) -> BranchOutcome:
+def _branch_outcome(
+    world: WorldState,
+    scenario: Scenario,
+    *,
+    pre_resolved: bool,
+    pre_outcome: str | None,
+) -> BranchOutcome:
     term = world.terminal_state
     resolved = bool(term and term.resolved)
     outcome = term.outcome if (term and term.resolved) else None
@@ -1642,10 +1706,19 @@ def _branch_outcome(world: WorldState, scenario: Scenario) -> BranchOutcome:
         key_conditions=scenario.conditions,
         records=term.highlights if term else (),
         event_count=len(world.event_history),
+        pre_outcome=pre_outcome,
+        pre_resolved=pre_resolved,
+        weight_grounded=weights_grounded(scenario),
     )
 
 
-def _unresolved_outcome(scenario: Scenario, reason: str) -> BranchOutcome:
+def _unresolved_outcome(
+    scenario: Scenario,
+    reason: str,
+    *,
+    pre_resolved: bool = False,
+    pre_outcome: str | None = None,
+) -> BranchOutcome:
     return BranchOutcome(
         branch_id=scenario.scenario_id,
         parent_lineage=("root",),
@@ -1657,6 +1730,9 @@ def _unresolved_outcome(scenario: Scenario, reason: str) -> BranchOutcome:
         key_conditions=scenario.conditions,
         records=(),
         event_count=0,
+        pre_outcome=pre_outcome,
+        pre_resolved=pre_resolved,
+        weight_grounded=weights_grounded(scenario),
     )
 
 

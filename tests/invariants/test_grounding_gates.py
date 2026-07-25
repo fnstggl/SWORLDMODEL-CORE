@@ -824,3 +824,56 @@ def test_one_persons_own_act_does_not_require_the_people_around_them() -> None:
     # Nothing is silent: the manifest records who was named and why they were omitted.
     assert any("named but not modelled" in n for n in manifest.notes)
     assert any("Ben East" in n and "Cara West" in n for n in manifest.notes)
+
+
+def test_an_aggregate_keeps_the_cardinality_it_represents() -> None:
+    """A live OPEC+ run compiled the seven producers as one deliberating coalition —
+    the faithful representation of a body that decides as a unit — and was refused for
+    "declaring more participants than it contains" by a check that counted rows. An
+    aggregate is a compression, not a reduction: represents_count=7 means seven
+    countries are in this world, and a gate asking how many participants there are must
+    see seven."""
+
+    from dataclasses import replace
+
+    from sworldmodel.reality import represented_member_count
+
+    coalition = EntitySpec(
+        "opec_plus",
+        "Seven Key OPEC+ Producers",
+        "organization",
+        is_actor=True,
+        role="coalition",
+        authority=("announce_quota_increase",),
+        representation_scale="organization",
+        represents_count=7,
+    )
+    ledger = EntitySpec("record", "Record of Quota Announcements", "document", is_actor=False)
+    spec = WorldSpec(
+        title="fixture",
+        entities=(coalition, ledger),
+        actors=(ActorSpec("opec_plus"),),
+        fields=(),
+        resources=(),
+        channels=(),
+        documents=(),
+        actions=(),
+        process=ProcessGraph(()),
+        terminal=TerminalExpression(Expr("const", (True,))),
+    )
+    # Two objects, eight represented members: seven producers plus the ledger's one.
+    assert represented_member_count(spec) == 8
+    state = ActorState.from_spec(coalition, ActorSpec("opec_plus"), default_time=AS_OF)
+    manifest = verify_reality(
+        _contract(expected_participants=7), _view(), {"opec_plus": state}, spec
+    )
+    assert manifest.represented_participants == 1  # one deliberating unit, as compiled
+
+    # A roster genuinely not populated is still refused: nine declared, two objects
+    # standing for two.
+    plain = replace(coalition, represents_count=None)
+    thin = replace(spec, entities=(plain, ledger))
+    with pytest.raises(WorldIntegrityError) as exc:
+        verify_reality(_contract(expected_participants=9), _view(), {"opec_plus": state}, thin)
+    assert exc.value.details["failure"] == "declared_participants_not_represented"
+    assert exc.value.details["represented in the world"] == 2

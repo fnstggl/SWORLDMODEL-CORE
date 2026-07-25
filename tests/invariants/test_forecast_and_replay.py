@@ -132,7 +132,16 @@ def test_the_probability_is_exactly_the_weighted_yes_trajectories() -> None:
     assert forecast.simulation_probability == pytest.approx(yes / (yes + no))
     # The actors split the branches: this is not a degenerate all-one-way run.
     assert 0.0 < forecast.simulation_probability < 1.0
-    assert forecast.probability_source == "weighted_simulated_trajectories"
+    # This world's branch weights are a symmetric-ignorance split and the branches
+    # disagree, so the point estimate depends on arbitrary weights — the source says so
+    # rather than presenting the scenario average as a simulated frequency.
+    assert forecast.probability_source == "scenario_enumeration_ungrounded_weights"
+    assert forecast.integrity is not None
+    assert not forecast.integrity.point_estimate_is_calibrated
+    # The number is still exactly the weighted YES trajectories; only its label and
+    # bounds acknowledge what the weights are.
+    assert forecast.lower_bound == pytest.approx(0.0)
+    assert forecast.upper_bound == pytest.approx(1.0)
 
 
 def test_deleting_the_actor_decisions_destroys_the_forecast() -> None:
@@ -176,6 +185,38 @@ def test_unresolved_mass_is_reported_not_filled() -> None:
     assert forecast.lower_bound <= (forecast.simulation_probability or 0) <= forecast.upper_bound
     total = forecast.resolved_yes_mass + forecast.resolved_no_mass + forecast.unresolved_mass
     assert total == pytest.approx(1.0)
+
+
+def test_each_branch_records_its_pre_simulation_answer_and_weight_grounding() -> None:
+    """The engine, not a default, sets the forecast-integrity fields on every branch.
+
+    The pre-simulation evaluation runs right after ``_seed_branch``: conditions are in
+    world state, but no actor decision or process effect has executed yet.
+    """
+
+    gw = _gateway(_signal_sensitive)
+    contract, compiled = _compile(_split_world(), gw)
+    result = run(compiled, gw, seed=0)
+    forecast = _aggregate(contract, result)
+
+    for b in result.branch_outcomes:
+        # This world's weights are a symmetric-ignorance split: explicitly ungrounded.
+        assert b.weight_grounded is False
+        # Before anyone acted no positions were recorded, so the compiled
+        # unresolved_when held: the initialized world resolves nothing.
+        assert b.pre_resolved is False
+        assert b.pre_outcome is None
+        # The final outcomes exist and differ from the pre-simulation ones: the
+        # trajectories produced the answer instead of repeating the initialization.
+        assert b.resolved and b.outcome in ("YES", "NO")
+
+    integrity = forecast.integrity
+    assert integrity is not None
+    assert integrity.probability_before_simulation is None
+    assert integrity.pre_unresolved_mass == pytest.approx(1.0)
+    assert integrity.probability_after_simulation == forecast.simulation_probability
+    assert not integrity.weights_grounded_all
+    assert integrity.ungrounded_variables == ("external_signal",)
 
 
 def test_a_world_whose_outcome_is_an_input_is_refused() -> None:

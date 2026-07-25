@@ -34,6 +34,7 @@ from .config import ForecastConfig
 from .diagnosis import ForecastRefused
 from .engine import RunResult, run
 from .errors import GatewayError, RunInterrupted, SWorldModelError, WorldIntegrityError
+from .ids import canonical_json
 from .models import ForecastResult, ResolutionContract
 from .outcomes import aggregate
 from .repair import RepairLog, RepairPlan, plan_repair
@@ -45,6 +46,7 @@ from .structures import (
     assess_structure,
 )
 from .tracing import TraceContext
+from .trajectory_audit import audit_trajectory
 from .world_compiler import compile_world, compile_world_spec_live, render_evidence
 from .world_review import review_world
 
@@ -432,6 +434,48 @@ def _merge(results: list[tuple[float, str, RunResult]]) -> RunResult:
     )
 
 
+def _checkpoint_research(config: ForecastConfig, bundle: ResearchBundle) -> None:
+    """Persist what research produced, the moment it produces it.
+
+    Research is the expensive stage — minutes of network, dozens of model calls — and
+    for a long time its record only reached disk if everything after it also succeeded.
+    A live EU-Mercosur run spent twenty minutes gathering evidence and then died in a
+    truncated HTTP read, leaving an empty trace directory: there was nothing to diagnose
+    because nothing had been written. Checkpointing here means a later stage can fail,
+    crash or be killed and the research still survives.
+
+    Best effort by construction: a checkpoint that raised would itself become a way to
+    lose a run, which is the opposite of the point.
+    """
+
+    out = config.trace_dir
+    if out is None:
+        return
+    try:
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "research_trace.json").write_text(canonical_json(bundle.live_trace or {}) + "\n")
+        (out / "evidence_store.json").write_text(
+            canonical_json(
+                [
+                    {
+                        "id": c.id,
+                        "proposition": c.proposition,
+                        "normalized_value": c.normalized_value,
+                        "entities": list(c.entities),
+                        "epistemic_type": c.epistemic_type.value,
+                        "source_url": c.source_url,
+                        "supporting_excerpt": c.supporting_excerpt,
+                        "available_at": c.available_at.isoformat(),
+                    }
+                    for c in bundle.evidence_store.all()
+                ]
+            )
+            + "\n"
+        )
+    except OSError:
+        pass
+
+
 def run_forecast(
     question: str, as_of: datetime, horizon: datetime, config: ForecastConfig
 ) -> tuple[ForecastResult, TraceContext]:
@@ -451,6 +495,7 @@ def run_forecast(
         # A parser or provider shape nobody anticipated. It is still a run that stopped,
         # and it still owes a diagnosis rather than a traceback.
         raise ForecastRefused(exc, stage="research", repair_log=log) from exc
+    _checkpoint_research(config, bundle)
     attempted: list[ResearchBundle] = []
     try:
         bundle, compiled = _compile_with_repair(
@@ -589,6 +634,12 @@ def run_forecast(
     )
     ctx.repair_log = log
     ctx.world_review = review
+    # The second adversary: attack the trajectory the way the reality auditor attacked
+    # the world. Mechanical checks first (repeated calls, an unproduced YES, a forecast
+    # that merely repeats its initialization), then one model pass over the per-branch
+    # digest. Advisory and never raising — it classifies what happened, it does not
+    # decide whether the run was allowed.
+    ctx.trajectory_audit = audit_trajectory(compiled, run_result, config.gateway, question=question)
     return result, ctx
 
 

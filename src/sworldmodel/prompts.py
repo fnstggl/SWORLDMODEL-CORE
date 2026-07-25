@@ -255,11 +255,42 @@ what constrains them. Give those occurrences `adjust_field` effects that accumul
 across the window, and let the reporting event merely observe the total. Uncertainty then belongs on
 the rate, the demand or the disruption — never on the total itself.
 
+WHO COULD CHANGE THE ANSWER, NOT ONLY WHO PERFORMS THE FINAL ACT. The terminal act has one
+performer; the outcome usually has many causes. Before you finish, ask of every material party: if
+this were absent from the world, could the answer differ? If yes, it belongs in the world — as an
+actor, an entity a process carries, an information channel, or an external process. If no, leave it
+out and say why in structure_rationale.
+
+Concretely, for a question about one person's public statement, the incoming data they have said
+they depend on, the institution's own analysis, the scheduled occasions on which they speak, the
+positions their colleagues have taken publicly, and what has actually reached them by each simulated
+moment are all candidates — include the ones the evidence supports and that could move the answer.
+For a question about a company's quarterly output, the demand segments that respond differently, the
+company's own pricing and allocation decisions, the plants and their constraints, inventory entering
+the period, logistics and the reporting definition are all candidates on the same test.
+
+Do not add a party for realism decoration. An actor whose decisions cannot move any term the
+terminal reads is scenery, and the run is refused for it.
+
 REPRESENTATION SCALE. For every entity, choose the level that is causally faithful and say which:
 individual, organization (acting as one unit), subunit, population_stratum, network, or
 external_process. Do not turn a body of independent decision-makers into one actor, and do not
 invent a million agents where an aggregate process is the honest representation. If an entity stands
-for many real units, give represents_count.
+for many real units, give represents_count — an aggregate is a compression, and a coalition of seven
+countries deciding as one unit is one actor with represents_count 7, never one participant. Where
+the decision rule matters, the real threshold governs: a body needing five of nine votes needs five
+of nine however many objects the world uses to represent it. Never rewrite a real threshold to fit
+the number of simulation objects, and never hide material internal disagreement inside an
+aggregate — if members can genuinely differ in a way that changes the outcome, compile them
+separately.
+
+EVERY NUMBER NEEDS A SOURCE. A starting level, a capacity, a rate, a constraint, a threshold: each
+must trace to evidence, and the field or entity carrying it must cite the claim ids. Do not invent a
+plausible rate to make a process executable — that is the forecast smuggled in as a parameter. When
+the evidence gives no usable number, say so honestly instead: declare the range as an uncertainty
+with outcomes the evidence supports, model the alternative structures, or leave the term unproduced
+so the branch reports unresolved. An ungrounded precise operating model is worse than an honest
+unresolved one.
 
 ACTORS ARE REAL OCCUPANTS OF REAL ROLES. Compile an actor for each person or body whose own
 decisions genuinely move this outcome. Every entity that decides must appear in both `entities`
@@ -315,8 +346,16 @@ incoming data, private inclinations, interpretations, demand, throughput, implem
 attention, timing, delay. Give each outcome's weight a provenance, and say `release_at` if the
 evidence establishes when the unknown value becomes public. If two unknowns are not independent, do
 NOT list them separately — list one uncertainty whose outcomes are joint states, or the run is
-refused. When no defensible point weight exists, use symmetric_ignorance_assumption rather than
-inventing precision.
+refused.
+
+WEIGHTS ARE EVIDENCE OR THEY ARE NOTHING. A relative weight may be used only when something
+supports it: an empirical frequency, a documented base rate, a verified reference case, market or
+survey evidence, or observed current-state evidence — name which in the provenance and cite the
+claims. When nothing supports a split, use symmetric_ignorance_assumption and understand what that
+means: it is a declaration that the weights are arbitrary, the run will report scenario bounds
+rather than a calibrated point estimate, and inventing precision instead would be worse. Never
+choose 0.5/0.5 because there are two possibilities. Two possibilities is not evidence about their
+relative likelihood.
 
 An uncertainty may set exogenous conditions. It may NEVER set a term the terminal reads — not the
 decision, not the vote result, not whether it was unanimous, not the final count, not whether the

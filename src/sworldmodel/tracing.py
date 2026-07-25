@@ -41,6 +41,9 @@ class TraceContext:
     repair_log: Any = None
     # The pre-rollout world audit: what it asked, and what it answered.
     world_review: Any = None
+    # The post-simulation trajectory audit: how the run actually unfolded, and the
+    # mechanical classification of what kind of result it was.
+    trajectory_audit: Any = None
     _calls_override: list[Any] = field(default_factory=list)
 
     # -- serializable payloads --------------------------------------------------
@@ -320,6 +323,13 @@ class TraceContext:
         (out_dir / "actor_decisions.jsonl").write_text(
             "\n".join(self.actor_decision_lines()) + "\n"
         )
+        for name, audit in (
+            ("world_review.json", self.world_review),
+            ("trajectory_audit.json", self.trajectory_audit),
+        ):
+            audit_dict = getattr(audit, "as_dict", None)
+            if callable(audit_dict):
+                (out_dir / name).write_text(canonical_json(audit_dict()) + "\n")
         (out_dir / report_name).write_text(self.render_report(forecast_hash))
         return forecast_hash
 

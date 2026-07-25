@@ -37,6 +37,7 @@ DEFAULT_TEMPERATURES: dict[str, float] = {
     "interpret_novel": 0.2,
     "exclusion_challenge": 0.1,
     "world_review": 0.2,
+    "trajectory_audit": 0.2,
     "actor_decision": 0.7,
     "reflect": 0.5,
 }
@@ -51,8 +52,11 @@ DEFAULT_MAX_TOKENS: dict[str, int] = {
     "compile_world_spec": 16000,
     "interpret_novel": 2000,
     "exclusion_challenge": 800,
-    # Six judgements with a sentence of reasoning each, plus the model's own thinking.
-    "world_review": 3000,
+    # Fourteen adversarial findings with a sentence of attack and a sentence of
+    # evidence basis each, plus the model's own thinking.
+    "world_review": 6000,
+    # Six trajectory judgements over a per-branch event digest, plus thinking.
+    "trajectory_audit": 4000,
     # An actor returns its plan disposition, plan update, intention, information needs,
     # commitments and revisit conditions — considerably more than a bare action.
     "actor_decision": 3000,

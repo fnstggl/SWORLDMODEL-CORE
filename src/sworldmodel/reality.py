@@ -171,7 +171,8 @@ def verify_reality(
     #    participants — they are the rest of the world. Only a shortfall means the
     #    compiler declared a roster it did not populate.
     declared = contract.expected_participants
-    if declared is not None and declared > len(spec.entities):
+    represented_members = represented_member_count(spec)
+    if declared is not None and declared > represented_members:
         # This is the compiler contradicting itself, not evidence contradicting the
         # compiler. It is a defect in one compilation, and the caller may recompile;
         # the detail says so, so a bounded retry can act on it.
@@ -180,9 +181,10 @@ def verify_reality(
             details={
                 "failure": "declared_participants_not_represented",
                 "declared by the compiled world": declared,
-                "represented in the world": len(spec.entities),
+                "represented in the world": represented_members,
+                "simulation objects": len(spec.entities),
                 "of which deliberating actors": represented,
-                "difference": (declared - len(spec.entities)),
+                "difference": (declared - represented_members),
                 "recompilable": True,
             },
         )
@@ -270,6 +272,23 @@ def verify_reality(
             },
         )
     return manifest
+
+
+def represented_member_count(spec: WorldSpec) -> int:
+    """How many real-world members this world stands for, not how many objects it has.
+
+    An aggregate is a compression, not a reduction: ``represents_count=7`` on a single
+    coalition entity means seven countries are in this world, and a gate asking how many
+    participants there are must see seven. A live OPEC+ run compiled exactly that — the
+    seven producers as one deliberating coalition, which is the faithful representation
+    of a body that decides as a unit — and was refused for "declaring more participants
+    than it contains" by a check counting rows.
+
+    An entity with no count stands for itself, so the floor is one per entity and the
+    total can only ever be larger than the object count, never smaller.
+    """
+
+    return sum(max(1, e.represents_count or 1) for e in spec.entities)
 
 
 def _single_subject_world(spec: WorldSpec, contract: ResolutionContract) -> bool:

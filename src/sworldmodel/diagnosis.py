@@ -95,6 +95,8 @@ class RunDiagnosis:
     run_result: RunResult | None = None
     repair_log: RepairLog | None = None
     world_review: Any = None
+    trajectory_audit: Any = None
+    forecast_integrity: Any = None
     failure: BaseException | None = None
     failure_stage: str = ""
     wall_seconds: float = 0.0
@@ -343,6 +345,8 @@ class RunDiagnosis:
             "world_compilation": self.world_compilation(),
             "integrity_and_grounding": self.integrity_and_grounding(),
             "runtime": self.runtime(),
+            "forecast_integrity": _audit_dict(self.forecast_integrity),
+            "trajectory_audit": _audit_dict(self.trajectory_audit),
             "root_cause": self.root_cause(),
             "root_cause_vocabulary": list(ROOT_CAUSES),
             "notes": self.notes,
@@ -579,6 +583,13 @@ def _effect_terms(effect: Any) -> set[str]:
 
     produced: set[str] = _effect_produces(effect)
     return produced
+
+
+def _audit_dict(audit: Any) -> dict[str, Any] | None:
+    """An auditor's own serialization, or None when the stage never ran."""
+
+    as_dict = getattr(audit, "as_dict", None)
+    return as_dict() if callable(as_dict) else None
 
 
 def _counts(values: Any) -> dict[str, int]:
