@@ -79,6 +79,7 @@ def _compile_with_repair(
     config: ForecastConfig,
     *,
     log: RepairLog | None = None,
+    attempted: list[ResearchBundle] | None = None,
 ) -> tuple[ResearchBundle, CompiledWorld]:
     """Compile the world; when a gate refuses, repair the exact element it named.
 
@@ -100,6 +101,10 @@ def _compile_with_repair(
     seen_failures: set[str] = set()
 
     for _ in range(_REPAIR_CEILING):
+        # Every world this loop actually tried, in order, so a refusal can report the
+        # one that was refused rather than the one the caller handed in.
+        if attempted is not None:
+            attempted.append(bundle)
         evidence_view = bundle.evidence_store.view(as_of)
         contract = _build_contract(question, as_of, horizon, bundle)
         try:
@@ -386,13 +391,24 @@ def run_forecast(
         # A parser or provider shape nobody anticipated. It is still a run that stopped,
         # and it still owes a diagnosis rather than a traceback.
         raise ForecastRefused(exc, stage="research", repair_log=log) from exc
+    attempted: list[ResearchBundle] = []
     try:
-        bundle, compiled = _compile_with_repair(question, as_of, horizon, bundle, config, log=log)
+        bundle, compiled = _compile_with_repair(
+            question, as_of, horizon, bundle, config, log=log, attempted=attempted
+        )
     except SWorldModelError as exc:
         # Everything the run learned before it stopped travels with the refusal, so the
         # caller can write a diagnosis. A refusal that leaves only a traceback is how
         # four of five acceptance questions became undiagnosable.
-        raise ForecastRefused(exc, stage="compilation", bundle=bundle, repair_log=log) from exc
+        #
+        # The bundle that travels is the *last one tried*, not the first. Repair rebinds
+        # its own local, so reporting the caller's variable described the world the run
+        # started from: a Banxico refusal reading "no actions and no external processes"
+        # was filed beside a compiled world with three actions in it, which is a
+        # diagnosis of a world nobody refused.
+        raise ForecastRefused(
+            exc, stage="compilation", bundle=attempted[-1] if attempted else bundle, repair_log=log
+        ) from exc
     contract = _build_contract(question, as_of, horizon, bundle)
 
     # Before the rollout budget: is this obviously not the right world? The gates are

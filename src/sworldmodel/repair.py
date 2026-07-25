@@ -175,9 +175,18 @@ def _actors_ungrounded(exc: WorldIntegrityError, subject: str) -> RepairPlan:
     queries: list[str] = []
     for name in names[:4]:
         clean = name.split(":")[0].strip()
-        if clean:
-            queries.append(f"{clean} {subject} role authority appointed")
-            queries.append(f"{clean} statement position record")
+        if not clean or "constructed representative" in name:
+            # A synthetic stand-in has no name to look up. Searching for the identifier
+            # a compiler invented for it — "other_board_members role authority appointed"
+            # — is searching for a string no source contains, and a live Banxico run spent
+            # a repair round doing exactly that. What is missing is the size of the group,
+            # not a record of a person.
+            continue
+        # The identifier is what the gate reports; a search engine needs the words in it.
+        queries.append(f"{clean.replace('_', ' ')} {subject} role authority appointed")
+        queries.append(f"{clean.replace('_', ' ')} statement position record")
+    if any("constructed representative" in n for n in names):
+        queries.append(f"{subject} how many members full membership size")
     return RepairPlan(
         failure="actors_ungrounded",
         missing_element=f"evidence attaching {names or ['the compiled actors']} to the world",
@@ -189,7 +198,14 @@ def _actors_ungrounded(exc: WorldIntegrityError, subject: str) -> RepairPlan:
             "institutional policy or contemporaneous reporting that names it. Cite the "
             "claims that establish each actor's role on its entity. If the evidence "
             "genuinely establishes nothing about someone, remove them rather than "
-            "inventing a record for them."
+            "inventing a record for them.\n"
+            "A stand-in for people you cannot name is a different case, and deleting it "
+            "is the wrong repair: the group is real even when its members are not in the "
+            "record. Give it represents_count and cite the claim establishing how many "
+            "it stands for. If nothing establishes the size, do not make it an actor at "
+            "all — model the unnamed remainder as an uncertainty over the outcome, so "
+            "the branches carry what is unknown instead of an actor pretending to know "
+            "it. Removing it and leaving the world with nobody in it is not a repair."
         ),
     )
 
@@ -306,7 +322,11 @@ def _nothing_can_act(exc: WorldIntegrityError, subject: str) -> RepairPlan:
         instruction=(
             "Your world has neither actions nor external processes, so nothing can "
             "happen in it. Compile what the participants in this world can actually do, "
-            "and the non-agent processes that run on their own."
+            "and the non-agent processes that run on their own.\n"
+            "If you emptied the world to satisfy an earlier refusal, that was the wrong "
+            "move: an actor the evidence cannot ground should become an uncertainty or "
+            "an entity a process carries, not a deletion. Keep whoever the evidence does "
+            "establish and give them the actions their office lets them take."
         ),
     )
 
