@@ -90,7 +90,7 @@ class GoogleNewsDecoder:
     with an id-keyed cache so a headline that appears under several queries costs one
     resolution."""
 
-    def __init__(self, transport: HttpTransport, *, interval_seconds: float = 0.5) -> None:
+    def __init__(self, transport: HttpTransport, *, interval_seconds: float = 0.2) -> None:
         self.transport = transport
         self.interval_seconds = interval_seconds
         self._cache: dict[str, DecodeResult] = {}
