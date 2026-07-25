@@ -348,7 +348,12 @@ class WorldState:
             kind = ev.kind
 
             if kind == "set_field":
-                fields[str(data["field"])] = data.get("value")
+                value = data.get("value")
+                # An effect whose value the world could not determine — an expression
+                # over a field nothing has set yet — states nothing. Writing it would
+                # erase whatever else had produced that field.
+                if value is not None:
+                    fields[str(data["field"])] = value
             elif kind == "adjust_field":
                 cur = _num(fields.get(str(data["field"]), 0.0))
                 fields[str(data["field"])] = cur + _num(data.get("delta", 0.0))
