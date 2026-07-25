@@ -19,7 +19,7 @@ a geopolitical process differ only in the *data* the compiler emits — never in
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from .actors import ActorState
@@ -806,6 +806,158 @@ def _is_trivially_true(expr: Any) -> bool:
     return False
 
 
+# Operators whose value a probe can decide from field assignments alone. An expression
+# built only from these is a small propositional formula over the terms it names, and can
+# be checked for being identically true by trying every assignment.
+_PROBEABLE = frozenset(
+    {
+        "const",
+        "field",
+        "equals",
+        "not_equals",
+        "greater_than",
+        "less_than",
+        "greater_or_equal",
+        "less_or_equal",
+        "and",
+        "or",
+        "not",
+    }
+)
+
+
+def _probe_values(expr: Any) -> dict[str, list[Any]]:
+    """Every constant each named field is compared against, plus one value that is none
+    of them — enough to decide any formula built from equality and ordering on them."""
+
+    from .worldspec import Expr
+
+    out: dict[str, list[Any]] = {}
+
+    def walk(node: Any) -> None:
+        if not isinstance(node, Expr):
+            return
+        if node.op in ("equals", "not_equals") and len(node.args) == 2:
+            left, right = node.args
+            for a, b in ((left, right), (right, left)):
+                names = _expr_fields(a) if isinstance(a, Expr) else set()
+                if len(names) == 1 and not isinstance(b, Expr):
+                    out.setdefault(next(iter(names)), []).append(b)
+        for a in node.args:
+            walk(a)
+
+    walk(expr)
+    for name in _expr_fields(expr):
+        vals = out.setdefault(name, [])
+        vals.append("\u0000none-of-the-above")
+    return out
+
+
+def _is_identically_true(expr: Any) -> bool:
+    """Whether this condition is true under *every* assignment of the fields it reads.
+
+    A live Banco de Mexico run compiled
+    ``or(not_equals(board_decision, 'hold'), not_equals(board_decision, 'cut'))`` as the
+    condition for reporting the question unresolved. No value can equal both, so one
+    disjunct is always true: every branch of that world was unresolved before anything
+    happened, and 27 actor calls across four branches could not have changed it. The
+    compiler meant ``and``.
+
+    Sound rather than complete: an expression using an operator a probe cannot decide —
+    a clock, a collection aggregate, a resource — is not flagged.
+    """
+
+    from .expressions import evaluate
+    from .worldspec import Expr
+
+    if not isinstance(expr, Expr):
+        return False
+    from .expressions import unknown_operators as _unknown
+
+    if _unknown(expr) or not _probeable(expr):
+        return False
+    values = _probe_values(expr)
+    if len(values) > 4:
+        return False
+    if not values:
+        # A condition that reads no world state at all: `const(true)` is the plainest
+        # form of this defect, and the default `const(false)` is the plainest non-case.
+        try:
+            return bool(evaluate(expr, _ProbeContext({})))
+        except Exception:
+            return False
+
+    names = sorted(values)
+    combos: list[dict[str, Any]] = [{}]
+    for name in names:
+        combos = [{**c, name: v} for c in combos for v in dict.fromkeys(values[name])]
+        if len(combos) > 256:
+            return False
+    for assignment in combos:
+        try:
+            if not bool(evaluate(expr, _ProbeContext(assignment))):
+                return False
+        except Exception:
+            return False
+    return True
+
+
+def _render_expr(expr: Any) -> str:
+    """A compiled expression as the compiler would have written it."""
+
+    from .worldspec import Expr
+
+    if not isinstance(expr, Expr):
+        return repr(expr)
+    if expr.op == "const":
+        return repr(expr.args[0] if expr.args else None)
+    return f"{expr.op}({', '.join(_render_expr(a) for a in expr.args)})"
+
+
+def _probeable(expr: Any) -> bool:
+    from .worldspec import Expr
+
+    if not isinstance(expr, Expr):
+        return True
+    if expr.op not in _PROBEABLE:
+        return False
+    return all(_probeable(a) for a in expr.args)
+
+
+class _ProbeContext:
+    """A world made of nothing but the field assignment under test."""
+
+    def __init__(self, fields: dict[str, Any]) -> None:
+        self._fields = fields
+
+    def get_field(self, name: str) -> Any:
+        return self._fields.get(name)
+
+    def get_records(self, collection: str) -> list[dict[str, Any]]:
+        return []
+
+    def get_events(self, event_type: str) -> list[dict[str, Any]]:
+        return []
+
+    def get_resource(self, resource_id: str, holder: str) -> float:
+        return 0.0
+
+    def get_document_field(self, document_id: str, field_name: str) -> Any:
+        return None
+
+    def get_stage(self) -> str:
+        return ""
+
+    def get_now(self) -> datetime:
+        return datetime.now(UTC)
+
+    def get_horizon(self) -> datetime:
+        return datetime.now(UTC)
+
+    def get_as_of(self) -> datetime:
+        return datetime.now(UTC)
+
+
 def _threshold_for(expr: Any, term: str) -> float | None:
     """The constant a terminal comparison holds ``term`` against, if there is one."""
 
@@ -955,6 +1107,25 @@ def enforce_executable_expressions(spec: WorldSpec) -> None:
         for i, occ in enumerate(proc.occurrences):
             check(f"external_process:{proc.process_id}#{i}.condition", occ.condition)
             check_effects(f"external_process:{proc.process_id}#{i}", occ.effects)
+
+    # A world that reports itself unresolved whatever happens is not a world. A live
+    # Banco de Mexico run compiled `or(not_equals(board_decision,'hold'),
+    # not_equals(board_decision,'cut'))` as its unresolved condition: no value can equal
+    # both, so one disjunct is always true. Twenty-seven actor calls across four branches
+    # could not have changed the answer, and the run reported unresolved mass 1.0 as
+    # though the world had been open. The compiler meant `and`.
+    if _is_identically_true(spec.terminal.unresolved_when):
+        raise WorldIntegrityError(
+            "the compiled world reports itself unresolved no matter what happens: the "
+            "unresolved condition is true under every assignment of the fields it reads, "
+            "so no trajectory could ever resolve",
+            details={
+                "failure": "terminal_never_resolvable",
+                "recompilable": True,
+                "unresolved_when": _render_expr(spec.terminal.unresolved_when),
+                "terminal_description": spec.terminal.description,
+            },
+        )
 
     if not offenders:
         return

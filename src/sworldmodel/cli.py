@@ -18,22 +18,47 @@ and what it returned.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
+import signal
 import sys
 import time
 from datetime import datetime
 from pathlib import Path
+from types import FrameType
 from typing import Any
 
 from .api import run_forecast
 from .config import ForecastConfig
 from .diagnosis import ForecastRefused, RunDiagnosis
 from .engine import RunBudget
+from .errors import RunInterrupted
 from .ids import canonical_json
 from .live_research import ResearchBudget
 from .models import ForecastResult
 from .research import ResearchBundle
 from .tracing import TraceContext
+
+
+def _install_stop_handler() -> None:
+    """Make an external stop arrive as an exception rather than as process death.
+
+    `timeout 2400` sends SIGTERM, and the default handler kills the process where it
+    stands: a live OPEC+ run spent forty minutes and left one line of output and no
+    artifacts at all — no trace, no diagnosis, nothing to read. Raising instead lets the
+    ordinary refusal path run and write what the run had learned.
+    """
+
+    def stop(signum: int, _frame: FrameType | None) -> None:
+        raise RunInterrupted(
+            f"the run was stopped by signal {signal.Signals(signum).name} before it "
+            "finished; the record below is what it had reached"
+        )
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        # Not the main thread, or a platform without the signal: nothing to install.
+        with contextlib.suppress(ValueError, OSError):
+            signal.signal(sig, stop)
 
 
 def _print_summary(result: ForecastResult, forecast_hash: str, out_dir: Path | None) -> None:
@@ -187,8 +212,30 @@ def cmd_forecast(args: argparse.Namespace) -> int:
         return 2
 
     start = time.monotonic()
+    _install_stop_handler()
     try:
         result, ctx = run_forecast(args.question, as_of, horizon, config)
+    except RunInterrupted as stopped:
+        # A stop is a way a run ends, so it owes the same record as any other. Whatever
+        # stage it reached, the bundle and repair log it had are gone with the stack, so
+        # this writes what is still reachable rather than nothing at all.
+        wall = time.monotonic() - start
+        diagnosis = RunDiagnosis(
+            question=args.question,
+            as_of=as_of,
+            horizon=horizon,
+            failure=stopped,
+            failure_stage="interrupted",
+            wall_seconds=wall,
+            model_calls=config.gateway.call_count,
+        )
+        if out is not None:
+            out.mkdir(parents=True, exist_ok=True)
+            (out / "diagnosis.json").write_text(canonical_json(diagnosis.as_dict()) + "\n")
+        print(f"STOPPED after {wall:.0f}s: {stopped}", file=sys.stderr)
+        for cause in diagnosis.root_cause():
+            print(f"  root cause: {cause['cause']} — {cause['why']}", file=sys.stderr)
+        return 124
     except ForecastRefused as refusal:
         # A refusal is a result about the world-supply pipeline, and it is the result
         # most worth reading. Writing only a traceback made the four questions that

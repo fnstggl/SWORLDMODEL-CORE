@@ -218,3 +218,61 @@ def test_an_ordinary_payload_key_that_is_also_an_operator_stays_data() -> None:
         assert _resolve({key: 3}, {}, ctx) == {key: 3}  # type: ignore[arg-type]
     # The explicit form is unambiguous and is still computed.
     assert _resolve({"op": "add", "args": [{"field": "n"}, 1]}, {}, ctx) == 8  # type: ignore[arg-type]
+
+
+# --------------------------------------------------------------------------- #
+# A world that can never resolve
+# --------------------------------------------------------------------------- #
+
+
+def test_an_unresolved_condition_that_is_always_true_is_detected() -> None:
+    """A live Banco de Mexico run compiled
+    ``or(not_equals(board_decision,'hold'), not_equals(board_decision,'cut'))`` as its
+    unresolved condition. No value equals both, so one disjunct is always true: every
+    branch was unresolved before anything happened, and twenty-seven actor calls across
+    four branches could not have changed it. The compiler meant ``and``."""
+
+    from sworldmodel.world_compiler import _is_identically_true
+
+    def ex(o: dict) -> object:
+        return _e(o)
+
+    banxico = {
+        "op": "or",
+        "args": [
+            {"op": "not_equals", "args": [{"field": "d"}, "hold"]},
+            {"op": "not_equals", "args": [{"field": "d"}, "cut"]},
+        ],
+    }
+    assert _is_identically_true(ex(banxico))
+    assert _is_identically_true(ex({"op": "const", "args": [True]}))
+    assert _is_identically_true(
+        ex(
+            {
+                "op": "or",
+                "args": [
+                    {"op": "equals", "args": [{"field": "x"}, 1]},
+                    {"op": "not", "args": [{"op": "equals", "args": [{"field": "x"}, 1]}]},
+                ],
+            }
+        )
+    )
+
+    # What the compiler meant, and other honest unresolved conditions, are untouched.
+    meant = {**banxico, "op": "and"}
+    assert not _is_identically_true(ex(meant))
+    assert not _is_identically_true(ex({"op": "equals", "args": [{"field": "x"}, None]}))
+    assert not _is_identically_true(
+        ex({"op": "not", "args": [{"op": "equals", "args": [{"field": "s"}, "done"]}]})
+    )
+    assert not _is_identically_true(_e({"op": "const", "args": [False]}))
+
+    # Sound rather than complete: an operator a probe cannot decide is not flagged.
+    unprobeable = {
+        "op": "or",
+        "args": [
+            {"op": "not_equals", "args": [{"op": "count", "args": ["v"]}, 1]},
+            {"op": "not_equals", "args": [{"op": "count", "args": ["v"]}, 2]},
+        ],
+    }
+    assert not _is_identically_true(ex(unprobeable))

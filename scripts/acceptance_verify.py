@@ -65,6 +65,14 @@ def checks(case: str) -> list[tuple[str, str, str]]:
 
     # 1. It finished, and finishing is not the same as answering.
     outcome = d.get("outcome")
+    if d.get("failure_stage") == "interrupted":
+        return [
+            (
+                "completed without refusing",
+                "FAIL",
+                f"stopped from outside after {d.get('wall_seconds')}s without an answer",
+            )
+        ]
     check(
         "completed without refusing",
         outcome == "completed",
@@ -191,7 +199,11 @@ def checks(case: str) -> list[tuple[str, str, str]]:
     # 9b. Every actor call happened for a reason the runtime can name. A turn taken
     #     because it was somebody's turn is the thing this architecture does not have.
     wake = rt.get("wake_reasons") or {}
-    unknown = sorted(set(wake) - set(WAKE_REASONS))
+    # An actor woken by two things at once carries both, joined: "deadline_reached+
+    # commitment_due" is two named reasons, not an unnamed one.
+    unknown = sorted(
+        {part for reason in wake for part in str(reason).split("+")} - set(WAKE_REASONS)
+    )
     check(
         "every actor call has a named wake reason",
         not unknown and (rt.get("actor_invocations", 0) == 0 or bool(wake)),

@@ -441,6 +441,14 @@ class RunDiagnosis:
                     "by the cutoff",
                 }
             )
+        if gate == "terminal_never_resolvable":
+            out.append(
+                {
+                    "cause": "unexecutable_compilation",
+                    "why": "the unresolved condition is true under every assignment, so "
+                    "the world could not have resolved whatever happened in it",
+                }
+            )
         if gate in ("malformed_compilation", "unknown_expression_operator"):
             out.append(
                 {
@@ -490,6 +498,14 @@ class RunDiagnosis:
                 {
                     "cause": "entity_resolution_failure",
                     "why": "the same participant occupies two slots in the compiled roster",
+                }
+            )
+        if self.failure_stage == "interrupted":
+            out.append(
+                {
+                    "cause": "budget_configuration_failure",
+                    "why": f"the run was stopped from outside after {self.wall_seconds:.0f}s "
+                    "without reaching an answer — it did not fit the time it was given",
                 }
             )
         rt = self.runtime()

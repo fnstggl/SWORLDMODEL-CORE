@@ -283,11 +283,25 @@ def _single_subject_world(spec: WorldSpec, contract: ResolutionContract) -> bool
 
     from .world_compiler import terminal_producing_actions
 
+    actor_ids = {a.entity_id for a in spec.actors}
+    names = {e.entity_id: e.name for e in spec.entities}
+    subject = contract.subject_entity.strip().lower()
+
+    def is_the_subject(entity_id: str) -> bool:
+        name = names.get(entity_id, "").strip().lower()
+        return bool(subject and name) and (name in subject or subject in name)
+
     actions = terminal_producing_actions(spec)
     if not actions:
-        return False
+        # A world whose terminal is not yet wired to any action is a world with a
+        # producer defect, and gate 4 says so precisely. Reading it here as "not a
+        # single-subject world" makes gate 1 — which runs first — refuse it for omitting
+        # a committee member instead, and the repair then goes looking for that member
+        # rather than for the missing wiring. A live Bank of England run was refused for
+        # omitting Huw Pill from a world containing Andrew Bailey alone, because the
+        # terminal read a field nothing wrote.
+        return len(actor_ids) == 1 and is_the_subject(next(iter(actor_ids)))
     eligible: set[str] = set()
-    actor_ids = {a.entity_id for a in spec.actors}
     roles = {e.entity_id: e.role for e in spec.entities}
     for action in actions:
         for sel in action.eligible_actors:
@@ -299,10 +313,7 @@ def _single_subject_world(spec: WorldSpec, contract: ResolutionContract) -> bool
                 eligible.add(sel)
     if len(eligible) != 1:
         return False
-    names = {e.entity_id: e.name for e in spec.entities}
-    only = names.get(next(iter(eligible)), "")
-    subject = contract.subject_entity.strip().lower()
-    return bool(subject) and (only.strip().lower() in subject or subject in only.strip().lower())
+    return is_the_subject(next(iter(eligible)))
 
 
 def _covered_by_an_organization(

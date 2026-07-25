@@ -69,3 +69,13 @@ class UndeterminedExpressionError(SWorldModelError):
     date or field that a given branch never sets. The honest outcome is an *unresolved*
     branch — never a crash, and never a fabricated YES/NO.
     """
+
+
+class RunInterrupted(SWorldModelError):
+    """The run was told to stop before it finished.
+
+    A `timeout` around the process sends SIGTERM, and a process that dies on the default
+    handler writes nothing: a live OPEC+ run spent forty minutes and left one line of
+    output and no artifacts. Turning the signal into an exception puts the stop on the
+    same path as every other way a run ends, so it still owes a diagnosis.
+    """

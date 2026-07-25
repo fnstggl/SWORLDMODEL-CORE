@@ -302,6 +302,23 @@ def _terminal_has_no_producer(exc: WorldIntegrityError, subject: str) -> RepairP
     )
 
 
+def _terminal_never_resolvable(exc: WorldIntegrityError, subject: str) -> RepairPlan:
+    return RepairPlan(
+        failure="terminal_never_resolvable",
+        missing_element="an unresolved condition that some world can fail",
+        queries=(),
+        instruction=(
+            "Your unresolved condition is true under every assignment of the fields it "
+            f"reads, so no trajectory could ever resolve: {exc.details.get('unresolved_when')}. "
+            "Check the connective. 'Unresolved if it is neither A nor B' is "
+            "and(not_equals(x, A), not_equals(x, B)) — written with or(...) it is true "
+            "for every value, because nothing can equal both. Write unresolved_when for "
+            "the states in which the process genuinely did not determine the answer, and "
+            "leave it out entirely if there are none."
+        ),
+    )
+
+
 def _environment_presets_terminal(exc: WorldIntegrityError, subject: str) -> RepairPlan:
     terms = _strings(exc.details.get("terms preset by the environment"))
     return RepairPlan(
@@ -509,6 +526,7 @@ _PLANS = {
     "actors_ungrounded": _actors_ungrounded,
     "participants_omitted": _participants_omitted,
     "declared_participants_not_represented": _declared_participants_not_represented,
+    "terminal_never_resolvable": _terminal_never_resolvable,
     "terminal_has_no_producer": _terminal_has_no_producer,
     "actors_cannot_reach_terminal": _actors_cannot_reach_terminal,
     "environment_presets_terminal": _environment_presets_terminal,

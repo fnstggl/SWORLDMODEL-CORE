@@ -24,6 +24,7 @@ not branch on the kind of question.
 
 from __future__ import annotations
 
+import time
 from dataclasses import replace
 from datetime import datetime
 from typing import Any
@@ -32,7 +33,7 @@ from .compiled import CompiledWorld
 from .config import ForecastConfig
 from .diagnosis import ForecastRefused
 from .engine import RunResult, run
-from .errors import GatewayError, SWorldModelError, WorldIntegrityError
+from .errors import GatewayError, RunInterrupted, SWorldModelError, WorldIntegrityError
 from .models import ForecastResult, ResolutionContract
 from .outcomes import aggregate
 from .repair import RepairLog, RepairPlan, plan_repair
@@ -100,6 +101,7 @@ def _compile_with_repair(
     log = log if log is not None else RepairLog()
     seen_failures: set[str] = set()
     seen_signatures: set[str] = set()
+    deadline = time.monotonic() + max(0.0, config.max_compile_seconds)
 
     for _ in range(_REPAIR_CEILING):
         # Every world this loop actually tried, in order, so a refusal can report the
@@ -180,6 +182,23 @@ def _compile_with_repair(
                 ),
             )
             if not (new_evidence or new_diagnosis):
+                raise
+            if time.monotonic() > deadline:
+                # Out of time, not out of ideas. The refusal that propagates is the last
+                # gate's own, so the record says what the world was still missing rather
+                # than only that a clock ran out — and the run ends with a diagnosis
+                # instead of being killed from outside with nothing written.
+                log.record(
+                    plan,
+                    failure=failure,
+                    message=str(exc),
+                    claims_before=before,
+                    claims_after=after,
+                    outcome=(
+                        f"repair budget of {config.max_compile_seconds:.0f}s exhausted; "
+                        "the last diagnosis stands"
+                    ),
+                )
                 raise
             bundle = repaired
     # Reachable: twelve alternating diagnoses, each new the first time it appears. It
@@ -421,6 +440,11 @@ def run_forecast(
     log = RepairLog()
     try:
         bundle = config.research_backend.research(question, as_of, horizon)
+    except RunInterrupted:
+        # A stop is not a refusal. Reporting it as one puts a root cause on the run's
+        # record — "no candidate URL was discovered at all" — that describes how far it
+        # had got, not why it ended.
+        raise
     except SWorldModelError as exc:
         raise ForecastRefused(exc, stage="research", repair_log=log) from exc
     except (TypeError, ValueError, KeyError) as exc:
@@ -432,6 +456,8 @@ def run_forecast(
         bundle, compiled = _compile_with_repair(
             question, as_of, horizon, bundle, config, log=log, attempted=attempted
         )
+    except RunInterrupted:
+        raise
     except (TypeError, ValueError, KeyError, IndexError, AttributeError) as exc:
         # Not a gate: a shape nobody anticipated, from a parser or a provider payload.
         # It is still a run that stopped, and it still owes a diagnosis rather than a
