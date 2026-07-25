@@ -46,10 +46,14 @@ worked around.
 
 ## Budgets
 
-**There is no global research clock across repair rounds.** Each targeted follow-up runs
-under a reduced budget (`live_research._followup_budget`), but the total across many
-repairs is bounded only by the outer `timeout`. A pathological question can spend a long
-time in repair before refusing.
+**The compile-and-repair ceiling is a wall-clock number, not a measure of progress.**
+Repair stops when it stops getting somewhere, which is the right rule and has no time in
+it; `ForecastConfig.max_compile_seconds` exists only because a question whose compiler
+keeps producing genuinely different worlds could otherwise repair for as long as research
+would feed it, and a live OPEC+ run was killed from outside at forty minutes. Reaching
+the ceiling refuses with the last gate's own diagnosis, so the record says what was still
+missing — but a question that would have converged on the next round is refused
+identically to one that never would.
 
 ## Compilation
 
