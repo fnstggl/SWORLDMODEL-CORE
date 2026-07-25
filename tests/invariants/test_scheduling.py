@@ -856,5 +856,7 @@ def test_correspondence_that_drains_is_progress_and_a_refilling_cascade_is_not()
 
     for rounds in (1, 2, 3, 4):
         reached, diag = correspond(rounds)
-        assert reached, f"{rounds} rounds of correspondence never reached the session: {diag.stop_reason}"
+        assert reached, (
+            f"{rounds} rounds of correspondence never reached the session: {diag.stop_reason}"
+        )
         assert "no progress" not in diag.stop_reason, (rounds, diag.stop_reason)
