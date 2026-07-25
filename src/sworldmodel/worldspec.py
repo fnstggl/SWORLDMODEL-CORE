@@ -68,7 +68,16 @@ def parse_expr(obj: Any) -> Expr:
         if "const" in obj:
             return Expr("const", (obj["const"],))
         if "op" in obj:
+            # `args` is a list by schema, and a model will nonetheless sometimes write
+            # the single argument bare: {"op": "const", "args": false}. Iterating that
+            # raises TypeError from inside a parser, which killed a live run before it
+            # could write any diagnosis at all. A lone argument is a one-argument list;
+            # reading it as one changes no meaning and costs nothing.
             raw_args = obj.get("args", [])
+            if raw_args is None:
+                raw_args = []
+            elif not isinstance(raw_args, (list, tuple)):
+                raw_args = [raw_args]
             args = tuple(_parse_arg(a) for a in raw_args)
             return Expr(str(obj["op"]), args)
         # Shorthands: a single-key dict {op_name: arg_or_args}.
@@ -112,13 +121,21 @@ class Effect:
 
 
 def parse_effect(obj: dict[str, Any]) -> Effect:
-    op = str(obj["op"])
+    op = str(obj.get("op", ""))
     params = {k: v for k, v in obj.items() if k != "op"}
     return Effect(op=op, params=tuple(sorted(params.items())))
 
 
 def parse_effects(items: Any) -> tuple[Effect, ...]:
-    return tuple(parse_effect(o) for o in (items or []))
+    """Every effect the compiler wrote that names an operation.
+
+    An entry with no ``op`` names no world operation and cannot be executed, so it is
+    dropped rather than crashing the parse. That is safe precisely because it is
+    visible downstream: if the dropped effect was the only producer of a terminal term,
+    the producer-lineage gate refuses the world and says so.
+    """
+
+    return tuple(parse_effect(o) for o in as_objects(items) if str(o.get("op", "")).strip())
 
 
 # ---------------------------------------------------------------------------
@@ -501,7 +518,33 @@ def _items(d: Any) -> tuple[tuple[str, Any], ...]:
 
 
 def _strs(v: Any) -> tuple[str, ...]:
-    return tuple(str(x) for x in v) if isinstance(v, list) else ()
+    if isinstance(v, (list, tuple)):
+        return tuple(str(x) for x in v)
+    # A single value written bare where a list belongs is that list with one entry.
+    if isinstance(v, str) and v.strip():
+        return (v,)
+    return ()
+
+
+def as_objects(value: Any) -> list[dict[str, Any]]:
+    """Read a list-of-objects field however the compiler happened to write it.
+
+    A model asked for a list of objects will sometimes emit one bare object, ``null``,
+    or a string. Each of those crashed a parser with ``TypeError`` or ``AttributeError``
+    — a live run ending in a stack trace, before any diagnosis could be written, because
+    of punctuation.
+
+    This coerces *shape* and never invents *content*: a lone object becomes a
+    one-element list, an absent field becomes an empty one, and anything that is not an
+    object is dropped rather than guessed at. What was not said stays unsaid, and the
+    integrity gates still see exactly what the compiler actually produced.
+    """
+
+    if isinstance(value, dict):
+        return [value]
+    if isinstance(value, (list, tuple)):
+        return [x for x in value if isinstance(x, dict)]
+    return []
 
 
 def parse_entity(d: dict[str, Any]) -> EntitySpec:
@@ -634,11 +677,21 @@ def parse_terminal(d: dict[str, Any]) -> TerminalExpression:
     )
 
 
+def _process_block(value: Any) -> dict[str, Any]:
+    """The process graph, whether written as {"nodes": [...]} or as the bare node list."""
+
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, (list, tuple)):
+        return {"nodes": list(value)}
+    return {}
+
+
 def parse_world_spec(d: dict[str, Any]) -> WorldSpec:
     return WorldSpec(
         title=str(d.get("title", "")),
-        entities=tuple(parse_entity(e) for e in d.get("entities", [])),
-        actors=tuple(parse_actor(a) for a in d.get("actors", [])),
+        entities=tuple(parse_entity(e) for e in as_objects(d.get("entities"))),
+        actors=tuple(parse_actor(a) for a in as_objects(d.get("actors"))),
         fields=tuple(
             FieldSpec(
                 field_id=str(f["field_id"]),
@@ -647,7 +700,7 @@ def parse_world_spec(d: dict[str, Any]) -> WorldSpec:
                 description=str(f.get("description", "")),
                 evidence_claim_ids=_strs(f.get("evidence_claim_ids")),
             )
-            for f in d.get("fields", [])
+            for f in as_objects(d.get("fields"))
         ),
         resources=tuple(
             ResourceSpec(
@@ -656,7 +709,7 @@ def parse_world_spec(d: dict[str, Any]) -> WorldSpec:
                 quantity=float(r.get("quantity", 0.0)),
                 description=str(r.get("description", "")),
             )
-            for r in d.get("resources", [])
+            for r in as_objects(d.get("resources"))
         ),
         channels=tuple(
             ChannelSpec(
@@ -664,7 +717,7 @@ def parse_world_spec(d: dict[str, Any]) -> WorldSpec:
                 description=str(c.get("description", "")),
                 participants=_strs(c.get("participants")),
             )
-            for c in d.get("channels", [])
+            for c in as_objects(d.get("channels"))
         ),
         documents=tuple(
             DocumentSpec(
@@ -672,20 +725,24 @@ def parse_world_spec(d: dict[str, Any]) -> WorldSpec:
                 fields=_items(doc.get("fields")),
                 description=str(doc.get("description", "")),
             )
-            for doc in d.get("documents", [])
+            for doc in as_objects(d.get("documents"))
         ),
-        actions=tuple(parse_action(a) for a in d.get("actions", [])),
+        actions=tuple(parse_action(a) for a in as_objects(d.get("actions"))),
         process=ProcessGraph(
-            nodes=tuple(parse_node(n) for n in d.get("process", {}).get("nodes", []))
+            nodes=tuple(
+                parse_node(n) for n in as_objects(_process_block(d.get("process")).get("nodes"))
+            )
         ),
         terminal=parse_terminal(d["terminal"]),
         subject_entity=str(d.get("subject_entity", "")),
         resolution_units=str(d.get("resolution_units", "")),
         external_processes=tuple(
-            parse_external_process(p) for p in (d.get("external_processes") or [])
+            parse_external_process(p) for p in as_objects(d.get("external_processes"))
         ),
         wake_rules=tuple(
-            r for r in (parse_wake_rule(w) for w in (d.get("wake_rules") or [])) if r.is_checkable()
+            r
+            for r in (parse_wake_rule(w) for w in as_objects(d.get("wake_rules")))
+            if r.is_checkable()
         ),
         structure_id=str(d.get("structure_id", "primary")),
         structure_rationale=str(d.get("structure_rationale", "")),

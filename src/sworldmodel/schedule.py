@@ -203,5 +203,16 @@ class Schedule:
     def pending_count(self, *, horizon: datetime) -> int:
         return sum(1 for e in self.entries if e.at <= horizon)
 
+    def pending_at(self, moment: datetime) -> int:
+        """How much is still queued at one exact instant.
+
+        The difference between a queue that is draining and one that is refilling
+        itself. A finite burst of simultaneous work — everyone reading the notes that
+        were just circulated — drives this strictly down. A runaway cascade holds it up
+        or grows it, because every item it handles schedules another at the same instant.
+        """
+
+        return sum(1 for e in self.entries if e.at == moment)
+
     def __len__(self) -> int:
         return len(self.entries)

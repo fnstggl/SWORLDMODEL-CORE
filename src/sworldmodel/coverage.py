@@ -46,6 +46,7 @@ person, org, rule, document, resource, event, channel, variable, or requirement.
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -64,7 +65,18 @@ ExclusionReviewer = Callable[["EvidenceCandidate"], bool]
 
 
 def _norm(text: str) -> str:
-    return " ".join(_WORD.findall(text.lower()))
+    """Case-folded word tokens, with accents folded onto their base letters.
+
+    The token pattern is ASCII, so without the fold "Rodríguez" tokenized to "rodr guez"
+    and never matched "Rodriguez" — one source spelling a name with its diacritic and
+    another without was enough to make the same person two people, and then to refuse a
+    roster for omitting one of them. Names are the primary key of this whole system; they
+    have to survive a source that drops an accent.
+    """
+
+    folded = unicodedata.normalize("NFKD", text.lower())
+    stripped = "".join(ch for ch in folded if not unicodedata.combining(ch))
+    return " ".join(_WORD.findall(stripped))
 
 
 # ---------------------------------------------------------------------------
@@ -329,29 +341,67 @@ _ACTION_WORDS = _lex(
 )
 
 
+# Language that treats a name as an acting body rather than a place, product or month.
+# Deliberately about *agency* — deciding, producing, announcing, meeting, reporting —
+# because that is what makes something a causal element of somebody's world.
+_BODY_CONTEXT = _ACTION_WORDS | _EVENT_WORDS | _ORG_WORDS | _RULE_PROCEDURE_WORDS
+
+
+def _acts_in(identity: str, propositions: str) -> bool:
+    """Whether the evidence shows this name *doing* something, close to the name itself.
+
+    A bag-of-words test over the whole passage would call any capitalized token in a
+    sentence about a decision an organization — including the month the decision falls
+    in and the country it happens in. Requiring the agency word to follow the name
+    within a short span is the difference between "Mercosur signed" and "signed in
+    Brazil".
+    """
+
+    pattern = re.compile(
+        rf"(?<![a-z0-9]){re.escape(identity.lower())}(?![a-z0-9])[^.;]{{0,48}}?"
+        rf"\b(?:{'|'.join(sorted(_BODY_CONTEXT))})\b"
+    )
+    return pattern.search(propositions.lower()) is not None
+
+
 def _entity_kind(entity: str, propositions: str) -> CandidateKind | None:
     """Classify a named entity by its surface form + the language used about it."""
 
-    words = entity.split()
-    low = entity.lower()
+    # "Andrew Bailey, Governor of the Bank of England" is a person with their office
+    # appended. Classifying the whole string reads the office and calls the person an
+    # organization, so the identity is taken from before the appositive.
+    identity = entity.split(",")[0].strip() or entity
+    words = identity.split()
+    low = identity.lower()
     tokens = set(_WORD.findall(low))
-    if tokens & _ORG_WORDS or low.split()[-1] in _ORG_SUFFIX:
+    if tokens & _ORG_WORDS or (low.split() and low.split()[-1] in _ORG_SUFFIX):
         return CandidateKind.ORGANIZATION
-    # An all-caps acronym referenced as a body (FOMC, ECB, SCOTUS, UN). ``isalpha``
-    # already excludes anything with a space, so no length ceiling is needed to keep
-    # a shouted sentence out; a single letter is excluded because it is an initial,
-    # not an organization.
-    if len(entity) > 1 and entity.isupper() and entity.isalpha():
+    # An acronym referenced as a body (FOMC, ECB, OPEC+, S&P). Punctuation is stripped
+    # before the shape test, because an organization does not stop being one for having
+    # a "+" in its name — and OPEC+ was the subject of an entire acceptance question
+    # that this inventory could not see. A single letter stays excluded: that is an
+    # initial, not an organization.
+    squashed = "".join(ch for ch in identity if ch.isalnum())
+    if len(squashed) > 1 and squashed.isupper() and squashed.isalpha():
         return CandidateKind.ORGANIZATION
     if tokens & _POPULATION_WORDS:
         return CandidateKind.POPULATION_GROUP
+    # A capitalized single token — Tesla, Mercosur, Banxico — is a real name that the
+    # shape alone cannot tell from a month, a place or a product. The evidence can: when
+    # the claims about it speak of it acting, deciding, producing or announcing, it is a
+    # body. It is classified as an ORGANIZATION and never as a person, which is what
+    # makes this safe — organizations are not counted as participants, so recognizing a
+    # mononym can never manufacture a seat the reality gate then demands be filled.
+    if (
+        len(words) == 1
+        and identity[:1].isupper()
+        and not _is_calendar_shaped(identity)
+        and _acts_in(identity, propositions)
+    ):
+        return CandidateKind.ORGANIZATION
     # A capitalized name of more than one token is person-like. The shape is the whole
-    # rule and there is no threshold to tune: a single capitalized token is as likely a
-    # month, a place or a product, and reading it as a person would manufacture a
-    # participant that the reality gate then demands a seat for. The cost is that a
-    # mononym is only recognized when the evidence also uses organization or population
-    # language about it, or the compiled world names it as a focal identity.
-    if len(words) > 1 and entity[:1].isupper():
+    # rule and there is no threshold to tune.
+    if len(words) > 1 and identity[:1].isupper():
         return CandidateKind.PERSON
     return None
 
@@ -558,6 +608,11 @@ def _entity_candidates(
                 continue
             kind = _entity_kind(ent, prop)
             if kind is None:
+                continue
+            # A date is never a world entity. The guard existed only where the roster
+            # was checked, so the checklist handed to the compiler could still open with
+            # "person | Q3 2026" — asking it to model a quarter as somebody.
+            if _is_calendar_shaped(ent):
                 continue
             norm_id = _norm(ent)
             group = grouped.setdefault((kind, norm_id), _EntityGroup(kind=kind, identity=ent))
@@ -1190,6 +1245,7 @@ def enforce_coverage(report: CompilationCoverageReport) -> None:
     raise WorldIntegrityError(
         "verified evidence was lost during world compilation — simulation refused",
         details={
+            "failure": "coverage_incomplete",
             "missing_material_candidates": list(report.missing_material_candidates),
             "material_candidates": report.material_candidates,
             "included": report.included_candidates,
