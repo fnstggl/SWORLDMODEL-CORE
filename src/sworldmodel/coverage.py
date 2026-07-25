@@ -609,6 +609,11 @@ def _entity_candidates(
             kind = _entity_kind(ent, prop)
             if kind is None:
                 continue
+            # A date is never a world entity. The guard existed only where the roster
+            # was checked, so the checklist handed to the compiler could still open with
+            # "person | Q3 2026" — asking it to model a quarter as somebody.
+            if _is_calendar_shaped(ent):
+                continue
             norm_id = _norm(ent)
             group = grouped.setdefault((kind, norm_id), _EntityGroup(kind=kind, identity=ent))
             group.claims[c.id] = c

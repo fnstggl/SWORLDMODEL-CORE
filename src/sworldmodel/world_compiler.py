@@ -184,8 +184,18 @@ def compile_world(
     )
 
 
-# Entity kinds that are deliberately synthetic stand-ins rather than named real people.
+# Representations that are deliberately synthetic stand-ins rather than named real
+# people. ``representation_scale`` is the authority because it is the field the compiler
+# is actually asked for; ``kind`` is checked too, but the schema only ever offers
+# person/organization/object/document/channel there, so keying the exemption off `kind`
+# alone — as this did — meant a compiled population stratum was never once recognized as
+# one, and was then judged by the standards of a named individual.
+_CONSTRUCTED_SCALES = frozenset({"population_stratum", "network"})
 _CONSTRUCTED_KINDS = frozenset({"population_group", "stratum", "segment", "cohort"})
+
+
+def _is_constructed(entity: EntitySpec) -> bool:
+    return entity.representation_scale in _CONSTRUCTED_SCALES or entity.kind in _CONSTRUCTED_KINDS
 
 
 def actor_grounding_profile(
@@ -229,7 +239,7 @@ def actor_grounding_profile(
         reaction_rules=reactions,
         valid_time=contract.as_of.isoformat(),
     )
-    constructed = entity.kind in _CONSTRUCTED_KINDS
+    constructed = _is_constructed(entity)
     weight = entity.attributes_dict.get("weight") if constructed else None
     return replace(
         profile,
