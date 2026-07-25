@@ -118,7 +118,7 @@ def _compile_with_repair(
         except WorldIntegrityError as exc:
             failure = str(exc.details.get("failure") or "unclassified")
             before = len(bundle.evidence_store.claims)
-            plan = plan_repair(exc, question)
+            plan = plan_repair(exc, question, subject_entity=bundle.subject_entity)
             if plan is None:
                 log.record(
                     None,

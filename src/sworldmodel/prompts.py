@@ -247,6 +247,14 @@ production, inventory, logistics and demand — not by an executive choosing a n
 answer is that no individual controls the outcome, compile no actors and put the causal machinery in
 `external_processes`, operational `process` nodes and fields. That world is valid.
 
+DO NOT MODEL THE ANNOUNCEMENT INSTEAD OF THE PRODUCTION. A scheduled release that publishes a figure
+does not produce that figure; it reports whatever the operating world had already produced by then.
+When the outcome is a quantity accumulated over a period — output, deliveries, volume, cases, votes —
+compile the things that ADD to it: the producing units, their rate, the periods they operate in, and
+what constrains them. Give those occurrences `adjust_field` effects that accumulate the quantity
+across the window, and let the reporting event merely observe the total. Uncertainty then belongs on
+the rate, the demand or the disruption — never on the total itself.
+
 REPRESENTATION SCALE. For every entity, choose the level that is causally faithful and say which:
 individual, organization (acting as one unit), subunit, population_stratum, network, or
 external_process. Do not turn a body of independent decision-makers into one actor, and do not

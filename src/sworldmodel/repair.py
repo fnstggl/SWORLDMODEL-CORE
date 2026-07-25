@@ -22,6 +22,7 @@ cost.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 from .errors import WorldIntegrityError
@@ -87,10 +88,35 @@ class RepairLog:
 # ---------------------------------------------------------------------------
 
 
-def _subject(question: str) -> str:
-    """The question, trimmed to something usable as a search phrase."""
+# The interrogative frame a forecasting question is wrapped in. Searching for it is
+# searching for the wrong thing: a repair query built from the raw question reads "how is
+# Will Tesla report more than 400,000 vehicle deliveries for the third quarter of 2026
+# decided procedure steps", which is not a phrase any source contains. What a search
+# engine needs is the subject.
+_INTERROGATIVE = re.compile(
+    r"^\s*(will|does|did|is|are|was|were|can|could|should|would|has|have|by\s+when|how"
+    r"|what|when|who|whether)\b[\s,]*",
+    re.IGNORECASE,
+)
+_TRAILING_WINDOW = re.compile(
+    r"\s+(before|by|on or before|at or before|prior to|no later than)\s+[^,]*$", re.IGNORECASE
+)
 
-    return question.strip().rstrip("?")[:140]
+
+def _subject(question: str, subject_entity: str = "") -> str:
+    """A search phrase for this question.
+
+    Prefers the subject entity the research planner already derived, because that is the
+    thing sources are written about. Falls back to the question with its interrogative
+    frame and resolution window stripped.
+    """
+
+    if subject_entity.strip():
+        return subject_entity.strip()[:140]
+    text = question.strip().rstrip("?")
+    text = _INTERROGATIVE.sub("", text)
+    text = _TRAILING_WINDOW.sub("", text)
+    return (text or question).strip()[:140]
 
 
 def _strings(value: object) -> list[str]:
@@ -101,7 +127,9 @@ def _strings(value: object) -> list[str]:
     return []
 
 
-def plan_repair(exc: WorldIntegrityError, question: str) -> RepairPlan | None:
+def plan_repair(
+    exc: WorldIntegrityError, question: str, *, subject_entity: str = ""
+) -> RepairPlan | None:
     """Map a refusal to targeted research and a specific compiler instruction.
 
     Returns ``None`` when the failure is not one repair can address — an unrecognized
@@ -109,7 +137,7 @@ def plan_repair(exc: WorldIntegrityError, question: str) -> RepairPlan | None:
     """
 
     failure = str(exc.details.get("failure") or "")
-    subject = _subject(question)
+    subject = _subject(question, subject_entity)
     builder = _PLANS.get(failure)
     if builder is None:
         return None
@@ -206,17 +234,28 @@ def _terminal_has_no_producer(exc: WorldIntegrityError, subject: str) -> RepairP
         failure="terminal_has_no_producer",
         missing_element=f"a mechanism that produces {orphans}",
         queries=(
-            f"how is {subject} decided procedure steps",
-            f"{subject} timeline schedule announcement",
-            f"{subject} how the figure is produced and reported",
+            f"how is {subject} decided procedure",
+            f"{subject} production capacity output per quarter",
+            f"{subject} how the figure is compiled and reported definition",
+            f"{subject} schedule timeline announcement date",
         ),
         instruction=(
             f"Nothing in your world writes {orphans}, so the terminal read values that "
-            "only a branch weight supplied. Compile the mechanism that actually produces "
-            "each of those terms — the action an actor takes, the process node that "
-            "records it, or the operational process that generates it — and have that "
-            "mechanism write the field. Uncertainty may move the inputs to that "
-            "mechanism. It may never write the term itself."
+            "only a branch weight supplied.\n"
+            "A common form of this mistake is modelling the ANNOUNCEMENT and omitting "
+            "the PRODUCTION. A scheduled release that publishes a number does not "
+            "produce that number; it reports whatever the operating world had already "
+            "produced by then.\n"
+            "So compile the pathway that actually generates each term. If it is a "
+            "quantity accumulated over a period — output, deliveries, volume, cases, "
+            "votes — model the things that add to it: the production or activity units, "
+            "their rate, the periods in which they operate, and the constraints on them. "
+            "Give the operating process `adjust_field` occurrences that accumulate the "
+            "quantity across the window, and let the reporting event merely observe the "
+            "total. If it is a discrete decision or act, model the actor doing it and "
+            "the action whose effect writes the field.\n"
+            "Uncertainty belongs on the INPUTS to that pathway — the rate, the demand, "
+            "the disruption, the shortfall. It may never write the term itself."
         ),
     )
 
