@@ -50,7 +50,15 @@ from .ids import content_id
 from .models import AuthorityLevel, EpistemicType, SourceType
 from .research import ResearchBundle, assemble_bundle
 from .research_planner import ResearchPlan, followup_queries, plan_research
-from .rss import google_news_rss_url, parse_rss, resolve_item_url
+from .rss import (
+    discover_feed_links,
+    feed_urls_for,
+    google_news_rss_url,
+    is_google_redirect,
+    parse_rss,
+    resolve_item_url,
+    site_roots,
+)
 from .search import duckduckgo_search, site_query
 from .source_extract import ExtractedClaim, ExtractionResult, distinctive_terms, extract_claims
 from .source_fetch import FetchedSource, RetrievalMode, fetch_source
@@ -337,6 +345,17 @@ class LiveResearchBackend:
             rounds += 1
             trace.rounds += 1
             candidates = self._collect_candidates(session, as_of, trace)
+            if rounds == 1 and plan.official_domains:
+                # Once, at the start: go straight to the institutions the plan named.
+                candidates = (
+                    self._policy_filtered(
+                        self._official_feed_candidates(
+                            tuple(plan.official_domains), question, as_of, trace
+                        ),
+                        trace,
+                    )
+                    + candidates
+                )
             sources = self._fetch_all(candidates, session, now, as_of, trace)
             added = self._extract_all(question, as_of, sources, session, store, trace)
 
@@ -435,6 +454,88 @@ class LiveResearchBackend:
             else:
                 break
         return picked
+
+    def _feed_urls(self, domain: str) -> list[str]:
+        """Ask the site where its feed is, then fall back to conventional paths."""
+
+        declared: list[str] = []
+        for root in site_roots(domain):
+            try:
+                resp = self.transport.get(root, timeout=10)
+            except HttpError:
+                continue
+            if resp.ok:
+                declared.extend(discover_feed_links(resp.text, root))
+                if declared:
+                    break
+        return list(dict.fromkeys(declared + feed_urls_for(domain)))
+
+    def _official_feed_candidates(
+        self,
+        domains: tuple[str, ...],
+        question: str,
+        as_of: datetime,
+        trace: ResearchTrace,
+    ) -> list[str]:
+        """Article URLs straight from the institutions' own feeds.
+
+        Search engines block, and the news aggregator no longer yields URLs at all. An
+        institution that publishes decisions, minutes or press releases almost always
+        publishes a feed of them, and those items carry real article URLs. This channel
+        depends on neither a search engine nor a redirect that has to be inverted, and it
+        lands on exactly the sources the question needs.
+        """
+
+        question_terms = distinctive_terms(question)
+        found: list[str] = []
+        for domain in domains[:6]:
+            hit = False
+            for feed_url in self._feed_urls(domain):
+                if hit:
+                    break
+                try:
+                    resp = self.transport.get(feed_url, timeout=12)
+                except HttpError:
+                    continue
+                if not resp.ok or ("<item" not in resp.text and "<entry" not in resp.text):
+                    continue
+                items = [
+                    i
+                    for i in parse_rss(resp.text)
+                    if i.link
+                    and not is_google_redirect(i.link)
+                    and (i.published is None or i.published <= as_of)
+                ]
+                if not items:
+                    continue
+                hit = True
+                # An institution's feed is its whole output — fines, consultations,
+                # appointments — in reverse date order. Taking the newest few would
+                # spend the fetch budget on whatever happened yesterday. Rank by what
+                # the question is actually about, and keep one recent item so a feed
+                # with no lexical overlap still contributes something.
+                ranked = sorted(
+                    items,
+                    key=lambda i: (
+                        -len(question_terms & distinctive_terms(f"{i.title} {i.description}")),
+                        -(i.published.timestamp() if i.published else 0.0),
+                    ),
+                )
+                found.extend(i.link for i in ranked[: self.budget.max_pages_per_query])
+                trace.rss_requests.append(
+                    {
+                        "channel": "official_feed",
+                        "domain": domain,
+                        "url": feed_url,
+                        "items": len(items),
+                        "resolved": len(items),
+                    }
+                )
+            if not hit:
+                trace.rss_requests.append(
+                    {"channel": "official_feed", "domain": domain, "resolved": 0}
+                )
+        return found
 
     def _collect_candidates(
         self, session: _Session, as_of: datetime, trace: ResearchTrace

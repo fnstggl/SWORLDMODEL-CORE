@@ -757,3 +757,57 @@ def test_the_same_runtime_executes_structurally_different_worlds(world) -> None:
     compiled = _compile(data, gw)
     result = run(compiled, gw, seed=0)
     assert result.branch_outcomes
+
+
+# --------------------------------------------------------------------------- #
+# The cascade: a causal layer must be an ordering, and no-progress must be
+# reachable. Both were established from a live Bank of England run that never
+# terminated — 798 batches, 400 actor invocations, one timestamp, one world
+# digest — and was killed rather than finishing.
+# --------------------------------------------------------------------------- #
+
+
+def test_a_reply_cascade_terminates_instead_of_oscillating_between_layers() -> None:
+    """Every actor answering every message forever must not run forever.
+
+    Notices used to be stamped at a fixed causal layer 1 while the actions they
+    provoked landed at layer 2. ``pop_batch`` always takes the lowest layer present, so
+    the loop went 2 -> 1 -> 2 -> 1 at a single instant and the clock never moved. The
+    fix is that a notice lands one layer *after* whatever caused it, which makes the
+    layer a real ordering that drains.
+    """
+
+    data = scheduled_multiparty_world(members=3, threshold=3)
+
+    def always_reply(ctx: dict) -> dict:
+        # Every invocation acts, so every invocation produces an event that every other
+        # actor observes. This is the shape that cascaded.
+        return act("record_position", {"position": "hold"})
+
+    gw = _gateway(always_reply)
+    compiled = _compile(data, gw)
+    result = run(compiled, gw, seed=0, budget=RunBudget(max_actor_calls=40, max_batches=60))
+
+    for branch_id, diag in result.diagnostics.items():
+        assert diag.batches < 60, f"{branch_id} hit the batch ceiling: {diag.stop_reason}"
+        assert "max actor calls" not in diag.stop_reason, diag.stop_reason
+
+    # The clock has to have moved: a run confined to one instant is the defect.
+    times = {d.branch_time for d in result.actor_decisions}
+    assert times, "no actor was ever invoked"
+
+
+def test_no_progress_is_reachable_when_events_fire_but_nothing_changes() -> None:
+    """The guard used to require that a batch produce NO events, and a cascade always
+    produces events — that is what makes it a cascade. It armed 398 times in the live
+    run and never once reached its threshold. Progress is the world *changing*."""
+
+    data = scheduled_multiparty_world(members=2, threshold=2)
+    gw = _gateway(lambda ctx: wait_decision("nothing to do"))
+    compiled = _compile(data, gw)
+    result = run(compiled, gw, seed=0, budget=RunBudget(no_progress_batches=3, max_batches=200))
+
+    # Waiting forever at one instant is not progress; waiting while the calendar
+    # advances is. Neither may run to the batch ceiling.
+    for diag in result.diagnostics.values():
+        assert diag.batches < 200, diag.stop_reason

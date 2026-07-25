@@ -34,6 +34,87 @@ _URL_IN_TEXT = re.compile(r"https?://[^\s\"'<>]+")
 _HREF = re.compile(r'href=["\'](https?://[^"\']+)["\']', re.IGNORECASE)
 
 
+# Conventional feed locations. An institution that publishes decisions, minutes or press
+# releases almost always exposes them at one of these, and the items carry the
+# publisher's own article URLs — not a redirect that has to be inverted.
+#
+# This exists because the aggregator channel stopped yielding URLs at all: Google News
+# now wraps every item in an opaque server-side id, and following it returns a
+# JavaScript interstitial rather than a redirect. Measured on this machine, 0 of 100
+# items from a live feed were resolvable. Going to the institution directly is both more
+# reliable and a better source.
+FEED_PATHS = (
+    "/rss",
+    "/feed",
+    "/rss.xml",
+    "/feed.xml",
+    "/atom.xml",
+    "/index.xml",
+    "/news/rss",
+    "/news/feed",
+    "/en/rss",
+    "/en/feed",
+    "/press/rss",
+    "/press-releases/rss",
+    "/rss/news.xml",
+    "/rss/news",
+    "/news.xml",
+)
+
+
+_FEED_LINK = re.compile(
+    r"<link\b[^>]*\btype=[\"']application/(?:rss\+xml|atom\+xml)[\"'][^>]*>",
+    re.IGNORECASE,
+)
+
+
+def site_roots(domain: str) -> list[str]:
+    """The domain's home page, with and without ``www``.
+
+    Institutions differ on which one serves content and which one 404s, and guessing
+    wrong costs the whole channel — the Bank of England's feed lives under ``www`` and
+    the bare host does not resolve to it.
+    """
+
+    host = domain.strip().lower()
+    if not host:
+        return []
+    host = host.removeprefix("https://").removeprefix("http://").split("/")[0]
+    if not host or " " in host:
+        return []
+    hosts = [host] if host.startswith("www.") else [f"www.{host}", host]
+    return [f"https://{h}/" for h in hosts]
+
+
+def discover_feed_links(html: str, base_url: str) -> list[str]:
+    """Feeds the page declares through standard autodiscovery.
+
+    ``<link rel="alternate" type="application/rss+xml" href="...">`` is the convention
+    every content system emits, and it is how a feed is found without knowing anything
+    about the institution. Guessing conventional paths only works when the site happens
+    to use one; asking the site works generally.
+    """
+
+    out: list[str] = []
+    for tag in _FEED_LINK.findall(html or ""):
+        m = _HREF.search(tag) or re.search(r'href=["\']([^"\']+)["\']', tag, re.IGNORECASE)
+        if not m:
+            continue
+        href = m.group(1).strip()
+        if href:
+            out.append(urllib.parse.urljoin(base_url, href))
+    return list(dict.fromkeys(out))
+
+
+def feed_urls_for(domain: str) -> list[str]:
+    """Candidate feed URLs for an authoritative domain, most conventional first."""
+
+    out: list[str] = []
+    for root in site_roots(domain):
+        out.extend(root.rstrip("/") + path for path in FEED_PATHS)
+    return out
+
+
 def google_news_rss_url(query: str, *, lang: str = "en-US", country: str = "US") -> str:
     params = {"q": query, "hl": lang, "gl": country, "ceid": f"{country}:{lang.split('-')[0]}"}
     return f"{GOOGLE_NEWS_RSS}?{urllib.parse.urlencode(params)}"

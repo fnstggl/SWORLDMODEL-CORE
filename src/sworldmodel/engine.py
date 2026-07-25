@@ -431,7 +431,7 @@ def _event_loop(
 ) -> WorldState:
     horizon = world.contract.horizon
     stale_batches = 0
-    last_digest = world.state_digest()
+    last_digest = (world.state_digest(), world.time)
 
     while True:
         if diag.batches >= budget.max_batches:
@@ -470,12 +470,31 @@ def _event_loop(
             produced.extend(evs)
         diag.events += len(produced)
 
-        digest = world.state_digest()
-        if not produced and digest == last_digest:
+        # No progress means the world stops *changing*, not that it stops emitting.
+        #
+        # The old condition also required `not produced`, and a cascade always produces
+        # something — that is what makes it a cascade. Measured on the Bank of England
+        # run: 798 batches, 400 actor calls, and exactly ONE distinct world digest
+        # throughout. The guard armed 398 times and its longest consecutive run was 1,
+        # because every other batch emitted an event that reset it. It could not fire.
+        #
+        # Comparing the digest alone is the whole fix, and it must be the digest rather
+        # than the event count: honest runs do reach streaks of nine or ten batches that
+        # emit nothing while time advances, and they are distinguished by the state
+        # having changed, not by their silence.
+        # The clock is the other half. An actor that legitimately waits changes nothing
+        # for several batches while time moves between real events, and that is progress
+        # — the world is advancing through its calendar. What is not progress is an
+        # unchanged state at an unmoving instant, which is precisely the cascade: 798
+        # batches, one digest, one timestamp.
+        digest = (world.state_digest(), world.time)
+        if digest == last_digest:
             stale_batches += 1
             if stale_batches >= budget.no_progress_batches:
                 diag.stop_reason = (
-                    f"no progress: {stale_batches} consecutive batches changed nothing"
+                    f"no progress: {stale_batches} consecutive batches left the world "
+                    f"state unchanged ({len(produced)} event(s) in the last batch, none "
+                    "of which altered anything the world records)"
                 )
                 break
         else:
@@ -624,7 +643,7 @@ def _fire_process_node(
             applied = _find(world, ev.event_id)
             ledger.append(applied)
             produced.append(applied)
-        world = _propagate(world, spec, produced)
+        world = _propagate(world, spec, produced, microstep=entry.microstep)
         follow.extend(
             _deferred_entries(
                 deferred,
@@ -738,7 +757,7 @@ def _fire_deferred(
     produced = [_find(world, e.event_id) for e in evs]
     for ev in produced:
         ledger.append(ev)
-    return _propagate(world, spec, produced), produced
+    return _propagate(world, spec, produced, microstep=entry.microstep), produced
 
 
 def _fire_external(
@@ -768,7 +787,7 @@ def _fire_external(
             applied = _find(world, ev.event_id)
             ledger.append(applied)
             produced.append(applied)
-        world = _propagate(world, spec, produced)
+        world = _propagate(world, spec, produced, microstep=entry.microstep)
         if deferred:
             world = world.with_schedule(
                 world.schedule.push(
@@ -800,7 +819,9 @@ def _complete_action(
     produced = [_find(world, e.event_id) for e in outcome.events]
     for ev in produced:
         ledger.append(ev)
-    world = _propagate(world, spec, produced, source_action_id=outcome.action_id)
+    world = _propagate(
+        world, spec, produced, source_action_id=outcome.action_id, microstep=entry.microstep
+    )
     if outcome.deferred:
         world = world.with_schedule(
             world.schedule.push(
@@ -1001,7 +1022,7 @@ def _invoke_actor(
     produced = [_find(world, e.event_id) for e in outcome.events]
     for ev in produced:
         ledger.append(ev)
-    world = _propagate(world, spec, produced)
+    world = _propagate(world, spec, produced, microstep=entry.microstep)
 
     updated = world.actors[aid]
     if outcome.ongoing is not None:
@@ -1092,6 +1113,7 @@ def _propagate(
     events: list[Event],
     *,
     source_action_id: str = "",
+    microstep: int = 0,
 ) -> WorldState:
     """Turn events into *deliveries* and schedule the moments they may be noticed.
 
@@ -1099,6 +1121,14 @@ def _propagate(
     says when they took it in. Each is a separate recorded transition with its own
     timestamp, because collapsing them is how simulators accidentally give everyone
     perfect, instant, universal awareness.
+
+    ``microstep`` is the causal layer of whatever produced these events; the notices go
+    one layer *after* it. Stamping them at a fixed layer instead is what made the Bank of
+    England run non-terminating: a notice at layer 1 woke an actor whose action landed at
+    layer 2, whose notices went back to layer 1, and ``pop_batch`` always takes the
+    lowest layer present — so the loop oscillated 2→1→2→1 forever at a single instant.
+    Nearly 800 batches fired at one timestamp, with 400 actor calls all seeing the same
+    clock. A causal layer must be monotone or it is not an ordering.
     """
 
     action = spec.action(source_action_id) if source_action_id else None
@@ -1131,7 +1161,7 @@ def _propagate(
                     origin=ORIGIN_CONSEQUENCE,
                     origin_detail=f"delivery:{ev.event_id}",
                     causal_parents=(ev.event_id,),
-                    microstep=1,
+                    microstep=microstep + 1,
                 )
             )
     if not deliveries:
