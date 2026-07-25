@@ -1141,6 +1141,91 @@ def enforce_executable_expressions(spec: WorldSpec) -> None:
     )
 
 
+def _uncertainty_fields(uncertainties: tuple[UncertaintySpec, ...]) -> set[str]:
+    """Field names whose value IS a branch draw — the variable and any field_effects."""
+
+    return {u.variable for u in uncertainties} | {
+        name for u in uncertainties for o in u.outcomes for name, _ in o.field_effects
+    }
+
+
+def _labeled_effects(spec: WorldSpec) -> list[tuple[str, Any]]:
+    """(label, effect) for every effect an action, node or external occurrence applies."""
+
+    out: list[tuple[str, Any]] = []
+    for action in spec.actions:
+        out.extend((f"action:{action.action_id}", eff) for eff in action.effects)
+    for node in spec.process.nodes:
+        out.extend((f"process_node:{node.node_id}", eff) for eff in node.effects)
+    for proc in spec.external_processes:
+        for i, occ in enumerate(proc.occurrences):
+            out.extend((f"external_process:{proc.process_id}#{i}", eff) for eff in occ.effects)
+    return out
+
+
+def _laundered_terminal_terms(
+    spec: WorldSpec,
+    uncertainties: tuple[UncertaintySpec, ...],
+    producers: dict[str, tuple[str, ...]],
+) -> dict[str, list[str]]:
+    """Terminal fields whose value is nothing but a passthrough of an uncertainty draw.
+
+    The ``uncertainty_writes_terminal`` gate catches an uncertainty that writes the
+    terminal term directly. This catches the one-hop launder: a producer sets the terminal
+    field equal to a bare read of an uncertainty variable, so the answer is the branch draw
+    rubber-stamped through an action or node that computes nothing. A live Tesla run set
+    ``actual_q3_deliveries = field(delivery_value_exogenous)`` through an end-of-quarter
+    node — an ungrounded 50/50 coin flip copied into the term the terminal reads — and it
+    passed every gate because the copying node counts as a producer.
+
+    A value that reads a grounded base and scales it by an uncertain rate is production and
+    is deliberately left alone: the uncertainty on the rate or the demand is exactly where
+    it belongs, and only the total-as-a-bare-copy is refused.
+    """
+
+    uncertain = _uncertainty_fields(uncertainties)
+    if not uncertain:
+        return {}
+    laundered: dict[str, list[str]] = {}
+    for term in (t for t in producers if t.startswith("field:")):
+        fname = term.split(":", 1)[1]
+        launder_writers: list[str] = []
+        honest_writer = False
+        for label, eff in _labeled_effects(spec):
+            if term not in _effect_produces(eff):
+                continue
+            if eff.op == "set_field" and eff.params_dict.get("field") == fname:
+                reads = _value_field_reads(eff.params_dict.get("value"))
+                if reads and reads <= uncertain:
+                    launder_writers.append(label)
+                    continue
+            honest_writer = True  # accumulation, a computed value, or a grounded write
+        has_evidence = any(str(p).startswith("evidence:") for p in producers.get(term, ()))
+        if launder_writers and not honest_writer and not has_evidence:
+            laundered[term] = launder_writers
+    return laundered
+
+
+def _value_field_reads(val: Any) -> set[str]:
+    """The world fields an effect's value reads, whether it is a parsed Expr or raw JSON.
+
+    ``parse_effect`` leaves an effect parameter as the value the compiler emitted — a
+    literal, or a raw ``{"op": ..., "args": [...]}`` expression dict it never parsed — so
+    reading field references has to cope with both forms.
+    """
+
+    from .worldspec import Expr, parse_expr
+
+    if isinstance(val, Expr):
+        return _expr_fields(val)
+    if isinstance(val, dict) and "op" in val:
+        try:
+            return _expr_fields(parse_expr(val))
+        except (ValueError, KeyError, TypeError):
+            return set()
+    return set()
+
+
 def enforce_outcome_is_produced(
     spec: WorldSpec, uncertainties: tuple[UncertaintySpec, ...]
 ) -> None:
@@ -1239,6 +1324,31 @@ def enforce_outcome_is_produced(
                 "producers by terminal term": {
                     _display(k): list(v) for k, v in sorted(producers.items())
                 },
+            },
+        )
+
+    # The same defect one indirection out: a producer that only copies a branch draw into
+    # the terminal term. This is what a live Tesla run did — an end-of-quarter node set the
+    # delivery total equal to an ungrounded exogenous uncertainty — and it defeated the
+    # check above because the launderer, not the uncertainty, is the named producer.
+    laundered = _laundered_terminal_terms(spec, uncertainties, producers)
+    if laundered:
+        raise WorldIntegrityError(
+            "the answer is a branch draw copied through a producer: "
+            f"{[_display(t) for t in laundered]} is set to a bare read of an uncertainty, "
+            "so the outcome is the branch weight laundered through something that computes "
+            "nothing — model what produces the quantity and put the uncertainty on its "
+            "drivers, not on the total",
+            details={
+                "failure": "terminal_laundered_from_uncertainty",
+                "recompilable": True,
+                "terminal terms copied from an uncertainty": [
+                    _display(t) for t in sorted(laundered)
+                ],
+                "copying producers": {
+                    _display(k): v for k, v in sorted(laundered.items())
+                },
+                "uncertainties": [u.variable for u in uncertainties],
             },
         )
 

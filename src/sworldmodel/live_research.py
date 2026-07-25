@@ -1112,6 +1112,12 @@ a direction of travel are not contradicting each other about reality; they are t
 uncertainty the simulation exists to resolve, and calling that decisive refuses a
 question that is merely genuinely open. Answer false for those.
 
+Two claims about DIFFERENT quantities are not contradictory even when their values look
+opposed: a group-wide baseline quota held steady and a subset's voluntary cut being
+unwound are two true facts about different instruments, not a contradiction; a headline
+figure and one of its components can both be true. Answer false when the claims measure
+different things, cover different scopes, or apply to different sub-populations.
+
 {asked}
 CLAIM A: {a.proposition}
   value: {a.normalized_value}
@@ -1139,7 +1145,53 @@ Return JSON {{"decisive": true|false, "reason": "<one line>"}}."""
             # confirm, and we do not silently claim the pair is consistent either — the
             # check count in the trace shows the pair was examined.
             return False
-        return resp.data.get("decisive") is True
+        if resp.data.get("decisive") is not True:
+            return False
+        # A decisive verdict blocks the whole run and cannot be cleared by recompilation —
+        # the contradiction is recorded on the store, so a false positive is fatal. Before
+        # recording it, make one adversarial attempt to RECONCILE the pair: a live OPEC+
+        # run was blocked because "group-wide quotas held for 2026" was set against "the
+        # July increase unwinds the 2023 voluntary cuts" — two true facts about different
+        # instruments. Only a contradiction that survives an honest reconciliation attempt
+        # is real enough to end a run.
+        return not self._can_reconcile(a, b, question=question)
+
+    def _can_reconcile(self, a: EvidenceClaim, b: EvidenceClaim, *, question: str = "") -> bool:
+        """Whether the two claims can BOTH be true under some reading — the skeptic's pass."""
+
+        prompt = f"""Two evidence claims about the same subject carry different values and a
+first reviewer called them decisively contradictory. Your job is the opposite: find the
+reading, if one exists, under which BOTH claims are simply true at once.
+
+They are reconcilable (both true) when they measure different quantities or instruments,
+cover different scopes or sub-populations, describe different points in time, sit at
+different levels of detail, or when one is a forecast/intention and the other a present
+fact. They are genuinely contradictory ONLY when the same quantity, at the same time, is
+asserted to be two values the world cannot hold at once.
+
+Consider the question being answered: {question or "(none given)"}
+
+CLAIM A: {a.proposition} — value: {a.normalized_value}
+  excerpt: {a.supporting_excerpt}
+CLAIM B: {b.proposition} — value: {b.normalized_value}
+  excerpt: {b.supporting_excerpt}
+
+Return JSON {{"reconcilable": true|false, "reading": "<one line: how both are true, or why they cannot both be>"}}."""
+        try:
+            resp = self.gateway.generate(
+                GatewayRequest(
+                    task_kind="contradiction",
+                    prompt=prompt,
+                    context={"a": a.id, "b": b.id, "pass": "reconcile"},
+                    seed=int(content_id("reconcile", a.id, b.id)[-8:], 16),
+                    expected_keys=("reconcilable",),
+                )
+            )
+        except GatewayError:
+            # If we cannot run the reconciliation pass, do not upgrade to a blocking
+            # contradiction on the strength of one vote — a false block is unrecoverable.
+            return True
+        return resp.data.get("reconcilable") is True
 
     # -- required facts (retrieval only) ----------------------------------------
 

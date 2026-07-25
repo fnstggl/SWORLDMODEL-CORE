@@ -393,16 +393,28 @@ def _nothing_can_act(exc: WorldIntegrityError, subject: str) -> RepairPlan:
 def _nothing_scheduled(exc: WorldIntegrityError, subject: str) -> RepairPlan:
     return RepairPlan(
         failure="nothing_scheduled",
-        missing_element="a calendar of events",
+        missing_element="a scheduled occasion on which an actor acts",
         queries=(
-            f"{subject} scheduled dates calendar next meeting",
-            f"{subject} publication release schedule",
+            f"{subject} scheduled dates calendar next meeting speech testimony",
+            f"{subject} publication release schedule upcoming events",
         ),
         instruction=(
-            "Nothing in your world is scheduled to occur, so no actor will ever be in a "
-            "position to act. Place the real dated moments of this process on the "
-            "calendar as process nodes, and put scheduled releases and administrative "
-            "clocks in external_processes."
+            "You compiled an actor with an action but nothing scheduled to happen, so the "
+            "actor is never woken and the world is inert. 'The outcome is already "
+            "achieved' is not a licence to leave it unscheduled — decide which of two "
+            "worlds this is and build it fully:\n"
+            "(a) If the record ALREADY establishes the answer within the question's window "
+            "— the statement was made, the figure reported, the vote held — make it a "
+            "factual resolution: set the initial value of the term the terminal reads and "
+            "cite the claim ids that establish it, on that field, and add no action. That "
+            "is the honest 'already happened' world and it needs no calendar.\n"
+            "(b) Otherwise the outcome is still open, so place the real dated occasions on "
+            "which the actor could act — upcoming meetings, decisions, speeches, "
+            "testimony, publications — as process nodes with their real `at` dates before "
+            "the horizon, wake the actor at them, and add the material influences that "
+            "move the decision (the data releases, the colleagues' positions) as "
+            "external_processes and uncertainties on the inputs. Do not leave an actor in "
+            "a world where nothing ever gives them a turn."
         ),
     )
 
@@ -496,6 +508,32 @@ def _uncertainty_writes_terminal(exc: WorldIntegrityError, subject: str) -> Repa
     )
 
 
+def _terminal_laundered_from_uncertainty(exc: WorldIntegrityError, subject: str) -> RepairPlan:
+    copied = _strings(exc.details.get("terminal terms copied from an uncertainty"))
+    return RepairPlan(
+        failure="terminal_laundered_from_uncertainty",
+        missing_element=f"a produced quantity instead of a copied draw for {copied}",
+        queries=(
+            f"{subject} rate volume run-rate monthly figures",
+            f"{subject} drivers demand capacity constraints",
+        ),
+        instruction=(
+            f"A producer sets {copied} to a bare copy of an uncertainty, so the answer is "
+            "still the branch draw — now laundered through a node or action that computes "
+            "nothing. Copying an unknown into the field the terminal reads is the same "
+            "defect as an uncertainty writing it directly.\n"
+            "Model what PRODUCES the quantity. For a total accumulated over a period — "
+            "deliveries, output, volume, votes — compile the producing units and their "
+            "rate and accumulate across the window with adjust_field, so the terminal "
+            "reads a total the world built. Put the uncertainty on the RATE, the demand or "
+            "the disruption, each with grounded outcomes, never on the total itself.\n"
+            "For a decision the terminal reads, do not set it equal to a preference draw: "
+            "give the actor real alternative actions and let the choice follow from what "
+            "the actor knows, so the decision is produced, not rubber-stamped."
+        ),
+    )
+
+
 def _orphan_actors(exc: WorldIntegrityError, subject: str) -> RepairPlan:
     orphans = _strings(exc.details.get("orphan_actors"))
     return RepairPlan(
@@ -554,6 +592,7 @@ _PLANS = {
     "nothing_scheduled": _nothing_scheduled,
     "orphan_actors": _orphan_actors,
     "uncertainty_writes_terminal": _uncertainty_writes_terminal,
+    "terminal_laundered_from_uncertainty": _terminal_laundered_from_uncertainty,
     "terminal_reads_no_world_state": _terminal_reads_no_world_state,
     "decisive_evidence_contradiction": _decisive_evidence_contradiction,
     "unknown_expression_operator": _unknown_expression_operator,

@@ -744,3 +744,154 @@ def test_a_question_the_record_has_already_answered_compiles_from_its_citations(
     with pytest.raises(WorldIntegrityError) as exc:
         _compile(data, _gateway(_signal_sensitive))
     assert exc.value.details["failure"] == "terminal_has_no_producer"
+
+
+def test_a_terminal_copied_from_an_ungrounded_uncertainty_is_refused() -> None:
+    """The Tesla launder: an uncertainty draw copied one hop into the terminal term.
+
+    A live run declared `delivery_value_exogenous` as a 50/50 exogenous uncertainty and an
+    end-of-quarter node that set `actual_q3_deliveries = field(delivery_value_exogenous)` —
+    the terminal read the deliveries. The uncertainty did not write the terminal term
+    directly, so the earlier gate saw a node as the producer and passed it; the answer was
+    the branch weight all the same, laundered through a node that computed nothing.
+    """
+
+    from sworldmodel.errors import WorldIntegrityError
+
+    data = _split_world()
+    data["world_spec"]["fields"].append(
+        {"field_id": "delivery_value_exogenous", "value_type": "number", "initial": 0}
+    )
+    data["world_spec"]["fields"].append(
+        {"field_id": "actual_deliveries", "value_type": "number", "initial": 0}
+    )
+    data["world_spec"]["terminal"]["yes_when"] = {
+        "op": "greater_than",
+        "args": [{"op": "field", "args": ["actual_deliveries"]}, 400000],
+    }
+    data["world_spec"]["external_processes"] = [
+        {
+            "process_id": "q_end",
+            "description": "the quarter closes and the total is recorded",
+            "occurrences": [
+                {
+                    "at": "2026-06-20T00:00:00+00:00",
+                    "description": "quarter end",
+                    "effects": [
+                        {
+                            "op": "set_field",
+                            "field": "actual_deliveries",
+                            "value": {"op": "field", "args": ["delivery_value_exogenous"]},
+                        }
+                    ],
+                }
+            ],
+            "evidence_claim_ids": [],
+        }
+    ]
+    data["uncertainties"] = [
+        {
+            "variable": "delivery_value_exogenous",
+            "why_unknown": "the quarter is not over",
+            "reversal_capable": True,
+            "outcomes": [
+                {
+                    "value": "over",
+                    "weight": 0.5,
+                    "provenance": "symmetric_ignorance_assumption",
+                    "field_effects": [["delivery_value_exogenous", 400001]],
+                },
+                {
+                    "value": "under",
+                    "weight": 0.5,
+                    "provenance": "symmetric_ignorance_assumption",
+                    "field_effects": [["delivery_value_exogenous", 380000]],
+                },
+            ],
+        }
+    ]
+
+    with pytest.raises(WorldIntegrityError) as exc:
+        _compile(data, _gateway(_signal_sensitive))
+    assert exc.value.details["failure"] == "terminal_laundered_from_uncertainty"
+    assert exc.value.details["terminal terms copied from an uncertainty"] == ["actual_deliveries"]
+
+
+def test_a_total_computed_from_a_grounded_base_and_an_uncertain_rate_is_not_a_launder() -> None:
+    """The world the launder gate must permit: uncertainty on the driver, not the total.
+
+    A quarter's deliveries built from a grounded starting run-rate scaled by an uncertain
+    demand multiplier is production — the unknown sits on the rate, which is exactly where
+    the compiler is told to put it — and the terminal reads a total the world computed, not
+    a draw copied into it.
+    """
+
+    from sworldmodel.world_compiler import _laundered_terminal_terms, terminal_producers
+
+    data = _split_world()
+    data["world_spec"]["fields"].append(
+        {"field_id": "base_runrate", "value_type": "number", "initial": 350000}
+    )
+    data["world_spec"]["fields"].append(
+        {"field_id": "demand_multiplier", "value_type": "number", "initial": 1.0}
+    )
+    data["world_spec"]["fields"].append(
+        {"field_id": "actual_deliveries", "value_type": "number", "initial": 0}
+    )
+    data["world_spec"]["terminal"]["yes_when"] = {
+        "op": "greater_than",
+        "args": [{"op": "field", "args": ["actual_deliveries"]}, 400000],
+    }
+    data["world_spec"]["external_processes"] = [
+        {
+            "process_id": "q_end",
+            "description": "the quarter's output is the run-rate scaled by realised demand",
+            "occurrences": [
+                {
+                    "at": "2026-06-20T00:00:00+00:00",
+                    "description": "quarter end",
+                    "effects": [
+                        {
+                            "op": "set_field",
+                            "field": "actual_deliveries",
+                            "value": {
+                                "op": "multiply",
+                                "args": [
+                                    {"op": "field", "args": ["base_runrate"]},
+                                    {"op": "field", "args": ["demand_multiplier"]},
+                                ],
+                            },
+                        }
+                    ],
+                }
+            ],
+            "evidence_claim_ids": [],
+        }
+    ]
+    data["uncertainties"] = [
+        {
+            "variable": "demand_multiplier",
+            "why_unknown": "demand for the quarter is not yet observed",
+            "reversal_capable": True,
+            "outcomes": [
+                {
+                    "value": "strong",
+                    "weight": 0.5,
+                    "provenance": "symmetric_ignorance_assumption",
+                    "field_effects": [["demand_multiplier", 1.2]],
+                },
+                {
+                    "value": "weak",
+                    "weight": 0.5,
+                    "provenance": "symmetric_ignorance_assumption",
+                    "field_effects": [["demand_multiplier", 1.05]],
+                },
+            ],
+        }
+    ]
+
+    bundle = build_bundle(data)
+    producers = terminal_producers(bundle.spec)
+    # The value reads a grounded base as well as the uncertain rate, so it is production,
+    # not a bare copy of a draw — the launder gate leaves it alone.
+    assert _laundered_terminal_terms(bundle.spec, bundle.uncertainties, producers) == {}

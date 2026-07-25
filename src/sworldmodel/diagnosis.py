@@ -434,6 +434,7 @@ class RunDiagnosis:
             "actors_cannot_reach_terminal",
             "environment_presets_terminal",
             "uncertainty_writes_terminal",
+            "terminal_laundered_from_uncertainty",
             "terminal_reads_no_world_state",
         ):
             out.append(

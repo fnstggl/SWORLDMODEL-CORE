@@ -1,0 +1,644 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>World Model — Replay</title>
+<style>
+  :root{
+    --bg:#070b12; --bg2:#0b1220; --panel:#0e1626; --panel2:#111d31;
+    --line:#1c2c44; --line2:#263a58; --ink:#dce6f5; --dim:#7f92ad; --dimmer:#54657f;
+    --accent:#39d0ff; --accent2:#7cf6c0; --warn:#ffcf5c; --bad:#ff6b7d; --good:#5cf39a;
+    --actor:#39d0ff; --entity:#9a86ff; --field:#7cf6c0; --term:#ffcf5c;
+    --mono:"SFMono-Regular",ui-monospace,"JetBrains Mono",Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Inter,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:13px;
+       overflow:hidden;-webkit-font-smoothing:antialiased}
+  a{color:var(--accent)}
+  .mono{font-family:var(--mono)}
+  #app{display:flex;flex-direction:column;height:100vh}
+
+  /* ---- top bar ---- */
+  #topbar{border-bottom:1px solid var(--line);background:linear-gradient(180deg,#0b1626,#080e18);
+    padding:8px 14px;display:flex;gap:14px;align-items:center;flex-wrap:wrap}
+  #topbar .brand{font-weight:700;letter-spacing:.5px;color:var(--accent);white-space:nowrap}
+  #topbar .brand small{color:var(--dimmer);font-weight:400;letter-spacing:0}
+  select{background:var(--panel2);color:var(--ink);border:1px solid var(--line2);border-radius:6px;
+    padding:5px 8px;font-family:var(--mono);font-size:12px;max-width:46vw}
+  .q{flex:1;min-width:200px;color:var(--ink);font-size:13px;line-height:1.3}
+  .badges{display:flex;gap:6px;flex-wrap:wrap}
+  .badge{border:1px solid var(--line2);border-radius:999px;padding:2px 9px;font-size:11px;
+    color:var(--dim);white-space:nowrap;font-family:var(--mono)}
+  .badge b{color:var(--ink);font-weight:600}
+  .badge.p{border-color:#2a6a86;color:var(--accent)}
+  .badge.ok{border-color:#2a6a4a;color:var(--good)}
+  .badge.no{border-color:#6a2a35;color:var(--bad)}
+  .badge.warn{border-color:#6a5a2a;color:var(--warn)}
+
+  /* ---- main grid ---- */
+  #main{flex:1;display:grid;grid-template-columns:230px 1fr 420px;min-height:0}
+  #main.collapsed{grid-template-columns:230px 1fr 34px}
+  aside,section{min-height:0;min-width:0}
+  #left{border-right:1px solid var(--line);background:var(--bg2);overflow:auto}
+  #center{display:flex;flex-direction:column;min-height:0;position:relative}
+  #right{border-left:1px solid var(--line);background:var(--bg2);display:flex;flex-direction:column;min-height:0}
+
+  .sectitle{font-size:10px;letter-spacing:1.4px;text-transform:uppercase;color:var(--dimmer);
+    padding:9px 12px 5px;position:sticky;top:0;background:var(--bg2);z-index:2}
+
+  /* ---- roster ---- */
+  .card{margin:5px 8px;padding:8px 9px;border:1px solid var(--line);border-radius:8px;background:var(--panel);
+    cursor:pointer;transition:border-color .15s,background .15s}
+  .card:hover{border-color:var(--line2)}
+  .card.sel{border-color:var(--accent);box-shadow:0 0 0 1px #1c4a5e inset}
+  .card .nm{font-weight:600;font-size:12.5px;display:flex;align-items:center;gap:6px}
+  .dot{width:8px;height:8px;border-radius:50%;flex:none}
+  .dot.actor{background:var(--actor);box-shadow:0 0 7px var(--actor)}
+  .dot.entity{background:var(--entity);box-shadow:0 0 7px var(--entity)}
+  .card .role{color:var(--dim);font-size:11px;margin-top:2px;line-height:1.25}
+  .card .meta{color:var(--dimmer);font-size:10.5px;margin-top:4px;font-family:var(--mono)}
+  .tag{display:inline-block;border:1px solid var(--line2);border-radius:4px;padding:0 5px;margin:2px 3px 0 0;
+    font-size:10px;color:var(--dim);font-family:var(--mono)}
+
+  /* ---- plane ---- */
+  #planewrap{flex:1;min-height:0;position:relative;overflow:hidden;
+    background:radial-gradient(circle at 50% 32%, #0e1a2e 0%, #080e18 72%);
+    background-color:#080e18}
+  #plane{position:absolute;inset:0}
+  .grid-bg{position:absolute;inset:0;background-image:
+      linear-gradient(#0f1c30 1px,transparent 1px),
+      linear-gradient(90deg,#0f1c30 1px,transparent 1px);
+    background-size:40px 40px;opacity:.5;pointer-events:none}
+  svg.edges{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+  .node{position:absolute;transform:translate(-50%,-50%);border-radius:10px;padding:7px 10px;
+    border:1px solid var(--line2);background:#0d1830;min-width:96px;max-width:190px;text-align:center;
+    transition:box-shadow .2s,border-color .2s,transform .2s;cursor:pointer}
+  .node .t{font-size:11.5px;font-weight:600;line-height:1.2;overflow:hidden;text-overflow:ellipsis}
+  .node .s{font-size:9.5px;color:var(--dim);margin-top:2px;font-family:var(--mono)}
+  .node.actor{border-color:#245b73}
+  .node.actor .t{color:#bfeeff}
+  .node.entity{border-color:#3d3470;background:#150f2b}
+  .node.entity .t{color:#d8ccff}
+  .node.field{border-color:#245b4d;background:#0a1f1a;min-width:70px;padding:5px 8px}
+  .node.field .t{color:#bff6df;font-family:var(--mono);font-size:10.5px}
+  .node.field .v{font-size:11px;color:#fff;font-family:var(--mono);margin-top:2px}
+  .node.term{border-color:#6a5a2a;background:#211a08}
+  .node.term .t{color:var(--term)}
+  .node.hot{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent),0 0 22px #1d7fa0;transform:translate(-50%,-50%) scale(1.06);z-index:5}
+  .node.write{border-color:var(--field);box-shadow:0 0 0 1px var(--field),0 0 20px #1c7a5e}
+  .node.dim{opacity:.4}
+  .plabel{position:absolute;transform:translate(-50%,-50%);font-size:9px;color:var(--dimmer);
+    font-family:var(--mono);letter-spacing:1px;text-transform:uppercase;pointer-events:none}
+
+  /* ---- transport ---- */
+  #transport{border-top:1px solid var(--line);background:#0a1220;padding:8px 12px;display:flex;
+    flex-direction:column;gap:7px}
+  .branchtabs{display:flex;gap:5px;flex-wrap:wrap}
+  .btab{border:1px solid var(--line2);border-radius:6px;padding:3px 9px;font-size:11px;cursor:pointer;
+    color:var(--dim);background:var(--panel);font-family:var(--mono);display:flex;gap:6px;align-items:center}
+  .btab.sel{border-color:var(--accent);color:var(--ink);background:#0e2233}
+  .btab .w{color:var(--dimmer)}
+  .btab .oc{font-weight:700}
+  .btab .oc.YES{color:var(--good)} .btab .oc.NO{color:var(--bad)} .btab .oc.UNRESOLVED{color:var(--warn)}
+  .controls{display:flex;align-items:center;gap:9px}
+  button.ctl{background:var(--panel2);color:var(--ink);border:1px solid var(--line2);border-radius:6px;
+    width:34px;height:30px;cursor:pointer;font-size:14px;display:flex;align-items:center;justify-content:center}
+  button.ctl:hover{border-color:var(--accent)}
+  button.ctl.play{width:44px;color:#04121a;background:var(--accent);border-color:var(--accent);font-weight:700}
+  input[type=range]{flex:1;accent-color:var(--accent)}
+  .stepnum{font-family:var(--mono);font-size:11px;color:var(--dim);white-space:nowrap;min-width:120px}
+  .stepnum b{color:var(--ink)}
+  .speed{font-family:var(--mono);font-size:11px;color:var(--dim)}
+
+  /* ---- right log ---- */
+  #right .tabs{display:flex;border-bottom:1px solid var(--line);background:var(--bg2);flex-wrap:wrap}
+  #right .tabs button{flex:1;min-width:56px;background:none;border:none;color:var(--dim);padding:8px 4px;
+    font-size:11px;cursor:pointer;border-bottom:2px solid transparent;font-family:var(--mono);letter-spacing:.3px}
+  #right .tabs button.sel{color:var(--accent);border-bottom-color:var(--accent)}
+  #panel{flex:1;overflow:auto;padding:11px 12px}
+  #collapsebar{writing-mode:vertical-rl;text-orientation:mixed;cursor:pointer;color:var(--dim);
+    padding:10px 8px;font-size:10px;letter-spacing:2px;text-transform:uppercase;user-select:none}
+  #main.collapsed #right .tabs,#main.collapsed #panel{display:none}
+  #main:not(.collapsed) #collapsebar{display:none}
+
+  h4.k{font-size:10px;letter-spacing:1.2px;text-transform:uppercase;color:var(--dimmer);margin:14px 0 6px}
+  h4.k:first-child{margin-top:0}
+  pre{background:#060b14;border:1px solid var(--line);border-radius:7px;padding:9px 10px;margin:0;
+    font-family:var(--mono);font-size:11px;line-height:1.5;color:#c7d6ea;white-space:pre-wrap;word-break:break-word;
+    max-height:none;overflow:auto}
+  pre.prompt{border-color:#2a466a;background:#081426}
+  pre.resp{border-color:#2a5a46;background:#08160f;color:#d6f3e4}
+  .kv{display:grid;grid-template-columns:auto 1fr;gap:2px 12px;font-family:var(--mono);font-size:11px;margin:3px 0}
+  .kv .lbl{color:var(--dim)}
+  .kv .val{color:var(--ink);word-break:break-word}
+  .steprow{display:flex;gap:8px;align-items:baseline;padding:4px 6px;border-radius:6px;cursor:pointer;
+    font-family:var(--mono);font-size:11px;border:1px solid transparent}
+  .steprow:hover{background:#0d1830}
+  .steprow.sel{background:#0e2233;border-color:#245b73}
+  .steprow .i{color:var(--dimmer);min-width:24px;text-align:right}
+  .steprow .ty{min-width:64px}
+  .steprow .ty.decision{color:var(--accent)} .steprow .ty.event{color:var(--field)}
+  .steprow .d{color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .chip{display:inline-block;font-family:var(--mono);font-size:10px;padding:1px 6px;border-radius:4px;
+    border:1px solid var(--line2);color:var(--dim);margin:0 4px 4px 0}
+  .chip b{color:var(--ink)}
+  .bar{height:7px;border-radius:4px;background:#0c1626;overflow:hidden;border:1px solid var(--line);margin:2px 0 8px}
+  .bar > i{display:block;height:100%;background:linear-gradient(90deg,#1d7fa0,var(--accent))}
+  .empty{color:var(--dimmer);font-style:italic;padding:20px 4px;text-align:center}
+  .refusebox{border:1px solid #6a2a35;border-radius:8px;background:#1a0d10;padding:10px 12px;margin-bottom:10px}
+  .refusebox .gate{color:var(--bad);font-weight:700;font-family:var(--mono)}
+  .llmk{display:flex;justify-content:space-between;font-family:var(--mono);font-size:11px;padding:3px 0;border-bottom:1px solid #101c2e}
+  .llmk .c{color:var(--accent)}
+  .seqbar{display:flex;flex-wrap:wrap;gap:3px;margin:6px 0}
+  .seqbar span{font-family:var(--mono);font-size:9px;padding:1px 5px;border-radius:4px;background:#0e1a2c;color:var(--dim);border:1px solid var(--line)}
+  .flash{position:absolute;left:50%;bottom:12px;transform:translateX(-50%);background:#0e2233;border:1px solid var(--accent);
+    color:var(--ink);padding:5px 12px;border-radius:999px;font-family:var(--mono);font-size:11px;opacity:0;transition:opacity .3s;pointer-events:none}
+  .flash.on{opacity:1}
+  .hint{color:var(--dimmer);font-size:11px;padding:2px 12px 10px}
+  ::-webkit-scrollbar{width:9px;height:9px}
+  ::-webkit-scrollbar-thumb{background:#1c2c44;border-radius:5px}
+  ::-webkit-scrollbar-track{background:transparent}
+</style>
+</head>
+<body>
+<div id="app">
+  <header id="topbar">
+    <div class="brand">◉ WORLD&nbsp;MODEL <small>replay</small></div>
+    <select id="tracepick" title="Pick a run to replay"></select>
+    <div class="q" id="question">Select a run to begin.</div>
+    <div class="badges" id="badges"></div>
+  </header>
+  <div id="main">
+    <aside id="left">
+      <div class="sectitle">Actors &amp; entities</div>
+      <div id="roster"></div>
+    </aside>
+    <section id="center">
+      <div id="planewrap">
+        <div class="grid-bg"></div>
+        <svg class="edges" id="edges"></svg>
+        <div id="plane"></div>
+        <div class="flash" id="flash"></div>
+      </div>
+      <div id="transport">
+        <div class="branchtabs" id="branchtabs"></div>
+        <div class="controls">
+          <button class="ctl" id="toStart" title="Restart">⏮</button>
+          <button class="ctl" id="stepBack" title="Step −1">◀</button>
+          <button class="ctl play" id="playPause" title="Play / pause">▶</button>
+          <button class="ctl" id="stepFwd" title="Step +1">▶▌</button>
+          <input type="range" id="scrub" min="0" max="0" value="0">
+          <span class="stepnum" id="stepnum">—</span>
+          <span class="speed" id="speed" title="Playback speed (click to change)">1.0×</span>
+        </div>
+      </div>
+    </section>
+    <aside id="right">
+      <div id="collapsebar" title="Open log">◂ LOG</div>
+      <div class="tabs" id="rtabs">
+        <button data-tab="step" class="sel">Step</button>
+        <button data-tab="steps">Timeline</button>
+        <button data-tab="llm">LLM</button>
+        <button data-tab="world">World</button>
+        <button data-tab="integrity">Integrity</button>
+        <button data-tab="raw">Raw</button>
+        <button data-tab="hide" title="Collapse">×</button>
+      </div>
+      <div id="panel"></div>
+    </aside>
+  </div>
+</div>
+<script>
+"use strict";
+const $ = s => document.querySelector(s);
+const el = (t,c,txt)=>{const e=document.createElement(t); if(c)e.className=c; if(txt!=null)e.textContent=txt; return e;};
+const esc = s => (s==null?"":String(s)).replace(/[&<>]/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[m]));
+const fx = (n,d=4)=> (n==null||isNaN(n))?"—":Number(n).toFixed(d);
+const pct = n => (n==null||isNaN(n))?"—":(Number(n)*100).toFixed(1)+"%";
+const short = (s,n=90)=> {s=s==null?"":String(s); return s.length>n?s.slice(0,n)+"…":s;};
+
+const S = { data:null, bi:0, si:0, playing:false, timer:null, speed:1, tab:"step", selActor:null };
+
+// ---------- boot ----------
+async function boot(){
+  let traces=[];
+  try{ const r=await fetch("/api/traces"); traces=(await r.json()).traces||[]; }
+  catch(e){ $("#question").textContent="Cannot reach the replay server."; return; }
+  const pick=$("#tracepick"); pick.innerHTML="";
+  if(!traces.length){ pick.appendChild(el("option",null,"no traces found")); return; }
+  traces.forEach(t=>{
+    const o=el("option");
+    o.value=t.path;
+    o.textContent=`${t.case} · ${t.status}` + (t.branches?` · ${t.branches}br`:"") + (t.actor_calls?` · ${t.actor_calls} decisions`:"");
+    pick.appendChild(o);
+  });
+  pick.onchange=()=>loadTrace(pick.value);
+  // pick the newest completed/decision-bearing run first, else the newest
+  const best = traces.find(t=>t.actor_calls>0) || traces[0];
+  pick.value=best.path;
+  loadTrace(best.path);
+}
+
+async function loadTrace(path){
+  $("#question").textContent="loading…";
+  let d;
+  try{ const r=await fetch("/api/replay?trace="+encodeURIComponent(path)); d=await r.json(); }
+  catch(e){ $("#question").textContent="failed to load trace"; return; }
+  if(d.error){ $("#question").textContent="error: "+d.error; return; }
+  S.data=d; S.bi=0; S.si=0; S.selActor=null; pause();
+  renderTop(); renderRoster(); renderBranches(); layoutPlane(); gotoStep(0); renderPanel();
+}
+
+// ---------- top bar ----------
+function renderTop(){
+  const m=S.data.meta;
+  $("#question").textContent=m.question||"(no question)";
+  const b=$("#badges"); b.innerHTML="";
+  const add=(cls,html)=>{const x=el("span","badge "+(cls||"")); x.innerHTML=html; b.appendChild(x);};
+  if(m.mode) add("", `<b>${esc(m.mode)}</b>`);
+  const st=(m.status||"").toLowerCase();
+  add(st.includes("refus")?"no":(st.includes("resolv")?"ok":"warn"), `status <b>${esc(m.status)}</b>`);
+  if(m.probability!=null) add("p", `P <b>${pct(m.probability)}</b>`);
+  if(m.lower_bound!=null) add("", `bounds <b>[${fx(m.lower_bound,2)}, ${fx(m.upper_bound,2)}]</b>`);
+  if(m.trajectory_classification) add("", `traj <b>${esc(m.trajectory_classification)}</b>`);
+  if(m.model_calls!=null) add("", `calls <b>${m.model_calls}</b>`);
+  if(m.wall_seconds!=null) add("", `wall <b>${Math.round(m.wall_seconds)}s</b>`);
+  if(m.as_of) add("", `as-of <b>${esc(short(m.as_of,19))}</b>`);
+  if(m.horizon) add("", `horizon <b>${esc(short(m.horizon,19))}</b>`);
+}
+
+// ---------- roster ----------
+function renderRoster(){
+  const w=S.data.world, host=$("#roster"); host.innerHTML="";
+  const mk=(node,isActor)=>{
+    const c=el("div","card"+(S.selActor===node.id?" sel":"")); c.dataset.id=node.id;
+    const nm=el("div","nm"); nm.appendChild(el("span","dot "+(isActor?"actor":"entity")));
+    nm.appendChild(el("span",null,node.name||node.id)); c.appendChild(nm);
+    if(node.role) c.appendChild(el("div","role",node.role));
+    const meta=el("div","meta");
+    let bits=[];
+    if(node.scale) bits.push(node.scale);
+    if(node.represents_count) bits.push("represents "+node.represents_count);
+    if(node.kind) bits.push(node.kind);
+    meta.textContent=bits.join(" · "); if(bits.length) c.appendChild(meta);
+    (node.authority||[]).forEach(a=>{const t=el("span","tag","⚿ "+a); c.appendChild(t);});
+    c.onclick=()=>{ S.selActor=(S.selActor===node.id?null:node.id); renderRoster(); layoutPlane(); if(S.selActor){S.tab="step";setTab();} };
+    host.appendChild(c);
+  };
+  if(!w.actors.length && !w.entities.length){ host.appendChild(el("div","hint","No entities compiled.")); }
+  w.actors.forEach(a=>mk(a,true));
+  w.entities.forEach(e=>mk(e,false));
+  // uncertainties block
+  if(w.uncertainties && w.uncertainties.length){
+    host.appendChild(el("div","sectitle","Uncertainties"));
+    w.uncertainties.forEach(u=>{
+      const c=el("div","card"); c.style.cursor="default";
+      c.appendChild(el("div","nm",u.variable));
+      if(u.why_unknown) c.appendChild(el("div","role",u.why_unknown));
+      (u.outcomes||[]).forEach(o=>{
+        const t=el("span","tag",`${o.value} · w=${fx(o.weight,2)}`); c.appendChild(t);
+      });
+      host.appendChild(c);
+    });
+  }
+}
+
+// ---------- plane ----------
+function layoutPlane(){
+  const plane=$("#plane"), svg=$("#edges"); plane.innerHTML=""; svg.innerHTML="";
+  const w=S.data.world; const W=plane.clientWidth||900, H=plane.clientHeight||460;
+  const nodes={}; // id -> {x,y,el}
+  const put=(id,cls,title,sub,x,y,val)=>{
+    const n=el("div","node "+cls); n.style.left=x+"px"; n.style.top=y+"px"; n.dataset.id=id;
+    n.appendChild(el("div","t",title));
+    if(sub) n.appendChild(el("div","s",sub));
+    if(val!==undefined){const v=el("div","v"); v.textContent=val; v.dataset.role="val"; n.appendChild(v);}
+    plane.appendChild(n); nodes[id]={x,y,el:n};
+    return n;
+  };
+  const spread=(count,i,l,r)=> count===1 ? (l+r)/2*W : (l*W + (r-l)*W*(i/Math.max(1,count-1)));
+  // actors across the top
+  const actors=w.actors, ents=w.entities;
+  const topY=H*0.20;
+  actors.forEach((a,i)=>{
+    const x=spread(actors.length,i,0.13,0.87);
+    const n=put("actor:"+a.id,"actor",a.name||a.id, a.role?short(a.role,26):(a.scale||"actor"), x, topY);
+    n.onclick=()=>{ S.selActor=a.id; renderRoster(); layoutPlane(); };
+  });
+  // entities on a mid band (context — non-acting)
+  ents.forEach((e,i)=>{
+    put("entity:"+e.id,"entity",e.name||e.id, e.role?short(e.role,22):(e.kind||""), spread(ents.length,i,0.12,0.88), H*0.44);
+  });
+  // fields (world state vector) along the bottom
+  const fields=w.fields||[];
+  const fy=H*0.74;
+  fields.forEach((f,i)=>{
+    put("field:"+f,"field",f,null,spread(fields.length,i,0.10,0.76),fy,"·");
+  });
+  // terminal node on the far right-bottom
+  const term=w.terminal||{};
+  put("terminal","term","⚑ TERMINAL", short(term.description||"outcome",40), W*0.92, fy);
+
+  // edges: action's actor -> each field it writes (who can change what), then
+  // field -> terminal (what the outcome reads). Purely structural, from the compiled world.
+  const line=(a,b)=>{
+    if(!a||!b) return;
+    const l=document.createElementNS("http://www.w3.org/2000/svg","line");
+    l.setAttribute("x1",a.x); l.setAttribute("y1",a.y); l.setAttribute("x2",b.x); l.setAttribute("y2",b.y);
+    l.setAttribute("stroke","#1d3a55"); l.setAttribute("stroke-width","1");
+    l.setAttribute("stroke-dasharray","3 4"); l.setAttribute("opacity","0.55");
+    svg.appendChild(l);
+  };
+  const fieldNode=(wr)=> nodes[wr] || nodes["field:"+String(wr).replace(/^field:/,"")];
+  (w.actions||[]).forEach(act=>{
+    const eligibleActor = actors.find(a => (act.authority||[]).some(au=>(a.authority||[]).includes(au))) || actors[0];
+    const src = eligibleActor ? nodes["actor:"+eligibleActor.id] : null;
+    (act.writes||[]).forEach(wr=> line(src, fieldNode(wr)));
+  });
+  Object.keys(w.terminal_producers||{}).forEach(term=> line(fieldNode(term), nodes["terminal"]));
+  S._nodes=nodes;
+  paintStep(); // reflect current step highlight
+}
+function cssq(s){return String(s).replace(/"/g,'\\"');}
+
+// ---------- world state accumulation ----------
+function stateAt(branch, uptoSeq){
+  const st={}; const coll={};
+  for(const s of branch.steps){
+    if(s.seq>uptoSeq) break;
+    if(s.type==="event"){
+      const p=s.payload||{};
+      if(s.kind==="set_field" && p.field!==undefined) st[p.field]=p.value;
+      if(s.kind==="append_to_collection" && p.collection!==undefined){ (coll[p.collection]=coll[p.collection]||[]).push(p.value ?? p.item); }
+      if(s.kind==="release_data" && p.branch_conditions){ for(const k in p.branch_conditions) st["·"+k]=p.branch_conditions[k]; }
+    }
+  }
+  return {fields:st, collections:coll};
+}
+
+function paintStep(){
+  const b=curBranch(); if(!b) return;
+  const step=b.steps[S.si];
+  const st=stateAt(b,S.si);
+  // update field node values
+  (S.data.world.fields||[]).forEach(f=>{
+    const n=$('#plane .node.field[data-id="field:'+cssq(f)+'"]');
+    if(!n) return;
+    const v=n.querySelector('[data-role=val]');
+    if(v){ const val=st.fields[f]; v.textContent = (val===undefined?"·":String(val)); }
+    n.classList.remove("write");
+  });
+  // clear hot
+  $$(".node").forEach(n=>n.classList.remove("hot"));
+  $$("#edges line").forEach(l=>l.setAttribute("stroke","#1d3a55"));
+  if(!step) return;
+  // highlight active actor / field for this step
+  if(step.type==="decision" && step.actor_id){
+    const n=$('#plane .node.actor[data-id="actor:'+cssq(step.actor_id)+'"]'); if(n)n.classList.add("hot");
+    flash(`${step.actor_name||step.actor_id} · ${step.action_id||step.action_mode||"decides"}`);
+  }
+  if(step.type==="event"){
+    const p=step.payload||{};
+    if(step.kind==="set_field" && p.field!==undefined){
+      const n=$('#plane .node.field[data-id="field:'+cssq(p.field)+'"]'); if(n)n.classList.add("write");
+      if(step.actor_id){const a=$('#plane .node.actor[data-id="actor:'+cssq(step.actor_id)+'"]'); if(a)a.classList.add("hot");}
+    }
+    if(step.kind==="create_event"){ flash("⚑ "+short(JSON.stringify(p.data||p),50)); }
+  }
+}
+const $$ = s => Array.from(document.querySelectorAll(s));
+let flashTimer=null;
+function flash(txt){ const f=$("#flash"); f.textContent=txt; f.classList.add("on"); clearTimeout(flashTimer); flashTimer=setTimeout(()=>f.classList.remove("on"),1400); }
+
+// ---------- branches / transport ----------
+function curBranch(){ return (S.data.branches||[])[S.bi]; }
+function renderBranches(){
+  const host=$("#branchtabs"); host.innerHTML="";
+  const bs=S.data.branches||[];
+  if(!bs.length){ host.appendChild(el("div","hint","No simulated branches (refused or engine did not run). See the Integrity / Raw tabs.")); return; }
+  bs.forEach((b,i)=>{
+    const t=el("div","btab"+(i===S.bi?" sel":""));
+    const oc=(b.outcome||(b.resolved===false?"UNRESOLVED":"—"));
+    t.innerHTML=`<span>${esc(b.local_id||b.id)}</span>`+
+      (b.weight!=null?`<span class="w">w=${fx(b.weight,2)}</span>`:"")+
+      `<span class="oc ${esc(oc)}">${esc(oc)}</span>`;
+    t.onclick=()=>{ S.bi=i; S.si=0; renderBranches(); layoutPlane(); gotoStep(0); };
+    host.appendChild(t);
+  });
+}
+
+function stepCount(){ const b=curBranch(); return b?b.steps.length:0; }
+function gotoStep(i){
+  const n=stepCount();
+  S.si=Math.max(0,Math.min(i, Math.max(0,n-1)));
+  $("#scrub").max=Math.max(0,n-1); $("#scrub").value=S.si;
+  const b=curBranch(); const step=b&&b.steps[S.si];
+  $("#stepnum").innerHTML = n? `<b>${S.si+1}</b>/${n} · ${step?esc(step.type):""}` : "no steps";
+  paintStep();
+  if(S.tab==="step"||S.tab==="steps") renderPanel();
+}
+function play(){ if(S.playing||stepCount()===0) return; S.playing=true; $("#playPause").textContent="⏸";
+  S.timer=setInterval(()=>{ if(S.si>=stepCount()-1){pause();return;} gotoStep(S.si+1);}, 1100/S.speed); }
+function pause(){ S.playing=false; if(S.timer)clearInterval(S.timer); S.timer=null; $("#playPause").textContent="▶"; }
+
+// ---------- right panel ----------
+function setTab(){ $$("#rtabs button").forEach(b=>b.classList.toggle("sel",b.dataset.tab===S.tab)); renderPanel(); }
+function renderPanel(){
+  const p=$("#panel"); if(!S.data){p.innerHTML="";return;}
+  const T=S.tab;
+  if(T==="step") p.innerHTML=viewStep();
+  else if(T==="steps") p.innerHTML=viewSteps();
+  else if(T==="llm") p.innerHTML=viewLLM();
+  else if(T==="world") p.innerHTML=viewWorld();
+  else if(T==="integrity") p.innerHTML=viewIntegrity();
+  else if(T==="raw") p.innerHTML=viewRaw();
+  // wire step rows
+  if(T==="steps") $$("#panel .steprow").forEach(r=>r.onclick=()=>{gotoStep(+r.dataset.i);});
+}
+
+function kv(pairs){ return `<div class="kv">`+pairs.filter(x=>x&&x[1]!=null&&x[1]!=="").map(([k,v])=>
+  `<div class="lbl">${esc(k)}</div><div class="val">${v}</div>`).join("")+`</div>`; }
+
+function viewStep(){
+  const b=curBranch(); if(!b) return refusalOrEmpty();
+  const s=b.steps[S.si]; if(!s) return `<div class="empty">No step.</div>`;
+  if(s.type==="decision"){
+    const iv=s.intent||{}, lv=s.local_view||{};
+    let h=`<h4 class="k">Decision · step ${s.seq+1}</h4>`;
+    h+=kv([
+      ["actor", `<b>${esc(s.actor_name||s.actor_id)}</b>`],
+      ["time", esc(s.time)],
+      ["stage", esc(s.stage)],
+      ["woke because", esc(s.wake_reason)+(s.wake_detail?` — ${esc(short(s.wake_detail,120))}`:"")],
+      ["chose", `<b>${esc(s.action_id||s.action_mode||"—")}</b>`],
+      ["validation", esc(s.validation_status)+(s.validation_reason?` — ${esc(short(s.validation_reason,90))}`:"")],
+      ["model", esc(s.model)],
+    ]);
+    if(s.rationale) h+=`<h4 class="k">Actor's stated reasoning</h4><pre>${esc(s.rationale)}</pre>`;
+    if(iv && Object.keys(iv).length) h+=`<h4 class="k">Intent (parsed)</h4><pre>${esc(JSON.stringify(iv,null,1))}</pre>`;
+    h+=`<h4 class="k">Exact prompt given to the model</h4><pre class="prompt">${esc(s.exact_prompt||"(not recorded)")}</pre>`;
+    h+=`<h4 class="k">Exact model response (verbatim)</h4><pre class="resp">${esc(fmtResp(s.provider_response))}</pre>`;
+    if(lv && Object.keys(lv).length) h+=`<h4 class="k">What the actor could see (local view)</h4><pre>${esc(JSON.stringify(lv,null,1))}</pre>`;
+    if(s.plan_before||s.plan_after) h+=`<h4 class="k">Plan transition</h4>`+kv([["before",esc(JSON.stringify(s.plan_before))],["after",esc(JSON.stringify(s.plan_after))]]);
+    return h;
+  }
+  // event step
+  let h=`<h4 class="k">Event · step ${s.seq+1}</h4>`;
+  h+=kv([
+    ["kind", `<b>${esc(s.kind)}</b>`],
+    ["time", esc(s.time)],
+    ["actor", esc(s.actor_id)],
+    ["event id", esc(s.event_id)],
+    ["visibility", esc(s.visibility)],
+    ["evidence", (s.evidence_claim_ids||[]).map(esc).join(", ")],
+  ]);
+  h+=`<h4 class="k">Payload — the state transformation</h4><pre>${esc(JSON.stringify(s.payload,null,1))}</pre>`;
+  // show resulting state
+  const st=stateAt(b,S.si);
+  h+=`<h4 class="k">World state after this step</h4>`+stateBoard(st);
+  return h;
+}
+function fmtResp(r){ if(r==null)return "(not recorded)"; if(typeof r==="string")return r;
+  try{return JSON.stringify(r,null,1);}catch(e){return String(r);} }
+function stateBoard(st){
+  const fs=st.fields||{}; const keys=Object.keys(fs);
+  if(!keys.length && !Object.keys(st.collections||{}).length) return `<div class="hint">empty</div>`;
+  let h=`<div class="kv">`;
+  keys.forEach(k=>h+=`<div class="lbl">${esc(k)}</div><div class="val mono">${esc(String(fs[k]))}</div>`);
+  Object.entries(st.collections||{}).forEach(([k,v])=>h+=`<div class="lbl">${esc(k)}[]</div><div class="val mono">${esc(short(JSON.stringify(v),120))}</div>`);
+  return h+`</div>`;
+}
+
+function viewSteps(){
+  const b=curBranch(); if(!b) return refusalOrEmpty();
+  if(!b.steps.length) return `<div class="empty">No steps in this branch.</div>`;
+  let h=kv([["branch",`<b>${esc(b.local_id||b.id)}</b>`],["weight",fx(b.weight,3)],
+    ["conditions",esc(JSON.stringify(b.conditions))],["outcome",`<b>${esc(b.outcome||(b.resolved===false?"unresolved":"—"))}</b>`],
+    ["unresolved reason",esc(b.unresolved_reason)]]);
+  h+=`<h4 class="k">Timeline (${b.steps.length} steps)</h4>`;
+  b.steps.forEach(s=>{
+    const label = s.type==="decision"
+      ? `${s.actor_name||s.actor_id} → ${s.action_id||s.action_mode||"decide"}`
+      : `${s.kind} ${s.payload&&s.payload.field?("· "+s.payload.field+"="+s.payload.value):(s.payload&&s.payload.data?("· "+short(JSON.stringify(s.payload.data),40)):"")}`;
+    h+=`<div class="steprow${s.seq===S.si?" sel":""}" data-i="${s.seq}">
+      <span class="i">${s.seq+1}</span>
+      <span class="ty ${s.type}">${s.type}</span>
+      <span class="d">${esc(short(label,70))}</span></div>`;
+  });
+  return h;
+}
+
+function viewLLM(){
+  const L=S.data.llm_summary||{}; const calls=L.calls||[];
+  let h=`<h4 class="k">Model calls · ${L.total||0} total</h4>`;
+  h+=kv([["input tokens",(L.tokens_in||0).toLocaleString()],["output tokens",(L.tokens_out||0).toLocaleString()],
+    ["retries",L.retries||0]]);
+  h+=`<h4 class="k">By kind</h4>`;
+  Object.entries(L.by_kind||{}).sort((a,b)=>b[1]-a[1]).forEach(([k,c])=>{
+    h+=`<div class="llmk"><span>${esc(k)}</span><span class="c">${c}</span></div>`;});
+  if((L.sequence||[]).length){ h+=`<h4 class="k">Call sequence</h4><div class="seqbar">`+
+    L.sequence.map(k=>`<span>${esc(k)}</span>`).join("")+`</div>`; }
+  if(calls.length){
+    h+=`<h4 class="k">Every call (what the model returned)</h4>`;
+    calls.forEach(c=>{
+      h+=`<div style="margin-bottom:8px">
+        <div class="chip"><b>${esc(c.task_kind)}</b></div>
+        <div class="chip">${c.tokens_in}→${c.tokens_out} tok</div>
+        ${c.retries?`<div class="chip">retries ${c.retries}</div>`:""}
+        <pre>${esc(short(fmtResp(c.response),600))}</pre></div>`;
+    });
+  }
+  return h;
+}
+
+function viewWorld(){
+  const w=S.data.world;
+  let h=``;
+  if(w.title) h+=`<h4 class="k">${esc(w.title)}</h4>`;
+  if(w.rationale) h+=`<pre>${esc(w.rationale)}</pre>`;
+  h+=`<h4 class="k">Terminal (the question, operationalized)</h4><pre>${esc(JSON.stringify(w.terminal,null,1))}</pre>`;
+  h+=`<h4 class="k">Actions (${(w.actions||[]).length})</h4>`;
+  (w.actions||[]).forEach(a=>{ h+=`<div style="margin-bottom:6px">${kv([
+    ["action",`<b>${esc(a.id)}</b>`],["means",esc(a.meaning)],
+    ["needs",(a.authority||[]).map(esc).join(", ")],["writes",(a.writes||[]).map(esc).join(", ")],
+    ["ops",(a.effects||[]).map(esc).join(", ")]])}</div>`; });
+  if((w.external_processes||[]).length){ h+=`<h4 class="k">External processes</h4><pre>${esc(JSON.stringify(w.external_processes,null,1))}</pre>`; }
+  if((w.process_nodes||[]).length){ h+=`<h4 class="k">Process nodes</h4><pre>${esc(JSON.stringify(w.process_nodes,null,1))}</pre>`; }
+  h+=`<h4 class="k">Terminal producers (lineage)</h4><pre>${esc(JSON.stringify(w.terminal_producers,null,1))}</pre>`;
+  // actor grounding (what each agent was told it is)
+  const grounded=(w.actors||[]).filter(a=>a.grounding);
+  if(grounded.length){ h+=`<h4 class="k">Actor grounding (what each agent was told it is)</h4>`;
+    grounded.forEach(a=>{ h+=`<div class="chip"><b>${esc(a.name||a.id)}</b></div><pre>${esc(a.grounding)}</pre>`; }); }
+  return h;
+}
+
+function viewIntegrity(){
+  const m=S.data.meta, ig=m.integrity||{};
+  let h=`<h4 class="k">Forecast integrity</h4>`;
+  h+=kv([
+    ["status",`<b>${esc(m.status)}</b>`],
+    ["probability",m.probability!=null?`<b>${pct(m.probability)}</b>`:"—"],
+    ["source",esc(m.probability_source)],
+    ["mass · YES",pct(m.resolved_yes_mass)],["mass · NO",pct(m.resolved_no_mass)],["mass · unresolved",pct(m.unresolved_mass)],
+    ["bounds",`[${fx(m.lower_bound,3)}, ${fx(m.upper_bound,3)}]`],
+  ]);
+  h+=`<h4 class="k">Before vs after simulation</h4>`;
+  h+=kv([
+    ["P before",fx(ig.probability_before,4)],
+    ["P after",fx(ig.probability_after,4)],
+    ["point calibrated",ig.calibrated==null?"—":(ig.calibrated?"<b style='color:var(--good)'>yes</b>":"<b style='color:var(--warn)'>no</b>")],
+    ["ungrounded vars",(ig.ungrounded_variables||[]).map(esc).join(", ")||"none"],
+  ]);
+  if(ig.counterfactual) h+=`<pre>${esc(ig.counterfactual)}</pre>`;
+  h+=`<h4 class="k">Trajectory classification (post-sim audit)</h4><pre>${esc(m.trajectory_classification||"(none)")}</pre>`;
+  if(S.data.refusal) h+=viewRefusal();
+  return h;
+}
+
+function viewRefusal(){
+  const r=S.data.refusal; if(!r) return "";
+  let h=`<div class="refusebox"><div class="gate">REFUSED · ${esc(r.gate||r.stage||"")}</div>`;
+  h+=`<div style="margin-top:6px">${esc(r.message||"")}</div></div>`;
+  if((r.root_cause||[]).length){ h+=`<h4 class="k">Root cause</h4>`;
+    r.root_cause.forEach(rc=>h+=`<pre>${esc(rc.cause||"")}: ${esc(rc.why||JSON.stringify(rc))}</pre>`); }
+  if((r.repair_attempts||[]).length){ h+=`<h4 class="k">Repair attempts</h4>`;
+    r.repair_attempts.forEach(a=>h+=`<div class="chip"><b>${esc(a.failure)}</b> → ${esc(a.outcome)}</div>`); }
+  return h;
+}
+function refusalOrEmpty(){
+  if(S.data.refusal) return viewRefusal()+`<div class="hint" style="margin-top:10px">This run was refused before simulation. The compiled world it built is in the World tab; the stage it stopped at is above.</div>`;
+  return `<div class="empty">No branches to replay.</div>`;
+}
+
+function viewRaw(){
+  return `<h4 class="k">meta</h4><pre>${esc(JSON.stringify(S.data.meta,null,1))}</pre>`
+    +`<h4 class="k">world</h4><pre>${esc(JSON.stringify(S.data.world,null,1))}</pre>`
+    +`<h4 class="k">branches (headers)</h4><pre>${esc(JSON.stringify((S.data.branches||[]).map(b=>({id:b.id,weight:b.weight,outcome:b.outcome,steps:b.steps.length,conditions:b.conditions})),null,1))}</pre>`;
+}
+
+// ---------- wiring ----------
+$("#playPause").onclick=()=>S.playing?pause():play();
+$("#stepFwd").onclick=()=>{pause();gotoStep(S.si+1);};
+$("#stepBack").onclick=()=>{pause();gotoStep(S.si-1);};
+$("#toStart").onclick=()=>{pause();gotoStep(0);};
+$("#scrub").oninput=e=>{pause();gotoStep(+e.target.value);};
+$("#speed").onclick=()=>{ const sp=[0.5,1,2,4]; S.speed=sp[(sp.indexOf(S.speed)+1)%sp.length]; $("#speed").textContent=S.speed.toFixed(1)+"×"; if(S.playing){pause();play();} };
+$$("#rtabs button").forEach(b=>b.onclick=()=>{
+  if(b.dataset.tab==="hide"){ $("#main").classList.add("collapsed"); return; }
+  S.tab=b.dataset.tab; setTab();
+});
+$("#collapsebar").onclick=()=>$("#main").classList.remove("collapsed");
+document.addEventListener("keydown",e=>{
+  if(e.target.tagName==="SELECT"||e.target.tagName==="INPUT") return;
+  if(e.code==="Space"){e.preventDefault();S.playing?pause():play();}
+  else if(e.code==="ArrowRight"){pause();gotoStep(S.si+1);}
+  else if(e.code==="ArrowLeft"){pause();gotoStep(S.si-1);}
+});
+window.addEventListener("resize",()=>{ if(S.data) layoutPlane(); });
+boot();
+</script>
+</body>
+</html>
