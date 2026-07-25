@@ -284,6 +284,27 @@ def cmd_forecast(args: argparse.Namespace) -> int:
         if out is not None:
             print(f"  diagnosis: {out / 'diagnosis.json'}", file=sys.stderr)
         return 1
+    except Exception as stopped:  # noqa: BLE001 — every ending owes a diagnosis
+        # The post-compile phase (structural assessment, the runtime, aggregation, the
+        # trace write) used to be unguarded: one provider hiccup after every actor call
+        # ended the run as a bare traceback with no artifacts. Whatever escapes now is
+        # written down as a simulation-stage failure before the process exits.
+        wall = time.monotonic() - start
+        diagnosis = RunDiagnosis(
+            question=args.question,
+            as_of=as_of,
+            horizon=horizon,
+            failure=stopped,
+            failure_stage="simulation",
+            wall_seconds=wall,
+            model_calls=config.gateway.call_count,
+            compiler_mode=config.compiler_mode,
+        )
+        if out is not None:
+            out.mkdir(parents=True, exist_ok=True)
+            (out / "diagnosis.json").write_text(canonical_json(diagnosis.as_dict()) + "\n")
+        print(f"FAILED in simulation after {wall:.0f}s: {stopped}", file=sys.stderr)
+        return 4
     wall = time.monotonic() - start
 
     forecast_hash = ""

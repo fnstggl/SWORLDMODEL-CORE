@@ -164,6 +164,21 @@ def main() -> int:
         print(f"failure: {details.get('failure')}")
         print(f"wall: {wall:.0f}s  calls: {gateway.call_count}")
         return 1
+    except Exception as stopped:  # noqa: BLE001 — every ending owes a diagnosis
+        wall = time.monotonic() - t0
+        diagnosis = RunDiagnosis(
+            question=args.question,
+            as_of=as_of,
+            horizon=horizon,
+            failure=stopped,
+            failure_stage="simulation",
+            wall_seconds=wall,
+            model_calls=gateway.call_count,
+            compiler_mode=args.mode,
+        )
+        (out / "diagnosis.json").write_text(canonical_json(diagnosis.as_dict()) + "\n")
+        print(f"FAILED [{args.mode}] in simulation after {wall:.0f}s: {stopped}")
+        return 4
     wall = time.monotonic() - t0
     p = result.simulation_probability
     print(f"COMPLETED [{args.mode}]  status={result.status.value}")
