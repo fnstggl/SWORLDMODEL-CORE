@@ -30,6 +30,15 @@ the name before a seat is demanded (`coverage._near`), and that a name represent
 through an organization it belongs to is covered rather than absent. A place named in
 role terms right next to the name would still be owed a seat.
 
+**The search channel degrades under repeated use, and the run cannot route around it.**
+Four full acceptance passes inside three hours, each making roughly five hundred HTTP
+requests, ended with most queries returning "empty result set, block, or challenge": one
+case saw four URLs from five queries and compiled an empty world. It is recorded per
+query in `diagnosis.discovery.search_failures` and now names itself as the root cause
+rather than being reported as an actor-discovery failure, but nothing retries against a
+different channel or backs off, so a throttled window is a window in which this system
+cannot answer.
+
 **Some domains block this network outright.** `consilium.europa.eu` and `opec.org`
 returned HTTP 403 to every request, with a browser user-agent as well as ours. That is an
 external constraint and it is recorded per-URL in `diagnosis.json → fetching`; it is not

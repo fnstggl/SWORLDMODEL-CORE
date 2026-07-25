@@ -133,3 +133,41 @@ def test_the_same_failure_about_something_else_is_progress() -> None:
         "x", details={"failure": "coverage_incomplete", "material_candidates": 9, "note": "b"}
     )
     assert _failure_signature(noisy) == _failure_signature(quieter)
+
+
+def test_a_blocked_search_channel_is_named_rather_than_blamed_on_the_compiler() -> None:
+    """A pass where half the queries came back "empty result set, block, or challenge"
+    compiled empty worlds and was reported as an actor-discovery failure — which points
+    at the compiler for something it never saw. A search channel that returns nothing is
+    a fact about the channel, and belongs in the record as one."""
+
+    blocked = {
+        "urls_considered_count": 4,
+        "official_domain_urls_found": ["https://x.test/a"],
+        "queries_used": 5,
+        "search_failures": [
+            {"channel": "authoritative", "error": "search returned no result links"},
+            {"channel": "authoritative", "error": "search returned no result links"},
+            {"channel": "general", "error": "search returned no result links"},
+        ],
+    }
+
+    class _Blocked(_Diagnosis):
+        def discovery(self) -> dict[str, Any]:
+            return blocked
+
+    d = _Blocked(question="q", as_of=AS_OF, horizon=HORIZON, failure=_gate("no_causal_producer"))
+    causes = [c["cause"] for c in d.root_cause()]
+    assert "discovery_failure" in causes
+    why = next(c["why"] for c in d.root_cause() if c["cause"] == "discovery_failure")
+    assert "3 of 5 searches" in why
+
+    # A run whose searches worked is unaffected, and still reports the gate it stopped at.
+    healthy = {**blocked, "search_failures": []}
+
+    class _Healthy(_Diagnosis):
+        def discovery(self) -> dict[str, Any]:
+            return healthy
+
+    d2 = _Healthy(question="q", as_of=AS_OF, horizon=HORIZON, failure=_gate("no_causal_producer"))
+    assert [c["cause"] for c in d2.root_cause()] == ["actor_discovery_failure"]

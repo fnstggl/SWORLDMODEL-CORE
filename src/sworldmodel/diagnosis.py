@@ -136,6 +136,9 @@ class RunDiagnosis:
             "rss_requests": t.get("rss_requests", []),
             "search_failures": t.get("search_failures", []),
             "queries_used": len(t.get("queries", [])),
+            "search_failure_reasons": _counts(
+                f.get("error", "?") for f in (t.get("search_failures") or [])
+            ),
             "stop_reason": t.get("stop_reason"),
         }
 
@@ -388,6 +391,23 @@ class RunDiagnosis:
         if disc["urls_considered_count"] == 0:
             out.append(
                 {"cause": "discovery_failure", "why": "no candidate URL was discovered at all"}
+            )
+        elif (
+            disc.get("queries_used")
+            and len(disc.get("search_failures") or []) * 2 >= disc["queries_used"]
+        ):
+            # Half or more of the searches came back with nothing. That is a fact about
+            # the search channel, and it belongs in the record as one: a run whose
+            # queries were blocked and which therefore compiled an empty world was being
+            # reported as an actor-discovery failure, which points at the compiler for
+            # something it never saw.
+            reasons = _counts(f.get("error", "?") for f in disc.get("search_failures") or [])
+            out.append(
+                {
+                    "cause": "discovery_failure",
+                    "why": f"{len(disc['search_failures'])} of {disc['queries_used']} searches "
+                    f"returned no links — {reasons}",
+                }
             )
         elif not disc["official_domain_urls_found"] and disc["urls_considered_count"] > 0:
             out.append(
