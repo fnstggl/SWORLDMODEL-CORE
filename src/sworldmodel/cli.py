@@ -32,6 +32,7 @@ from .engine import RunBudget
 from .ids import canonical_json
 from .live_research import ResearchBudget
 from .models import ForecastResult
+from .research import ResearchBundle
 from .tracing import TraceContext
 
 
@@ -218,23 +219,32 @@ def cmd_forecast(args: argparse.Namespace) -> int:
     if out is not None:
         forecast_hash = ctx.write(out, sealed_names=args.seal, gateway_calls=config.gateway.calls)
         (out / "run_audit.json").write_text(canonical_json(audit) + "\n")
-        (out / "diagnosis.json").write_text(
-            canonical_json(
-                RunDiagnosis(
-                    question=args.question,
-                    as_of=as_of,
-                    horizon=horizon,
-                    bundle=ctx.bundle,
-                    compiled=ctx.compiled,
-                    run_result=ctx.run_result,
-                    repair_log=ctx.repair_log,
-                    world_review=ctx.world_review,
-                    wall_seconds=wall,
-                    model_calls=config.gateway.call_count,
-                ).as_dict()
-            )
-            + "\n"
+        diagnosis = RunDiagnosis(
+            question=args.question,
+            as_of=as_of,
+            horizon=horizon,
+            bundle=ctx.bundle,
+            compiled=ctx.compiled,
+            run_result=ctx.run_result,
+            repair_log=ctx.repair_log,
+            world_review=ctx.world_review,
+            wall_seconds=wall,
+            model_calls=config.gateway.call_count,
         )
+        (out / "diagnosis.json").write_text(canonical_json(diagnosis.as_dict()) + "\n")
+        # The same three artifacts a refusal writes. A completed run is the one whose
+        # world most needs reading — a refusal at least says where it stopped, while a
+        # finished forecast can only be checked against the world that produced it.
+        (out / "compiled_world.json").write_text(
+            canonical_json(diagnosis.world_compilation()) + "\n"
+        )
+        if ctx.bundle is not None:
+            (out / "research_trace.json").write_text(
+                canonical_json(ctx.bundle.live_trace or {}) + "\n"
+            )
+            (out / "evidence_store.json").write_text(
+                canonical_json(_evidence_records(ctx.bundle)) + "\n"
+            )
     _print_summary(result, forecast_hash, out)
     _print_audit(audit)
     return 0
@@ -252,26 +262,27 @@ def _write_diagnosis(out: Path | None, diagnosis: RunDiagnosis, refusal: Forecas
             canonical_json(refusal.bundle.live_trace or {}) + "\n"
         )
         (out / "evidence_store.json").write_text(
-            canonical_json(
-                [
-                    {
-                        "id": c.id,
-                        "proposition": c.proposition,
-                        "normalized_value": c.normalized_value,
-                        "entities": list(c.entities),
-                        "epistemic_type": c.epistemic_type.value,
-                        "source_url": c.source_url,
-                        "supporting_excerpt": c.supporting_excerpt,
-                        "available_at": c.available_at.isoformat(),
-                    }
-                    for c in refusal.bundle.evidence_store.all()
-                ]
-            )
-            + "\n"
+            canonical_json(_evidence_records(refusal.bundle)) + "\n"
         )
         (out / "compiled_world.json").write_text(
             canonical_json(diagnosis.world_compilation()) + "\n"
         )
+
+
+def _evidence_records(bundle: ResearchBundle) -> list[dict[str, Any]]:
+    return [
+        {
+            "id": c.id,
+            "proposition": c.proposition,
+            "normalized_value": c.normalized_value,
+            "entities": list(c.entities),
+            "epistemic_type": c.epistemic_type.value,
+            "source_url": c.source_url,
+            "supporting_excerpt": c.supporting_excerpt,
+            "available_at": c.available_at.isoformat(),
+        }
+        for c in bundle.evidence_store.all()
+    ]
 
 
 # ---------------------------------------------------------------------------

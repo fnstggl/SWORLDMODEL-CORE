@@ -34,10 +34,12 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Any
 
+from .errors import UndeterminedExpressionError
+from .expressions import evaluate, looks_like_expression
 from .ids import content_id
 from .models import Event, Visibility, make_payload
 from .world import WorldState
-from .worldspec import Effect
+from .worldspec import Effect, parse_expr
 
 # The closed set of universal effect operations. This is the whole execution language.
 UNIVERSAL_OPS = frozenset(
@@ -216,10 +218,35 @@ def _resolve(value: Any, binding: dict[str, Any], world: WorldState) -> Any:
     if isinstance(value, str) and value.startswith("$"):
         return _resolve_ref(value, binding, world)
     if isinstance(value, dict):
+        if looks_like_expression(value):
+            return _evaluate_param(value, world)
         return {k: _resolve(v, binding, world) for k, v in value.items()}
     if isinstance(value, list):
         return [_resolve(v, binding, world) for v in value]
     return value
+
+
+def _evaluate_param(value: dict[str, Any], world: WorldState) -> Any:
+    """Compute the expression against the world the effect is being applied to.
+
+    A live Tesla run set the quarter's deliveries to ``Q1_deliveries *
+    demand_multiplier`` — produced by a delivery-cycle process rather than by an
+    invented executive, which is the right shape — and the effect wrote the *formula*
+    into the field. The terminal then compared a dict against 400,000, could not, and
+    the forecast came back 1.0 unresolved on every branch: a hollow answer from a world
+    that held every number it needed.
+
+    An expression the world cannot yet determine resolves to *no value*, never to the
+    expression object and never to a coerced zero: writing the formula would state a
+    dict as the field's value, and writing zero would state a quantity nobody produced.
+    """
+
+    try:
+        return evaluate(parse_expr(value), world)
+    except UndeterminedExpressionError:
+        return None
+    except (ValueError, TypeError, KeyError, IndexError):
+        return None
 
 
 def _resolve_ref(ref: str, binding: dict[str, Any], world: WorldState) -> Any:

@@ -144,3 +144,63 @@ def test_temporal_operators() -> None:
 def test_numeric_string_compares_equal_to_number() -> None:
     ctx = _Ctx(fields={"n": "5"})
     assert evaluate(_e({"op": "equals", "args": [{"field": "n"}, 5]}), ctx) is True
+
+
+# --------------------------------------------------------------------------- #
+# Effect parameters carrying a computed value
+# --------------------------------------------------------------------------- #
+
+
+def test_an_effect_value_that_is_an_expression_is_computed_not_stored() -> None:
+    """A live Tesla run compiled a world with no invented executive — deliveries were
+    produced by a delivery-cycle process, correctly — and the process set the quarter's
+    deliveries to ``Q1_deliveries * demand_multiplier``. The effect wrote the *formula*
+    into the field. The terminal then compared a dict against 400,000, could not, and
+    the forecast came back 1.0 unresolved on both branches: a hollow answer from a world
+    that held every number it needed."""
+
+    from sworldmodel.effects import _resolve
+
+    ctx = _Ctx(fields={"Q1_deliveries": 358023, "demand_multiplier": 1.2})
+    computed = _resolve(
+        {"op": "multiply", "args": [{"field": "Q1_deliveries"}, {"field": "demand_multiplier"}]},
+        {},
+        ctx,  # type: ignore[arg-type]
+    )
+    assert computed == 358023 * 1.2
+    assert evaluate(_e({"op": "greater_than", "args": [computed, 400000]}), ctx) is True
+
+    # Nested inside a payload, and reached through a list, on the same rule.
+    payload = _resolve(
+        {"fields": {"deliveries": {"field": "Q1_deliveries"}}, "seen": [{"field": "unset"}]},
+        {},
+        ctx,  # type: ignore[arg-type]
+    )
+    assert payload == {"fields": {"deliveries": 358023}, "seen": [None]}
+
+
+def test_a_payload_that_merely_looks_like_an_expression_stays_data() -> None:
+    """Recognition is closed over the operators the evaluator implements, so a document
+    field named ``op`` is still a document field."""
+
+    from sworldmodel.effects import _resolve
+
+    ctx = _Ctx(fields={})
+    data = {"op": "sign the agreement", "args": ["EU", "Mercosur"]}
+    assert _resolve(data, {}, ctx) == data  # type: ignore[arg-type]
+    assert _resolve({"field": "x", "note": "y"}, {}, ctx) == {  # type: ignore[arg-type]
+        "field": "x",
+        "note": "y",
+    }
+
+
+def test_an_undeterminable_effect_value_is_no_value_never_a_coerced_zero() -> None:
+    """Writing zero would state a quantity nobody produced; writing the formula would
+    state a dict as the field's value. Neither is the truth, which is that the world has
+    not determined it."""
+
+    from sworldmodel.effects import _resolve
+
+    ctx = _Ctx(fields={"known": 4})
+    undetermined = {"op": "multiply", "args": [{"field": "known"}, {"field": "never_set"}]}
+    assert _resolve(undetermined, {}, ctx) is None  # type: ignore[arg-type]

@@ -397,4 +397,9 @@ _WORLD_SCHEMA = """Return a SINGLE JSON object:
 Expression operators (universal, the only ones): const, field, stage, now, horizon, as_of,
 count, sum, values, exists, event_count, resource, document_field, item, equals, not_equals,
 greater_than, less_than, greater_or_equal, less_or_equal, contains, all, any, before, after, duration,
-and, or, not. A count/sum over a record collection may take a trailing where-expr using item("value")."""
+add, subtract, multiply, divide, min, max, abs, round, and, or, not. A count/sum over a record
+collection may take a trailing where-expr using item("value").
+An effect parameter may itself be an expression, and that is how a quantity gets produced: an
+effect that sets a quarter's output to multiply(field("last_quarter"), field("demand_multiplier"))
+computes it from the world at the moment it fires. Prefer that to writing a number you worked out
+yourself — a figure you compute here is your estimate, not something the world produced."""

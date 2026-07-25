@@ -58,7 +58,7 @@ from .prompts import render_world_compile_prompt
 from .reality import verify_reality
 from .uncertainty import enumerate_scenarios
 from .world import WorldFact, WorldState
-from .worldspec import ActorSpec, EntitySpec, WorldSpec, as_objects
+from .worldspec import ActorSpec, Effect, EntitySpec, WorldSpec, as_objects
 
 _VALID_PROVENANCE = {p.value for p in WeightProvenance}
 
@@ -897,7 +897,7 @@ def enforce_executable_expressions(spec: WorldSpec) -> None:
     the refusal names the operator and where it appeared so the repair is exact.
     """
 
-    from .expressions import UNIVERSAL_OPERATORS, unknown_operators
+    from .expressions import UNIVERSAL_OPERATORS, param_expressions, unknown_operators
 
     offenders: dict[str, list[str]] = {}
 
@@ -905,16 +905,33 @@ def enforce_executable_expressions(spec: WorldSpec) -> None:
         for op in unknown_operators(expr):
             offenders.setdefault(op, []).append(where)
 
+    # Effect parameters are checked too, and this is not a formality. A value an effect
+    # *computes* is as much a program as a condition it tests, and the runtime resolves
+    # it the same way. A live Tesla run set the quarter's deliveries to
+    # ``multiply(Q1_deliveries, demand_multiplier)`` — the right shape, produced by a
+    # delivery-cycle process rather than by an invented executive — and because nothing
+    # inspected effect parameters the world passed as executable, the formula was stored
+    # as the field's value, and the forecast came back 1.0 unresolved on every branch.
+    # An unexecutable world must refuse and be repaired, not answer hollowly.
+    def check_effects(where: str, effects: tuple[Effect, ...]) -> None:
+        for i, eff in enumerate(effects):
+            for key, value in eff.params_dict.items():
+                for expr in param_expressions(value):
+                    check(f"{where}.effects[{i}].{key}", expr)
+
     check("terminal.yes_when", spec.terminal.yes_when)
     check("terminal.unresolved_when", spec.terminal.unresolved_when)
     for action in spec.actions:
         check(f"action:{action.action_id}.preconditions", action.preconditions)
         check(f"action:{action.action_id}.completion_conditions", action.completion_conditions)
+        check_effects(f"action:{action.action_id}", action.effects)
     for node in spec.process.nodes:
         check(f"process_node:{node.node_id}.entry_condition", node.entry_condition)
+        check_effects(f"process_node:{node.node_id}", node.effects)
     for proc in spec.external_processes:
         for i, occ in enumerate(proc.occurrences):
             check(f"external_process:{proc.process_id}#{i}.condition", occ.condition)
+            check_effects(f"external_process:{proc.process_id}#{i}", occ.effects)
 
     if not offenders:
         return

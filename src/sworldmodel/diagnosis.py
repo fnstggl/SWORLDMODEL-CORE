@@ -51,6 +51,8 @@ ROOT_CAUSES = (
     "over_strict_grounding_gate",
     "under_strict_integrity_gate",
     "terminal_supplied_rather_than_produced",
+    "unexecutable_compilation",
+    "repair_did_not_converge",
     "repeated_wake_up_loop",
     "no_progress_detection_failure",
     "provider_failure",
@@ -397,11 +399,52 @@ class RunDiagnosis:
             "actors_cannot_reach_terminal",
             "environment_presets_terminal",
             "uncertainty_writes_terminal",
+            "terminal_reads_no_world_state",
         ):
             out.append(
                 {
                     "cause": "terminal_supplied_rather_than_produced",
                     "why": f"the run stopped at the {gate} gate",
+                }
+            )
+        if gate in ("nothing_can_act", "nothing_scheduled"):
+            out.append(
+                {
+                    "cause": "compiler_omission",
+                    "why": f"the compiled world contains no mechanism at all ({gate}) — "
+                    "nothing in it could have produced any outcome",
+                }
+            )
+        if gate == "orphan_actors":
+            out.append(
+                {
+                    "cause": "entity_resolution_failure",
+                    "why": "an actor was compiled with no entity behind it",
+                }
+            )
+        if gate == "required_facts_unverified":
+            out.append(
+                {
+                    "cause": "external_information_unavailable",
+                    "why": "a fact the world requires cites evidence that is not available "
+                    "by the cutoff",
+                }
+            )
+        if gate in ("malformed_compilation", "unknown_expression_operator"):
+            out.append(
+                {
+                    "cause": "unexecutable_compilation",
+                    "why": f"the compiler emitted a world the runtime cannot execute ({gate})",
+                }
+            )
+        if gate == "repair_did_not_converge":
+            details = self.integrity_and_grounding().get("gate_details") or {}
+            seen = details.get("diagnoses seen") or []
+            out.append(
+                {
+                    "cause": "repair_did_not_converge",
+                    "why": "bounded repair cycled without reaching a compilable world; "
+                    f"the diagnoses it moved between were {sorted(seen)}",
                 }
             )
         if gate == "decisive_evidence_contradiction":

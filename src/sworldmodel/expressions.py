@@ -27,6 +27,7 @@ field). This is enough to express, without any hardcoded family, predicates such
 
 from __future__ import annotations
 
+import math
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
@@ -124,6 +125,24 @@ def evaluate(expr: Any, ctx: ExprContext) -> Any:
         except TypeError:
             return False
 
+    # -- arithmetic ------------------------------------------------------------
+    #
+    # A world that must produce a *quantity* — deliveries in a quarter, a production
+    # quota, a rate level — needs to compute it from what the world holds. Without
+    # arithmetic the compiler has only one way to put a number in a field, which is to
+    # write the number itself, and then the compiler has decided the outcome rather
+    # than the world producing it. A live Tesla run tried to set Q3 deliveries to
+    # ``Q1_deliveries * demand_multiplier``, which is exactly the right shape, and the
+    # language had no way to say it.
+    if op in ("add", "subtract", "multiply", "divide", "min", "max"):
+        return _arithmetic(op, tuple(_strict_num(evaluate(a, ctx), op) for a in args))
+    if op == "abs":
+        return abs(_strict_num(evaluate(args[0], ctx), op))
+    if op == "round":
+        value = _strict_num(evaluate(args[0], ctx), op)
+        places = int(_strict_num(evaluate(args[1], ctx), op)) if len(args) > 1 else 0
+        return round(value, places) if places else float(round(value))
+
     # -- quantifiers over an evaluated list ------------------------------------
     if op == "all":
         seq = evaluate(args[0], ctx)
@@ -179,6 +198,14 @@ UNIVERSAL_OPERATORS = frozenset(
         "greater_or_equal",
         "less_or_equal",
         "contains",
+        "add",
+        "subtract",
+        "multiply",
+        "divide",
+        "min",
+        "max",
+        "abs",
+        "round",
         "all",
         "any",
         "before",
@@ -189,6 +216,43 @@ UNIVERSAL_OPERATORS = frozenset(
         "not",
     }
 )
+
+
+def looks_like_expression(value: Any) -> bool:
+    """Whether this value is a *computed* value rather than a literal.
+
+    Effects legitimately carry expressions where a value goes — a quarterly delivery
+    count is a known quarter times a demand multiplier, not a number the compiler
+    already knows. Recognition is closed over the operators this evaluator implements,
+    so a payload that merely happens to contain the key ``op`` is still data.
+    """
+
+    if not isinstance(value, dict):
+        return False
+    op = value.get("op")
+    if isinstance(op, str) and (op in UNIVERSAL_OPERATORS or op.lower() in ("true", "false")):
+        return True
+    if len(value) == 1:
+        (key,) = value
+        return key in UNIVERSAL_OPERATORS
+    return False
+
+
+def param_expressions(value: Any) -> list[Expr]:
+    """Every expression embedded in an effect parameter, however deeply nested."""
+
+    from .worldspec import parse_expr
+
+    if looks_like_expression(value):
+        try:
+            return [parse_expr(value)]
+        except ValueError:
+            return []
+    if isinstance(value, dict):
+        return [e for v in value.values() for e in param_expressions(v)]
+    if isinstance(value, (list, tuple)):
+        return [e for v in value for e in param_expressions(v)]
+    return []
 
 
 def unknown_operators(expr: Any) -> set[str]:
@@ -246,6 +310,55 @@ def _num(v: Any) -> float:
         return float(v)  # numeric string
     except (TypeError, ValueError):
         return 0.0
+
+
+def _strict_num(v: Any, op: str) -> float:
+    """A number, or nothing at all.
+
+    Comparison may treat an unreadable value as zero, because a comparison against an
+    absent quantity is answerable — the quantity is not above the threshold. Arithmetic
+    may not: multiplying a known quarter by an unset multiplier and calling the answer
+    zero would state a quantity nobody produced, and it would state it as a fact in the
+    world. An undetermined input makes the whole expression undetermined, which the
+    engine already knows how to carry as an unresolved branch."""
+
+    if isinstance(v, bool) or v is None:
+        raise UndeterminedExpressionError(f"{op}: {v!r} is not a quantity")
+    if isinstance(v, (int, float)):
+        return float(v)
+    try:
+        return float(v)  # numeric string
+    except (TypeError, ValueError):
+        raise UndeterminedExpressionError(f"{op}: {v!r} is not a quantity") from None
+
+
+def _arithmetic(op: str, values: tuple[float, ...]) -> float:
+    """Fold the operands. An operator applied to nothing has no value — it is not zero,
+    and it is not one."""
+
+    if not values:
+        raise UndeterminedExpressionError(f"{op}: no operands")
+    if op == "add":
+        return math.fsum(values)
+    if op == "multiply":
+        out = 1.0
+        for v in values:
+            out *= v
+        return out
+    if op == "min":
+        return min(values)
+    if op == "max":
+        return max(values)
+    head, *rest = values
+    if op == "subtract":
+        for v in rest:
+            head -= v
+        return head
+    for v in rest:  # divide
+        if v == 0.0:
+            raise UndeterminedExpressionError("divide: division by zero")
+        head /= v
+    return head
 
 
 def _norm(v: Any) -> Any:
