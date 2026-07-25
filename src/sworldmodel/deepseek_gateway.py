@@ -20,6 +20,7 @@ from .errors import GatewayError
 from .gateway import GatewayRequest, GatewayResponse, ModelGateway
 from .http import HttpError, HttpTransport, UrllibTransport
 from .ids import prompt_hash
+from .jsonsalvage import salvage_json
 
 DEFAULT_BASE_URL = "https://api.deepseek.com"
 DEFAULT_MODEL = "deepseek-v4-flash"
@@ -157,6 +158,35 @@ class DeepSeekGateway(ModelGateway):
             data, tokens_in, tokens_out, content = self._parse(resp.text)
             if data is None or not self._schema_ok(data, request.expected_keys):
                 truncated = self._looks_truncated(resp.text, content)
+                if truncated:
+                    # Salvage before retrying. A world compilation is the largest object
+                    # this system asks for, and a reply cut off in its final field still
+                    # contains the entities, actors and actions the run needs. Discarding
+                    # it and rerolling was how a truncated compile became "no actors were
+                    # compiled" — a provider limit reported as a fact about the world.
+                    salvaged = salvage_json(content)
+                    if salvaged is not None and self._schema_ok(salvaged, request.expected_keys):
+                        validation_failures.append(
+                            f"truncated on attempt {attempt}; recovered the parsable prefix"
+                        )
+                        return GatewayResponse(
+                            task_kind=request.task_kind,
+                            data=salvaged,
+                            raw_text=content,
+                            model=self._model,
+                            params={
+                                "temperature": body["temperature"],
+                                "max_tokens": body["max_tokens"],
+                                "recovered_from_truncation": True,
+                            },
+                            seed=request.seed,
+                            prompt_hash=prompt_hash(request.prompt),
+                            tokens_in=tokens_in,
+                            tokens_out=tokens_out,
+                            retries=retries,
+                            validation_failures=tuple(validation_failures),
+                            latency_ms=latency,
+                        )
                 failure = (
                     f"{'truncated' if truncated else 'malformed/missing-keys'} on attempt {attempt}"
                 )

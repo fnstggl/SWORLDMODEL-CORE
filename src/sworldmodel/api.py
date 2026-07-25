@@ -30,8 +30,9 @@ from typing import Any
 
 from .compiled import CompiledWorld
 from .config import ForecastConfig
+from .diagnosis import ForecastRefused
 from .engine import RunResult, run
-from .errors import GatewayError, WorldIntegrityError
+from .errors import GatewayError, SWorldModelError, WorldIntegrityError
 from .models import ForecastResult, ResolutionContract
 from .outcomes import aggregate
 from .repair import RepairLog, RepairPlan, plan_repair
@@ -356,8 +357,18 @@ def run_forecast(
 ) -> tuple[ForecastResult, TraceContext]:
     """Run the full pipeline and return the result plus a trace context for writing."""
 
-    bundle = config.research_backend.research(question, as_of, horizon)
-    bundle, compiled = _compile_with_repair(question, as_of, horizon, bundle, config)
+    log = RepairLog()
+    try:
+        bundle = config.research_backend.research(question, as_of, horizon)
+    except SWorldModelError as exc:
+        raise ForecastRefused(exc, stage="research", repair_log=log) from exc
+    try:
+        bundle, compiled = _compile_with_repair(question, as_of, horizon, bundle, config, log=log)
+    except SWorldModelError as exc:
+        # Everything the run learned before it stopped travels with the refusal, so the
+        # caller can write a diagnosis. A refusal that leaves only a traceback is how
+        # four of five acceptance questions became undiagnosable.
+        raise ForecastRefused(exc, stage="compilation", bundle=bundle, repair_log=log) from exc
     contract = _build_contract(question, as_of, horizon, bundle)
 
     # Is this even the right world? Ordinary uncertainty asks what a value turns out to
@@ -432,6 +443,7 @@ def run_forecast(
         structure_assessment=assessment,
         structure_response=structure_response,
     )
+    ctx.repair_log = log
     return result, ctx
 
 

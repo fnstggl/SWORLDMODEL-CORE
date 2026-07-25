@@ -37,6 +37,8 @@ class TraceContext:
     # to see which structures were simulated and which could not be represented.
     structure_assessment: Any = None
     structure_response: Any = None
+    # The targeted-repair attempts this run made, for the diagnosis artifact.
+    repair_log: Any = None
     _calls_override: list[Any] = field(default_factory=list)
 
     # -- serializable payloads --------------------------------------------------
