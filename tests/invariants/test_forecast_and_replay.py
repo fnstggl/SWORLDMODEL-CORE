@@ -549,3 +549,31 @@ def test_terminal_terms_beyond_plain_fields_are_recognised_and_matched() -> None
     )
     assert doc == {"document:treaty.signed"}
     assert "field:signed" not in doc
+
+
+def test_an_expression_the_evaluator_cannot_run_is_caught_at_compile_time() -> None:
+    """The evaluator raises on an unknown operator *while evaluating* — for a terminal,
+    that is while finalizing a branch, after research, after compilation, after every
+    actor has been invoked. A live Bank of England run died there on `{"op": "false"}`,
+    six minutes in, with a ValueError and no diagnosis.
+
+    Checking the whole program up front makes the same mistake cost one recompile.
+    """
+
+    from sworldmodel.errors import WorldIntegrityError
+    from sworldmodel.worldspec import parse_expr
+
+    # `true`/`false` are how a constant gets written by accident, and are read as one.
+    assert parse_expr({"op": "false"}).op == "const"
+    assert parse_expr({"op": "false"}).args == (False,)
+    assert parse_expr({"op": "true"}).args == (True,)
+
+    data = _split_world()
+    data["world_spec"]["terminal"]["unresolved_when"] = {"op": "approximately", "args": [1]}
+    gw = _gateway(_signal_sensitive)
+    with pytest.raises(WorldIntegrityError) as exc:
+        _compile(data, gw)
+    assert "cannot evaluate" in str(exc.value)
+    assert exc.value.details["failure"] == "unknown_expression_operator"
+    assert "approximately" in exc.value.details["unknown operators"]
+    assert exc.value.details.get("recompilable") is True

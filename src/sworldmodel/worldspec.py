@@ -67,6 +67,12 @@ def parse_expr(obj: Any) -> Expr:
     if isinstance(obj, dict):
         if "const" in obj:
             return Expr("const", (obj["const"],))
+        # `{"op": "true"}` / `{"op": "false"}` are the natural way to write a constant
+        # and are not operators. Reading them as one is shape coercion, not invention;
+        # leaving them raised "unknown expression operator 'false'" from inside the
+        # evaluator, while finalizing a branch, after the whole run had been paid for.
+        if str(obj.get("op", "")).lower() in ("true", "false"):
+            return Expr("const", (str(obj["op"]).lower() == "true",))
         if "op" in obj:
             # `args` is a list by schema, and a model will nonetheless sometimes write
             # the single argument bare: {"op": "const", "args": false}. Iterating that

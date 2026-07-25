@@ -152,10 +152,13 @@ def compile_world(
     grounding_report = assess_actor_grounding(profiles)
     enforce_actor_grounding(grounding_report)
 
-    # Gate 3 — the outcome must be produced by what actors do, not supplied to them.
+    # Gate 3 — every compiled expression must be executable by the evaluator.
+    enforce_executable_expressions(spec)
+
+    # Gate 4 — the outcome must be produced by what actors do, not supplied to them.
     enforce_outcome_is_produced(spec, uncertainties)
 
-    # Gate 4 — evidence-to-world coverage against the exact compiled WorldSpec.
+    # Gate 5 — evidence-to-world coverage against the exact compiled WorldSpec.
     view, signal_claim_ids = world_spec_view(spec, base_world, uncertainties, world_facts)
     inventory = build_candidate_inventory(
         evidence,
@@ -866,6 +869,51 @@ def _display(term: str) -> str:
     if kind == "stage":
         return "stage"
     return f"{name} ({kind})" if name else kind
+
+
+def enforce_executable_expressions(spec: WorldSpec) -> None:
+    """Refuse a world containing a declarative expression the evaluator cannot run.
+
+    The evaluator raises on an unknown operator, and it does so *while evaluating* — for
+    a terminal, that is while finalizing a branch, after research, after compilation,
+    after every actor has been invoked. A live Bank of England run died there on
+    ``{"op": "false"}``, six minutes in, with a ValueError and no diagnosis.
+
+    Checking the whole program up front makes the same mistake cost one recompile, and
+    the refusal names the operator and where it appeared so the repair is exact.
+    """
+
+    from .expressions import UNIVERSAL_OPERATORS, unknown_operators
+
+    offenders: dict[str, list[str]] = {}
+
+    def check(where: str, expr: Any) -> None:
+        for op in unknown_operators(expr):
+            offenders.setdefault(op, []).append(where)
+
+    check("terminal.yes_when", spec.terminal.yes_when)
+    check("terminal.unresolved_when", spec.terminal.unresolved_when)
+    for action in spec.actions:
+        check(f"action:{action.action_id}.preconditions", action.preconditions)
+        check(f"action:{action.action_id}.completion_conditions", action.completion_conditions)
+    for node in spec.process.nodes:
+        check(f"process_node:{node.node_id}.entry_condition", node.entry_condition)
+    for proc in spec.external_processes:
+        for i, occ in enumerate(proc.occurrences):
+            check(f"external_process:{proc.process_id}#{i}.condition", occ.condition)
+
+    if not offenders:
+        return
+    raise WorldIntegrityError(
+        "the compiled world uses expression operators this runtime cannot evaluate: "
+        f"{sorted(offenders)}",
+        details={
+            "failure": "unknown_expression_operator",
+            "recompilable": True,
+            "unknown operators": {op: sorted(set(w)) for op, w in sorted(offenders.items())},
+            "operators this runtime provides": sorted(UNIVERSAL_OPERATORS),
+        },
+    )
 
 
 def enforce_outcome_is_produced(

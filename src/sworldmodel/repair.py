@@ -340,6 +340,22 @@ def _malformed_compilation(exc: WorldIntegrityError, subject: str) -> RepairPlan
     )
 
 
+def _unknown_expression_operator(exc: WorldIntegrityError, subject: str) -> RepairPlan:
+    unknown = exc.details.get("unknown operators")
+    provides = exc.details.get("operators this runtime provides")
+    return RepairPlan(
+        failure="unknown_expression_operator",
+        missing_element=f"expressions written with the runtime's own operators ({unknown})",
+        queries=(),
+        instruction=(
+            f"These expression operators do not exist in this runtime: {unknown}. Rewrite "
+            "those expressions using only the universal operators, which are exactly: "
+            f'{provides}. A constant is {{"op": "const", "args": [true]}}. Change '
+            "nothing about what the world contains — only how the conditions are written."
+        ),
+    )
+
+
 def _orphan_actors(exc: WorldIntegrityError, subject: str) -> RepairPlan:
     orphans = _strings(exc.details.get("orphan_actors"))
     return RepairPlan(
@@ -396,6 +412,7 @@ _PLANS = {
     "nothing_can_act": _nothing_can_act,
     "nothing_scheduled": _nothing_scheduled,
     "orphan_actors": _orphan_actors,
+    "unknown_expression_operator": _unknown_expression_operator,
     "malformed_compilation": _malformed_compilation,
     "required_facts_unverified": _required_facts_unverified,
     "coverage_incomplete": _coverage_incomplete,

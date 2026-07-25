@@ -150,6 +150,57 @@ def evaluate(expr: Any, ctx: ExprContext) -> Any:
     raise ValueError(f"unknown expression operator {op!r}")
 
 
+# The complete set of universal operators this evaluator implements. Exported so a
+# compiled world can be checked *before* it runs: an unknown operator used to surface as
+# a ValueError from inside `evaluate`, raised while finalizing a branch — after research,
+# after compilation, after the actors had been invoked. The cheapest possible failure
+# made as expensive as it could be.
+UNIVERSAL_OPERATORS = frozenset(
+    {
+        "const",
+        "field",
+        "stage",
+        "now",
+        "horizon",
+        "as_of",
+        "count",
+        "sum",
+        "values",
+        "exists",
+        "event_count",
+        "resource",
+        "document_field",
+        "item",
+        "equals",
+        "not_equals",
+        "greater_than",
+        "less_than",
+        "greater_or_equal",
+        "less_or_equal",
+        "contains",
+        "all",
+        "any",
+        "before",
+        "after",
+        "duration",
+        "and",
+        "or",
+        "not",
+    }
+)
+
+
+def unknown_operators(expr: Any) -> set[str]:
+    """Every operator in an expression tree that this evaluator cannot execute."""
+
+    if not isinstance(expr, Expr):
+        return set()
+    out = set() if expr.op in UNIVERSAL_OPERATORS else {expr.op}
+    for arg in expr.args:
+        out |= unknown_operators(arg)
+    return out
+
+
 def _aggregate(op: str, args: tuple[Any, ...], ctx: ExprContext) -> Any:
     collection = _s(evaluate(args[0], ctx))
     records = ctx.get_records(collection)
