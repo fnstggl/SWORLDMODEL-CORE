@@ -283,7 +283,7 @@ def test_a_world_full_of_actions_that_cannot_reach_the_outcome_is_refused() -> N
         _compile(data, gw)
     assert "the outcome is an input" in str(exc.value)
     details = exc.value.details
-    assert details["terminal reads fields"] == ["rate_decision"]
+    assert details["terminal reads"] == ["rate_decision"]
     assert "rate_decision" not in details["fields any action can write"]
     # The refusal names exactly which terms were supplied instead of produced.
     assert details["terminal terms supplied by uncertainty instead"] == ["rate_decision"]
@@ -491,3 +491,61 @@ def test_the_pre_rollout_review_can_never_kill_a_run_that_passed_the_gates() -> 
     review = review_world(Malformed(), None, None, question="q", evidence_render="")
     assert "could not run" in review.error
     assert not review.should_repair  # a review that did not happen demands no repair
+
+
+def test_a_terminal_that_reads_no_world_state_is_refused() -> None:
+    """The limiting case, and it used to pass in silence.
+
+    With no terms identified there are no orphans, so `yes_when = const(true)` — the
+    answer written as a constant — satisfied the very gate that exists to forbid it.
+    Allowing actor-free worlds exposed this, because the checks either side of it are
+    rightly conditioned on there being actors.
+    """
+
+    from sworldmodel.errors import WorldIntegrityError
+
+    for hardcoded in (
+        {"op": "const", "args": [True]},
+        {"op": "before", "args": [{"op": "now", "args": []}, {"op": "horizon", "args": []}]},
+    ):
+        data = _split_world()
+        data["world_spec"]["terminal"]["yes_when"] = hardcoded
+        gw = _gateway(_signal_sensitive)
+        with pytest.raises(WorldIntegrityError) as exc:
+            _compile(data, gw)
+        assert "reads no world state" in str(exc.value)
+        assert exc.value.details["failure"] == "terminal_reads_no_world_state"
+
+
+def test_terminal_terms_beyond_plain_fields_are_recognised_and_matched() -> None:
+    """`stage`, `event_count`, `resource` and `document_field` are all offered to the
+    compiler as terminal operators. Reading only `field` and the collection aggregates
+    had it both ways: those terminals named no terms, so an actor-free world passed
+    vacuously, while a world with actors was refused and told its actors could not
+    reach terms that had never been identified.
+
+    A document field is also kept distinct from a world field of the same name, because
+    the evaluator keeps them distinct — otherwise writing one satisfies a read of the
+    other.
+    """
+
+    from sworldmodel.world_compiler import _effect_produces, _expr_terms
+    from sworldmodel.worldspec import Effect, Expr
+
+    assert _expr_terms(Expr("stage", ())) == {"stage:"}
+    assert _expr_terms(Expr("event_count", ("signature",))) == {"event:signature"}
+    assert _expr_terms(Expr("resource", ("votes", "board"))) == {"resource:votes"}
+    assert _expr_terms(Expr("document_field", ("treaty", "signed"))) == {"document:treaty.signed"}
+
+    assert _effect_produces(Effect("create_event", (("event_type", "signature"),))) == {
+        "event:signature"
+    }
+    assert _effect_produces(Effect("transfer_resource", (("resource", "votes"),))) == {
+        "resource:votes"
+    }
+    # A document field is not the world field of the same name.
+    doc = _effect_produces(
+        Effect("create_or_update_document", (("document", "treaty"), ("fields", {"signed": True})))
+    )
+    assert doc == {"document:treaty.signed"}
+    assert "field:signed" not in doc

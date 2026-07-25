@@ -581,6 +581,92 @@ def _action_writes(spec: WorldSpec) -> tuple[set[str], set[str]]:
     return fields, collections
 
 
+def _expr_terms(expr: Any) -> set[str]:
+    """Every piece of world state a declarative expression reads, namespaced by kind.
+
+    The compiler is offered ``stage``, ``event_count``, ``resource`` and
+    ``document_field`` as terminal operators alongside ``field`` and the collection
+    aggregates, and reading only the latter two had it both ways: a terminal built from
+    the other operators named *no* terms, so an actor-free world resolving on
+    ``const(true)`` had no orphans and passed the gate that exists to catch exactly
+    that — while a world *with* actors was always refused, and told the actors could not
+    reach terms that had never been identified.
+
+    Namespacing matters: ``expressions`` keeps world fields and document fields strictly
+    apart, so an action writing a document field named ``deal_signed`` does not write the
+    world field ``deal_signed``, and folding them together let one stand in for the other.
+    """
+
+    from .worldspec import Expr
+
+    if not isinstance(expr, Expr):
+        return set()
+    out: set[str] = {f"field:{n}" for n in _expr_fields(expr)}
+    out |= {f"collection:{n}" for n in _expr_collections(expr)}
+
+    def literal(arg: Any) -> str | None:
+        if isinstance(arg, str):
+            return arg
+        if isinstance(arg, Expr) and arg.op == "const" and arg.args:
+            return str(arg.args[0])
+        return None
+
+    def walk(node: Any) -> None:
+        if not isinstance(node, Expr):
+            return
+        args = list(node.args)
+        if node.op == "stage":
+            out.add("stage:")
+        elif node.op == "event_count" and args:
+            name = literal(args[0])
+            out.add(f"event:{name}" if name else "event:")
+        elif node.op == "resource" and args:
+            name = literal(args[0])
+            if name:
+                out.add(f"resource:{name}")
+        elif node.op == "document_field" and len(args) >= 2:
+            doc, fld = literal(args[0]), literal(args[1])
+            if doc and fld:
+                out.add(f"document:{doc}.{fld}")
+        for a in args:
+            walk(a)
+
+    walk(expr)
+    return out
+
+
+def _effect_produces(eff: Any) -> set[str]:
+    """The namespaced terms one compiled effect can write."""
+
+    params = eff.params_dict
+    out: set[str] = set()
+    if eff.op in ("set_field", "adjust_field"):
+        name = params.get("field")
+        if isinstance(name, str):
+            out.add(f"field:{name}")
+    elif eff.op == "append_record":
+        coll = params.get("collection")
+        if isinstance(coll, str):
+            out.add(f"collection:{coll}")
+    elif eff.op in ("create_event", "schedule_event"):
+        kind = params.get("event_type", params.get("kind"))
+        out.add(f"event:{kind}" if isinstance(kind, str) else "event:")
+    elif eff.op in ("transfer_resource", "consume_resource"):
+        res = params.get("resource")
+        if isinstance(res, str):
+            out.add(f"resource:{res}")
+    elif eff.op == "create_or_update_document":
+        doc = params.get("document")
+        fields = params.get("fields")
+        if isinstance(doc, str) and isinstance(fields, dict):
+            out.update(f"document:{doc}.{k}" for k in fields)
+    # Anything that sets a stage moves the stage term.
+    for key in ("stage", "set_stage"):
+        if isinstance(params.get(key), str):
+            out.add("stage:")
+    return out
+
+
 def terminal_producers(spec: WorldSpec) -> dict[str, tuple[str, ...]]:
     """For every term the terminal reads, what in this world can write it.
 
@@ -594,12 +680,14 @@ def terminal_producers(spec: WorldSpec) -> dict[str, tuple[str, ...]]:
     uncertainty's ``field_effects`` is the answer wearing the costume of a world state.
     """
 
-    terms = _expr_fields(spec.terminal.yes_when) | _expr_collections(spec.terminal.yes_when)
+    terms = _expr_terms(spec.terminal.yes_when)
     producers: dict[str, list[str]] = {t: [] for t in terms}
 
     def record(label: str, effects: Any) -> None:
-        fields, colls = _effect_writes(effects)
-        for term in fields | colls:
+        written: set[str] = set()
+        for eff in effects:
+            written |= _effect_produces(eff)
+        for term in written:
             if term in producers:
                 producers[term].append(label)
 
@@ -607,10 +695,44 @@ def terminal_producers(spec: WorldSpec) -> dict[str, tuple[str, ...]]:
         record(f"action:{action.action_id}", action.effects)
     for node in spec.process.nodes:
         record(f"process_node:{node.node_id}", node.effects)
+        if node.stage and "stage:" in producers:
+            producers["stage:"].append(f"process_node:{node.node_id}")
     for proc in spec.external_processes:
         for i, occ in enumerate(proc.occurrences):
             record(f"external_process:{proc.process_id}#{i}", occ.effects)
     return {k: tuple(v) for k, v in producers.items()}
+
+
+def _actions_gate_a_producer(spec: WorldSpec, terminal_terms: set[str]) -> bool:
+    """Whether what the actors do decides *whether* a producer of the outcome fires.
+
+    Indirect causation is still causation, and it is the normal shape for a decision
+    body: nobody writes "the motion carried", they cast votes, and the session that
+    counts them records the result.
+    """
+
+    action_fields, action_collections = _action_writes(spec)
+    actionable = action_fields | action_collections
+    if not actionable:
+        return False
+
+    def gate_reads(condition: Any) -> set[str]:
+        return _expr_fields(condition) | _expr_collections(condition)
+
+    def writes(effects: Any) -> set[str]:
+        out: set[str] = set()
+        for eff in effects:
+            out |= _effect_produces(eff)
+        return out
+
+    for node in spec.process.nodes:
+        if writes(node.effects) & terminal_terms and gate_reads(node.entry_condition) & actionable:
+            return True
+    for proc in spec.external_processes:
+        for occ in proc.occurrences:
+            if writes(occ.effects) & terminal_terms and gate_reads(occ.condition) & actionable:
+                return True
+    return False
 
 
 # The runtime's binding prefixes: a value starting with one of these is resolved from
@@ -665,34 +787,6 @@ def _threshold_for(expr: Any, term: str) -> float | None:
     return None
 
 
-def _actions_gate_a_producer(spec: WorldSpec, terminal_terms: set[str]) -> bool:
-    """Whether what the actors do decides *whether* a producer of the outcome fires.
-
-    Indirect causation is still causation, and it is the normal shape for a decision
-    body: nobody writes "the motion carried", they cast votes, and the session that
-    counts them records the result.
-    """
-
-    action_fields, action_collections = _action_writes(spec)
-    actionable = action_fields | action_collections
-    if not actionable:
-        return False
-
-    def gate_reads(condition: Any) -> set[str]:
-        return _expr_fields(condition) | _expr_collections(condition)
-
-    for node in spec.process.nodes:
-        written, coll = _effect_writes(node.effects)
-        if (written | coll) & terminal_terms and gate_reads(node.entry_condition) & actionable:
-            return True
-    for proc in spec.external_processes:
-        for occ in proc.occurrences:
-            written, coll = _effect_writes(occ.effects)
-            if (written | coll) & terminal_terms and gate_reads(occ.condition) & actionable:
-                return True
-    return False
-
-
 def _environment_preset_terminal_terms(spec: WorldSpec, terminal_terms: set[str]) -> set[str]:
     """Terminal terms a scheduled non-agent effect decides on its own.
 
@@ -725,13 +819,13 @@ def _environment_preset_terminal_terms(spec: WorldSpec, terminal_terms: set[str]
         for eff in effects:
             params = eff.params_dict
             name = params.get("field")
-            if not isinstance(name, str) or name not in terminal_terms:
+            if not isinstance(name, str) or f"field:{name}" not in terminal_terms:
                 continue
             if eff.op == "set_field":
                 value = params.get("value")
                 computed = isinstance(value, str) and value.startswith(_BINDINGS)
                 if not computed:
-                    out.add(name)
+                    out.add(f"field:{name}")
             elif eff.op == "adjust_field":
                 amount = params.get("amount", params.get("value"))
                 threshold = _threshold_for(spec.terminal.yes_when, name)
@@ -741,7 +835,7 @@ def _environment_preset_terminal_terms(spec: WorldSpec, terminal_terms: set[str]
                     and threshold is not None
                     and abs(float(amount)) >= abs(threshold)
                 ):
-                    out.add(name)
+                    out.add(f"field:{name}")
         return out
 
     def ungated(condition: Any) -> bool:
@@ -756,6 +850,22 @@ def _environment_preset_terminal_terms(spec: WorldSpec, terminal_terms: set[str]
             if ungated(occ.condition):
                 preset |= decided_here(occ.effects)
     return preset
+
+
+def _display(term: str) -> str:
+    """A namespaced term, written the way a person reads it.
+
+    Terms are namespaced internally because ``expressions`` keeps world fields, record
+    collections, documents, resources, events and the stage strictly apart. A refusal
+    message should still say ``rate_decision``, not ``field:rate_decision``.
+    """
+
+    kind, _, name = term.partition(":")
+    if kind == "field":
+        return name
+    if kind == "stage":
+        return "stage"
+    return f"{name} ({kind})" if name else kind
 
 
 def enforce_outcome_is_produced(
@@ -797,6 +907,24 @@ def enforce_outcome_is_produced(
     # from branch weights, is the most dangerous shape this gate exists to catch: it
     # looks alive and its answer was fixed before anyone opened their mouth.
     producers = terminal_producers(spec)
+
+    # A terminal that reads no world state at all is the limiting case, and it used to
+    # pass silently: with no terms there are no orphans, so `yes_when = const(true)` —
+    # the answer written as a constant — satisfied the very gate that exists to forbid
+    # it. Allowing actor-free worlds is what exposed this, because the checks below are
+    # rightly conditioned on there being actors.
+    if not producers:
+        raise WorldIntegrityError(
+            "the terminal reads no world state: its condition does not depend on "
+            "anything this world can produce, so the answer is fixed before the "
+            "simulation begins",
+            details={
+                "failure": "terminal_reads_no_world_state",
+                "recompilable": True,
+                "terminal": spec.terminal.description,
+            },
+        )
+
     orphans = sorted(term for term, who in producers.items() if not who)
     uncertain = {u.variable for u in uncertainties} | {
         name for u in uncertainties for o in u.outcomes for name, _ in o.field_effects
@@ -813,7 +941,7 @@ def enforce_outcome_is_produced(
         # this gate passed it because *some* action could in principle have written the
         # term. In a world with actors, a term the terminal reads may not be set to a
         # constant by the scenery.
-        preset = _environment_preset_terminal_terms(spec, terminal_fields | terminal_colls)
+        preset = _environment_preset_terminal_terms(spec, set(producers))
         if spec.actors and preset:
             raise WorldIntegrityError(
                 f"the environment writes the answer: {sorted(preset)} is set to a fixed "
@@ -823,10 +951,10 @@ def enforce_outcome_is_produced(
                 details={
                     "failure": "environment_presets_terminal",
                     "recompilable": True,
-                    "terms preset by the environment": sorted(preset),
+                    "terms preset by the environment": sorted(_display(t) for t in preset),
                     "actors": [a.entity_id for a in spec.actors],
                     "producers by terminal term": {
-                        k: list(v) for k, v in sorted(producers.items())
+                        _display(k): list(v) for k, v in sorted(producers.items())
                     },
                 },
             )
@@ -843,7 +971,7 @@ def enforce_outcome_is_produced(
         reaches = (
             (terminal_fields & written_fields)
             or (terminal_colls & written_colls)
-            or _actions_gate_a_producer(spec, terminal_fields | terminal_colls)
+            or _actions_gate_a_producer(spec, set(producers))
         )
         if spec.actors and not reaches:
             raise WorldIntegrityError(
@@ -855,10 +983,10 @@ def enforce_outcome_is_produced(
                     "failure": "actors_cannot_reach_terminal",
                     "recompilable": True,
                     "actors": [a.entity_id for a in spec.actors],
-                    "terminal reads fields": sorted(terminal_fields),
+                    "terminal reads": [_display(t) for t in sorted(producers)],
                     "fields any action can write": sorted(written_fields),
                     "producers by terminal term": {
-                        k: list(v) for k, v in sorted(producers.items())
+                        _display(k): list(v) for k, v in sorted(producers.items())
                     },
                 },
             )
@@ -872,13 +1000,16 @@ def enforce_outcome_is_produced(
         details={
             "failure": "terminal_has_no_producer",
             "recompilable": True,
-            "terminal terms with no producer": orphans,
-            "terminal reads fields": sorted(terminal_fields),
-            "terminal reads collections": sorted(terminal_colls),
+            "terminal terms with no producer": [_display(t) for t in orphans],
+            "terminal reads": [_display(t) for t in sorted(producers)],
             "fields any action can write": sorted(written_fields),
             "collections any action can write": sorted(written_colls),
-            "terminal terms supplied by uncertainty instead": sorted(set(orphans) & uncertain),
-            "producers by terminal term": {k: list(v) for k, v in sorted(producers.items())},
+            "terminal terms supplied by uncertainty instead": sorted(
+                {_display(t) for t in orphans} & uncertain
+            ),
+            "producers by terminal term": {
+                _display(k): list(v) for k, v in sorted(producers.items())
+            },
         },
     )
 
