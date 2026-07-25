@@ -377,6 +377,22 @@ def _decisive_evidence_contradiction(exc: WorldIntegrityError, subject: str) -> 
     )
 
 
+def _terminal_reads_no_world_state(exc: WorldIntegrityError, subject: str) -> RepairPlan:
+    return RepairPlan(
+        failure="terminal_reads_no_world_state",
+        missing_element="a terminal condition that depends on the world",
+        queries=(f"{subject} how the outcome is decided and recorded",),
+        instruction=(
+            "Your terminal condition does not read any world state, so its value is "
+            "fixed before the simulation starts. Write it over the things this world "
+            "actually contains: a field an action sets, a collection actions append to, "
+            "a document an action creates, a resource a transfer moves, an event type "
+            "actions emit, or the process stage. Then make sure something in the world "
+            "actually writes whatever you chose."
+        ),
+    )
+
+
 def _orphan_actors(exc: WorldIntegrityError, subject: str) -> RepairPlan:
     orphans = _strings(exc.details.get("orphan_actors"))
     return RepairPlan(
@@ -433,6 +449,7 @@ _PLANS = {
     "nothing_can_act": _nothing_can_act,
     "nothing_scheduled": _nothing_scheduled,
     "orphan_actors": _orphan_actors,
+    "terminal_reads_no_world_state": _terminal_reads_no_world_state,
     "decisive_evidence_contradiction": _decisive_evidence_contradiction,
     "unknown_expression_operator": _unknown_expression_operator,
     "malformed_compilation": _malformed_compilation,

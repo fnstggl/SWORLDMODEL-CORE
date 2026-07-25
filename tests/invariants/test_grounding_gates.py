@@ -595,3 +595,39 @@ def test_a_decisive_contradiction_is_repairable_before_it_is_fatal() -> None:
     # And the instruction offers the honest alternative rather than forcing a choice.
     assert "uncertainty" in plan.instruction
     assert "without a source" in plan.instruction
+
+
+def test_every_gate_failure_code_has_a_repair_plan() -> None:
+    """A failure code with no plan is a refusal the loop cannot act on.
+
+    `terminal_reads_no_world_state` shipped without one and surfaced in a live run as
+    "no repair plan for this failure" — a gate I had added, refusing correctly, and then
+    dead-ending because nothing knew what to do about it. The set is small enough to
+    check exhaustively, so it is.
+    """
+
+    from sworldmodel.repair import _PLANS
+
+    emitted = {
+        "no_causal_producer",
+        "actors_ungrounded",
+        "participants_omitted",
+        "roster_count_contradiction",
+        "duplicate_participant",
+        "required_facts_unverified",
+        "decisive_evidence_contradiction",
+        "orphan_actors",
+        "nothing_can_act",
+        "nothing_scheduled",
+        "terminal_has_no_producer",
+        "terminal_reads_no_world_state",
+        "actors_cannot_reach_terminal",
+        "environment_presets_terminal",
+        "unknown_expression_operator",
+        "malformed_compilation",
+        "coverage_incomplete",
+    }
+    # `duplicate_participant` is deliberately unplanned: the same person in two seats is
+    # not something more evidence or a rewritten instruction can fix.
+    unplanned = emitted - set(_PLANS)
+    assert unplanned == {"duplicate_participant"}, unplanned

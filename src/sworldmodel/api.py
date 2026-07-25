@@ -240,7 +240,12 @@ def _recompile(
         )
     except (GatewayError, WorldIntegrityError, ValueError, KeyError):
         return None
-    return assemble_bundle(bundle.evidence_store, data)
+    # Carry the research record forward. A compiler-only repair does no new research, so
+    # `assemble_bundle` has no trace to build — and without this the record of every
+    # query, source and rejection made before the repair was dropped on the floor. The
+    # run that first completed reported "0 queries, 0 sources fetched, 0 claims" in its
+    # own diagnosis while its audit showed 38 extractions and 399 HTTP requests.
+    return replace(assemble_bundle(bundle.evidence_store, data), live_trace=bundle.live_trace)
 
 
 def _limitations(config: ForecastConfig, run_result: RunResult) -> tuple[str, ...]:
