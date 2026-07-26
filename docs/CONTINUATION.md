@@ -62,6 +62,17 @@ factual resolution) — repeatability work is Phase 5.
 Phase 2 launched: runtime-impl building ACT-5..7 production-path harnesses + TMP-2
 temporal report; realism-adversary reviews on completion; then Phase 3 per plan.
 
+## OPERATING LESSON (2026-07-26 20:35, CTO)
+
+Subagent-launched long runs DIE when the agent's turn ends. The realism-adversary
+launched artifacts/phase2/geopolitical2 at 20:20:59 (commit bc20aa0); it wrote only
+its research checkpoint, left no process and no diagnosis, and the agent then blocked
+waiting on a dead poll. RULE: every real production run (frozen slice, acceptance
+case, benchmark) is launched by the CTO/main session in background and its artifact
+path handed to the reviewing agent. Subagents verify artifacts; they do not own
+long-lived processes. Also: check transcript size + child-process liveness, not just
+elapsed time, when judging whether an agent is progressing.
+
 ## Next exact steps
 
 1. Integrate `fix/observability-trace` then `fix/observability-viewer` (in that
