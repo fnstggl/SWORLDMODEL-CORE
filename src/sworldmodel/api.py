@@ -28,13 +28,14 @@ import hashlib
 import time
 from dataclasses import replace
 from datetime import datetime
-from typing import Any
+from typing import Any, Protocol
 
 from .compiled import CompiledWorld
 from .config import ForecastConfig
 from .diagnosis import ForecastRefused
 from .engine import RunResult, run
 from .errors import GatewayError, RunInterrupted, SWorldModelError, WorldIntegrityError
+from .gateway import ModelGateway
 from .ids import canonical_json
 from .models import ForecastResult, ResolutionContract
 from .outcomes import aggregate
@@ -48,6 +49,7 @@ from .structures import (
 )
 from .tracing import TraceContext
 from .trajectory_audit import audit_trajectory
+from .uncertainty import UNGROUNDED_PROVENANCES
 from .world_compiler import compile_world, compile_world_spec_live, render_evidence
 from .world_review import review_world
 
@@ -287,8 +289,20 @@ def _repair_once(
     return _recompile(question, as_of, horizon, bundle, config, plan.instruction)
 
 
+class CompileModeConfig(Protocol):
+    """The slice of the run configuration the compile-mode dispatch reads.
+
+    :class:`~sworldmodel.config.ForecastConfig` satisfies it; so does the minimal shim
+    the live research backend builds, so the *initial* live compilation dispatches
+    through this same entry point without importing the whole configuration.
+    """
+
+    @property
+    def gateway(self) -> ModelGateway: ...
+
+
 def compile_for_mode(
-    config: ForecastConfig,
+    config: CompileModeConfig,
     question: str,
     as_of: datetime,
     horizon: datetime,
@@ -299,17 +313,21 @@ def compile_for_mode(
 ) -> dict[str, Any]:
     """The one compile entry point both modes share, at every call site.
 
-    Three places compile a world from evidence — the initial research compile, the
-    repair recompile, and each structural alternative — and a mode that exists at two
-    of them is a silent mixed-mode run at the third. Routing all of them here makes
-    missing a site impossible, and stamps the mode into the compilation so the trace
-    can always say which compiler produced which structure.
+    Four places compile a world from evidence — the initial live research compile, the
+    repair recompile, each structural alternative, and the frozen-store replay — and a
+    mode that exists at some of them is a silent mixed-mode run at the others. Routing
+    all of them here makes missing a site impossible, and stamps the mode into the
+    compilation so the trace can always say which compiler produced which structure.
+
+    The gateway response rides along under ``_compile_responses`` (the key
+    ``assemble_bundle`` already reads), so every call site keeps the compile-call
+    record without a second return channel.
     """
 
     if getattr(config, "compiler_mode", "direct") == "semantic":
         from .semantic_compile import semantic_compile_live
 
-        data, _ = semantic_compile_live(
+        data, resp = semantic_compile_live(
             config.gateway,
             question,
             as_of,
@@ -319,7 +337,7 @@ def compile_for_mode(
             structure_id=structure_id,
         )
     else:
-        data, _ = compile_world_spec_live(
+        data, resp = compile_world_spec_live(
             config.gateway,
             question,
             as_of,
@@ -328,7 +346,13 @@ def compile_for_mode(
             extra_instruction=extra_instruction,
             structure_id=structure_id,
         )
+    # Stamp a COPY: both live compilers can hand back the gateway response's own data
+    # dict, and writing the stamp (or the response object itself) into that shared dict
+    # would rewrite the recorded model output — and, under a scripted test gateway, the
+    # fixture it replays.
+    data = dict(data)
     data["compiler_mode"] = getattr(config, "compiler_mode", "direct")
+    data["_compile_responses"] = [resp]
     return data
 
 
@@ -483,12 +507,49 @@ def _compile_alternative(
     return alt_bundle, compiled
 
 
-def _merge(results: list[tuple[float, str, RunResult]]) -> RunResult:
+def _structure_weight_grounded(assessment: StructuralAssessment, structure_id: str) -> bool:
+    """Whether the *structural* weight scaling this structure's branches is anchored in
+    an identified distribution.
+
+    Structure weights come from the assess_structure call and are epistemic: an
+    alternative labeled symmetric-ignorance (or left unlabeled, which falls back to it)
+    is a guess about WHICH WORLD WE ARE IN, not a measured probability. Multiplying
+    such a weight into a branch makes the branch's mass a guess too. The primary's own
+    weight is the complement of the alternatives' (plus any undescribed mass), so it is
+    grounded only when every part of that complement is.
+    """
+
+    if not assessment.is_material:
+        return True
+    for alt in assessment.alternatives:
+        if alt.structure_id == structure_id:
+            return alt.provenance not in UNGROUNDED_PROVENANCES
+    # The primary structure: its weight is 1 minus everything else.
+    return assessment.undescribed_mass <= 0 and all(
+        a.provenance not in UNGROUNDED_PROVENANCES for a in assessment.alternatives
+    )
+
+
+# The key under which an ungrounded structure choice enters a branch's key_conditions,
+# so it surfaces in the aggregate's ungrounded_variables like any other arbitrary split.
+_STRUCTURE_CONDITION = "causal_structure"
+
+
+def _merge(results: list[tuple[float, str, bool, RunResult]]) -> RunResult:
     """Combine per-structure runs into one trajectory set.
 
     Every branch weight is scaled by the weight of the structure it happened in, and
     branch ids are namespaced by structure, so the branch table the report prints still
     reconstructs the probability by hand.
+
+    Each entry carries whether its structural weight is grounded. When it is not, every
+    scaled branch is marked weight_grounded=False and the structure choice is added to
+    its key_conditions: an unevidenced split over which causal structure decides the
+    question must reach the forecast-integrity machinery exactly as an unevidenced
+    split over a value would — widening the bounds and, when the structures disagree,
+    withdrawing the point estimate's calibration claim. Without this, a 0.6/0.4 guess
+    about which world we are in multiplied branch mass while weights_grounded_all
+    stayed True and the bounds collapsed onto the point.
     """
 
     outcomes: list[Any] = []
@@ -500,10 +561,18 @@ def _merge(results: list[tuple[float, str, RunResult]]) -> RunResult:
     truncated = 0.0
     reasons: list[str] = []
 
-    for weight, structure_id, res in results:
+    for weight, structure_id, structurally_grounded, res in results:
         prefix = f"{structure_id}/"
         for b in res.branch_outcomes:
-            outcomes.append(replace(b, branch_id=prefix + b.branch_id, weight=b.weight * weight))
+            scaled = replace(b, branch_id=prefix + b.branch_id, weight=b.weight * weight)
+            if not structurally_grounded:
+                scaled = replace(
+                    scaled,
+                    weight_grounded=False,
+                    key_conditions=scaled.key_conditions
+                    + ((_STRUCTURE_CONDITION, structure_id),),
+                )
+            outcomes.append(scaled)
         for s in res.trajectory_summaries:
             summaries.append(replace(s, branch_id=prefix + s.branch_id, weight=s.weight * weight))
         ledger.extend(res.event_ledger)
@@ -553,25 +622,52 @@ def _write_research_files(config: ForecastConfig, live_trace: dict[str, Any], st
         out.mkdir(parents=True, exist_ok=True)
         (out / "research_trace.json").write_text(canonical_json(live_trace) + "\n")
         (out / "evidence_store.json").write_text(
-            canonical_json(
-                [
-                    {
-                        "id": c.id,
-                        "proposition": c.proposition,
-                        "normalized_value": c.normalized_value,
-                        "entities": list(c.entities),
-                        "epistemic_type": c.epistemic_type.value,
-                        "source_url": c.source_url,
-                        "supporting_excerpt": c.supporting_excerpt,
-                        "available_at": c.available_at.isoformat(),
-                    }
-                    for c in store.all()
-                ]
-            )
-            + "\n"
+            canonical_json([_claim_record(c) for c in store.all()]) + "\n"
         )
     except OSError:
         pass
+
+
+def _claim_record(c: Any) -> dict[str, Any]:
+    """The COMPLETE evidence claim, exported stably (ISO datetimes, enum values).
+
+    The export used to write eight fields and drop authority_level, source_type,
+    published_at, valid_from/valid_until, source_id, confidence, retrieved_at and
+    lineage_event_id — so a store replayed from disk misranked authority and changed
+    which claims the compiler saw as decisive. Every dataclass field is written; the
+    original eight keep their exact names and encodings for backward compatibility.
+    """
+
+    def _iso(v: Any) -> str | None:
+        return v.isoformat() if isinstance(v, datetime) else None
+
+    return {
+        # -- the original eight, unchanged ---------------------------------------
+        "id": c.id,
+        "proposition": c.proposition,
+        "normalized_value": c.normalized_value,
+        "entities": list(c.entities),
+        "epistemic_type": c.epistemic_type.value,
+        "source_url": c.source_url,
+        "supporting_excerpt": c.supporting_excerpt,
+        "available_at": c.available_at.isoformat(),
+        # -- the rest of the record ----------------------------------------------
+        "valid_from": _iso(c.valid_from),
+        "valid_until": _iso(c.valid_until),
+        "published_at": c.published_at.isoformat(),
+        "source_id": c.source_id,
+        "source_title": c.source_title,
+        "source_type": c.source_type.value,
+        "authority_level": c.authority_level.value,
+        "lineage_event_id": c.lineage_event_id,
+        "confidence": c.confidence,
+        "retrieved_at": c.retrieved_at.isoformat(),
+        "contradiction_ids": list(c.contradiction_ids),
+        "retrieved_url": c.retrieved_url,
+        "archived_at": _iso(c.archived_at),
+        "content_sha256": c.content_sha256,
+        "extraction_prompt_sha256": c.extraction_prompt_sha256,
+    }
 
 
 def _checkpoint_partial(config: ForecastConfig, exc: BaseException) -> bool:
@@ -598,6 +694,13 @@ def run_forecast(
 ) -> tuple[ForecastResult, TraceContext]:
     """Run the full pipeline and return the result plus a trace context for writing."""
 
+    # The run's spend ceilings reach the gateway before the first call: research,
+    # compilation, assessment, actors and audit all share one budget, and exhaustion
+    # surfaces as a GatewayError the existing handlers turn into honest refusals or
+    # unresolved branches — never into a cheaper answer.
+    config.gateway.set_budget(
+        max_calls=config.max_calls, max_tokens_total=config.max_tokens_total
+    )
     log = RepairLog()
     try:
         bundle = config.research_backend.research(question, as_of, horizon)
@@ -700,10 +803,11 @@ def run_forecast(
         evidence_render=render_evidence(bundle.evidence_store.view(as_of)),
     )
 
-    runs: list[tuple[float, str, RunResult]] = [
+    runs: list[tuple[float, str, bool, RunResult]] = [
         (
             assessment.primary_weight,
             compiled.spec.structure_id,
+            _structure_weight_grounded(assessment, compiled.spec.structure_id),
             run(compiled, config.gateway, seed=config.seed, budget=config.budget),
         )
     ]
@@ -720,6 +824,7 @@ def run_forecast(
             (
                 alt.weight,
                 alt.structure_id,
+                _structure_weight_grounded(assessment, alt.structure_id),
                 run(alt_compiled, config.gateway, seed=config.seed, budget=config.budget),
             )
         )

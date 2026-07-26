@@ -6,7 +6,8 @@ from datetime import UTC, datetime
 
 import pytest
 
-from sworldmodel.http import FakeTransport, html_response
+from _fakes import FakeTransport
+from sworldmodel.http import html_response
 from sworldmodel.source_fetch import fetch_source
 
 _NAIVE_DATE_PAGE = (

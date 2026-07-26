@@ -45,6 +45,13 @@ class ForecastConfig:
     # same WorldSpec. Both feed the identical gates and runtime; the mode is recorded in
     # every trace.
     compiler_mode: str = "direct"
+    # Per-run spend ceilings, enforced at the gateway (see ModelGateway.set_budget):
+    # wall clocks alone cannot stop a run whose calls are cheap and fast. Exhaustion
+    # raises GatewayError, which existing handlers convert into an honest refusal or an
+    # unresolved branch. None disables a ceiling. Directly constructed gateways
+    # (tests) stay unbounded until run_forecast threads these in.
+    max_calls: int | None = 400
+    max_tokens_total: int | None = 2_000_000
 
     @classmethod
     def live(
@@ -61,6 +68,8 @@ class ForecastConfig:
         model: str | None = None,
         budget: RunBudget | None = None,
         compiler_mode: str = "direct",
+        max_calls: int | None = 400,
+        max_tokens_total: int | None = 2_000_000,
     ) -> ForecastConfig:
         """The production configuration: live DeepSeek + live research, one transport."""
 
@@ -87,6 +96,8 @@ class ForecastConfig:
             max_compile_seconds=max_compile_seconds,
             budget=budget or RunBudget(),
             compiler_mode=compiler_mode,
+            max_calls=max_calls,
+            max_tokens_total=max_tokens_total,
         )
 
     @property

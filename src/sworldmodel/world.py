@@ -355,8 +355,16 @@ class WorldState:
                 if value is not None:
                     fields[str(data["field"])] = value
             elif kind == "adjust_field":
-                cur = _num(fields.get(str(data["field"]), 0.0))
-                fields[str(data["field"])] = cur + _num(data.get("delta", 0.0))
+                delta = data.get("delta")
+                # A delta the world could not determine adjusts nothing. Writing
+                # cur + 0.0 would DETERMINE a previously-unset field — defeating any
+                # equals(field, None) unresolved guard and turning an unknown into a
+                # confident answer. The feasibility check refuses such actions up
+                # front; this is the last line of defense for events built elsewhere
+                # (e.g. deferred effects re-resolved at fire time).
+                if delta is not None:
+                    cur = _num(fields.get(str(data["field"]), 0.0))
+                    fields[str(data["field"])] = cur + _num(delta)
             elif kind == "release_data":
                 for name, level in dict(data.get("fields", {})).items():
                     fields[name] = level
@@ -383,14 +391,20 @@ class WorldState:
                 )
             elif kind == "transfer_resource":
                 res = str(data["resource"])
-                amt = _num(data.get("amount", 0.0))
-                frm = _reskey(res, str(data["from"]))
-                to = _reskey(res, str(data["to"]))
-                resources[frm] = _num(resources.get(frm, 0.0)) - amt
-                resources[to] = _num(resources.get(to, 0.0)) + amt
+                raw_amt = data.get("amount", 0.0)
+                # An undetermined amount moves nothing: "transfer what I said" must
+                # never silently become "transfer nothing, recorded as done".
+                if raw_amt is not None:
+                    amt = _num(raw_amt)
+                    frm = _reskey(res, str(data["from"]))
+                    to = _reskey(res, str(data["to"]))
+                    resources[frm] = _num(resources.get(frm, 0.0)) - amt
+                    resources[to] = _num(resources.get(to, 0.0)) + amt
             elif kind == "consume_resource":
-                key = _reskey(str(data["resource"]), str(data["holder"]))
-                resources[key] = _num(resources.get(key, 0.0)) - _num(data.get("amount", 0.0))
+                raw_amt = data.get("amount", 0.0)
+                if raw_amt is not None:
+                    key = _reskey(str(data["resource"]), str(data["holder"]))
+                    resources[key] = _num(resources.get(key, 0.0)) - _num(raw_amt)
             elif kind == "create_or_update_document":
                 did = str(data["document"])
                 documents.setdefault(did, {}).update(dict(data.get("fields", {})))

@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import json
 
-from sworldmodel.http import FakeTransport, HttpResponse
+from _fakes import FakeTransport
+from sworldmodel.http import HttpResponse
 from sworldmodel.providers import (
     ProviderHealth,
     jina_reader,

@@ -52,7 +52,8 @@ def test_looks_like_pdf_detects_magic_type_and_suffix() -> None:
 def test_fetch_source_reads_a_pdf_body() -> None:
     from datetime import datetime
 
-    from sworldmodel.http import FakeTransport, pdf_response
+    from _fakes import FakeTransport
+    from sworldmodel.http import pdf_response
     from sworldmodel.source_fetch import fetch_source
 
     stream = b"BT (Galia Borja, Deputy governor) Tj ET"

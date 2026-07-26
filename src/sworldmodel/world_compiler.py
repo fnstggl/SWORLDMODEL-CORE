@@ -58,7 +58,7 @@ from .prompts import render_world_compile_prompt
 from .reality import verify_reality
 from .uncertainty import enumerate_scenarios
 from .world import WorldFact, WorldState
-from .worldspec import ActorSpec, Effect, EntitySpec, WorldSpec, as_objects
+from .worldspec import ActorSpec, Effect, EntitySpec, Expr, WorldSpec, as_objects
 
 _VALID_PROVENANCE = {p.value for p in WeightProvenance}
 
@@ -162,6 +162,11 @@ def compile_world(
     # before anything runs. That is legitimate exactly once: as a factual resolution the
     # cited record establishes. Uncited, it is the compiler asserting the outcome.
     enforce_terminal_not_preresolved(spec, base_world)
+
+    # Gate 4c — a terminal over a field the world never initializes must be guarded by
+    # an is-unset test, or an absent value would coerce to zero and resolve a confident
+    # answer about a quantity nobody produced.
+    enforce_terminal_unset_guarded(spec, base_world, uncertainties)
 
     # Gate 5 — evidence-to-world coverage against the exact compiled WorldSpec.
     view, signal_claim_ids = world_spec_view(spec, base_world, uncertainties, world_facts)
@@ -1152,6 +1157,80 @@ def _uncertainty_fields(uncertainties: tuple[UncertaintySpec, ...]) -> set[str]:
     return {u.variable for u in uncertainties} | {
         name for u in uncertainties for o in u.outcomes for name, _ in o.field_effects
     }
+
+
+def enforce_terminal_unset_guarded(
+    spec: WorldSpec,
+    base_world: WorldState,
+    uncertainties: tuple[UncertaintySpec, ...],
+) -> None:
+    """Refuse a terminal that would resolve confidently on fields nothing initializes.
+
+    The evaluator's comparison operators are total — an absent quantity coerces to
+    zero — so a terminal reading a field with no compiled initial value and no branch
+    draw writing it would resolve a confident NO (or YES) about a value the world
+    never produced. That is only honest when ``unresolved_when`` carries an is-unset
+    test (``equals(field(x), None)``-shaped) for each such field: then the branch
+    stays unresolved until something actually writes the value, and resolves on the
+    produced value once something does. The semantic lowerer already derives exactly
+    this guard for its UNKNOWN-initial states; this gate holds the direct compiler
+    (whose ``unresolved_when`` defaults to ``const(False)``) to the same standard.
+    """
+
+    initialized = set(base_world.fields_dict()) | _uncertainty_fields(uncertainties)
+    read = _expr_fields(spec.terminal.yes_when)
+    guarded = _unset_guarded_fields(spec.terminal.unresolved_when)
+    unguarded = sorted(read - initialized - guarded)
+    if not unguarded:
+        return
+    raise WorldIntegrityError(
+        "the terminal reads fields the compiled world never initializes, and the "
+        "unresolved condition does not test them for being unset: comparison treats "
+        "an absent quantity as zero, so a value nobody ever produced would resolve a "
+        f"confident answer instead of leaving the branch unresolved: {unguarded}",
+        details={
+            "failure": "terminal_unset_fields_unguarded",
+            "recompilable": True,
+            "unguarded fields": unguarded,
+            "fix": (
+                "either give each named field a cited initial value, or OR into "
+                "terminal.unresolved_when an is-unset test for it, shaped "
+                '{"op": "equals", "args": [{"op": "field", "args": ["<name>"]}, null]}'
+            ),
+        },
+    )
+
+
+def _unset_guarded_fields(expr: Any) -> set[str]:
+    """Fields for which ``expr`` contains an ``equals(field(x), None)`` test."""
+
+    if not isinstance(expr, Expr):
+        return set()
+    out: set[str] = set()
+    if expr.op == "equals" and len(expr.args) == 2:
+        for a, b in ((expr.args[0], expr.args[1]), (expr.args[1], expr.args[0])):
+            name = _field_read_name(a)
+            if name is not None and _is_const_none(b):
+                out.add(name)
+    for arg in expr.args:
+        out |= _unset_guarded_fields(arg)
+    return out
+
+
+def _field_read_name(expr: Any) -> str | None:
+    if isinstance(expr, Expr) and expr.op == "field" and expr.args:
+        first = expr.args[0]
+        if isinstance(first, str):
+            return first
+        if isinstance(first, Expr) and first.op == "const" and first.args:
+            return str(first.args[0])
+    return None
+
+
+def _is_const_none(expr: Any) -> bool:
+    if expr is None:
+        return True
+    return isinstance(expr, Expr) and expr.op == "const" and (not expr.args or expr.args[0] is None)
 
 
 def _labeled_effects(spec: WorldSpec) -> list[tuple[str, Any]]:
