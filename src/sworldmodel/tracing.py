@@ -22,6 +22,7 @@ from .evidence import EvidenceStore
 from .ids import canonical_json, sha256_hex
 from .models import ForecastResult, ResolutionContract
 from .research import ResearchBundle
+from .temporal_report import write_temporal_report
 
 
 @dataclass
@@ -361,6 +362,7 @@ class TraceContext:
         (out_dir / "actor_decisions.jsonl").write_text(
             "\n".join(self.actor_decision_lines()) + "\n"
         )
+        write_temporal_report(out_dir, self.run_result)  # §9 counters (TMP-2, FD-13)
         for name, audit in (
             ("world_review.json", self.world_review),
             ("trajectory_audit.json", self.trajectory_audit),

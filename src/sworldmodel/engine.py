@@ -229,21 +229,29 @@ def run(
             # initialized but nothing has run. ``_seed_branch`` has (a) pushed the
             # compiled calendar — process entry nodes, external occurrences, plan and
             # commitment entries — onto the schedule *without firing any of it* (those
-            # only execute inside ``_event_loop``), and (b) applied this branch's
-            # hypothesis about its uncertain values inline: the scenario's
-            # ``release_data`` event is built and applied via ``world.apply`` right
-            # there, not queued through the event loop, so the branch condition fields
-            # are already in world state even when their public release date lies in
-            # the future. What follows from that release — deliveries, notices, actor
-            # decisions — is only *scheduled* at this point. So this evaluation sees
-            # exactly what the task requires: the branch condition values, and not one
-            # actor or process consequence. The clock of the evaluated copy is moved to
-            # the horizon (the copy is then discarded) so the evaluation answers the
-            # same question ``_finalize`` will answer — "what does the terminal say if
-            # nothing further happens before the horizon?" — instead of tripping
-            # time-window guards at ``as_of``.
+            # only execute inside ``_event_loop``), and (b) established this branch's
+            # hypothesis about its uncertain values: a standing condition (no known
+            # release date, or one already public at the cutoff) is applied to world
+            # state right there, while a value whose public release lies in the future
+            # is only *scheduled*, so the branch state honestly lacks it until its
+            # release fires inside the loop (TMP-4). This evaluation must still answer
+            # "what does the terminal say under this branch's conditions if nothing
+            # further happens before the horizon?", so a deferred release is overlaid
+            # onto a throwaway copy for this one evaluation — the world the loop runs
+            # is untouched and still learns the value only at its release time. The
+            # copy's clock is moved to the horizon so the evaluation answers the same
+            # question ``_finalize`` will answer instead of tripping time-window
+            # guards at ``as_of``.
+            pre_world = world
+            if _deferred_release_at(scenario, world.contract.as_of) is not None:
+                pre_world = replace(
+                    world,
+                    fields=tuple(
+                        sorted({**dict(world.fields), **dict(scenario.field_levels)}.items())
+                    ),
+                )
             pre_eval = evaluate_terminal(
-                world.with_time(world.contract.horizon), compiled.spec.terminal
+                pre_world.with_time(world.contract.horizon), compiled.spec.terminal
             )
             pre_resolved = pre_eval.resolved
             pre_outcome = pre_eval.outcome if pre_eval.resolved else None
@@ -388,27 +396,68 @@ def _seed_branch(
     world = world.with_schedule(world.schedule.push(*entries))
 
     # This branch's hypothesis about an uncertain future value. If the compiler knows
-    # when that value becomes public it is released then; otherwise it is a standing
-    # condition of the branch from the start. It is never dropped at an invented
-    # midpoint of the forecast window just to give the world something to react to.
+    # when that value becomes public, it is released THEN — as a scheduled entry the
+    # event loop fires at its real time — so the branch state before the release
+    # honestly lacks the value, the seed never drags the branch clock to the release
+    # date, and everything compiled in between still happens first (TMP-4/FD-7: the
+    # BoE branch collapsed every dated release to t0, deciding the outcome at the
+    # first invocation). A value with no known release date — or one already public
+    # at the cutoff — is a standing condition of the branch from the start. It is
+    # never dropped at an invented midpoint of the forecast window just to give the
+    # world something to react to.
     if scenario.field_levels:
-        at = scenario.release_at or as_of
-        ev = effects.raw_event(
-            world.with_time(max(world.time, at)),
-            kind="release_data",
-            actor_id=None,
-            payload={
-                "fields": dict(scenario.field_levels),
-                "epistemic_type": "hypothesis",
-                "branch_conditions": dict(scenario.conditions),
-            },
-            visibility=Visibility.PUBLIC,
-        )
-        world = world.apply([ev])
-        applied = world.event_history[-1]
-        ledger.append(applied)
-        world = _propagate(world, spec, [applied])
+        release_at = _deferred_release_at(scenario, as_of)
+        if release_at is not None:
+            world = world.with_schedule(
+                world.schedule.push(
+                    make_entry(
+                        at=release_at,
+                        kind=KIND_DEFERRED_EFFECT,
+                        payload={
+                            "op": "release_data",
+                            "params": {"fields": dict(scenario.field_levels)},
+                        },
+                        origin=ORIGIN_EXTERNAL,
+                        origin_detail=f"scenario_release:{scenario.scenario_id}",
+                        # One causal layer after any compiled occurrence at the same
+                        # instant: when the compiled world models the release event
+                        # itself, this branch's hypothesis states what that release
+                        # *revealed*, so it lands after the occurrence's baseline
+                        # placeholder rather than being overwritten by it.
+                        microstep=1,
+                    )
+                )
+            )
+        else:
+            at = scenario.release_at or as_of
+            ev = effects.raw_event(
+                world.with_time(max(world.time, at)),
+                kind="release_data",
+                actor_id=None,
+                payload={
+                    "fields": dict(scenario.field_levels),
+                    "epistemic_type": "hypothesis",
+                    "branch_conditions": dict(scenario.conditions),
+                },
+                visibility=Visibility.PUBLIC,
+            )
+            world = world.apply([ev])
+            applied = world.event_history[-1]
+            ledger.append(applied)
+            world = _propagate(world, spec, [applied])
     return world
+
+
+def _deferred_release_at(scenario: Scenario, as_of: datetime) -> datetime | None:
+    """When this branch's uncertain values become public, if that moment still lies
+    ahead of the cutoff — i.e. the release must *fire* during the run, at its own
+    time, rather than stand as a condition the branch was born knowing."""
+
+    if not scenario.field_levels:
+        return None
+    if scenario.release_at is None or scenario.release_at <= as_of:
+        return None
+    return scenario.release_at
 
 
 def _entry_nodes(spec: WorldSpec) -> tuple[ProcessNode, ...]:
@@ -917,6 +966,28 @@ def _complete_action(
             else None
         )
         world = world.with_actor(replace(world.actors[aid], current_action=updated))
+        if status == "completed":
+            # Acting is not succeeding, so succeeding gets its own ledger line: the
+            # completion instant is a real recorded moment (the §9 temporal report
+            # counts completions from it, next to started/failed/rejected). It is
+            # private bookkeeping and NOT an observable kind — a success is not news,
+            # and it wakes nobody (see below).
+            done = action_exec.effects.raw_event(
+                world,
+                kind="action_completed",
+                actor_id=aid,
+                payload={
+                    "action_id": outcome.action_id,
+                    "started_at": str(entry.payload_dict.get("started_at", "")),
+                    "reason": outcome.reason,
+                },
+                visibility=Visibility.PRIVATE,
+                audience=(aid,),
+            )
+            world = world.apply([done])
+            applied_done = world.event_history[-1]
+            ledger.append(applied_done)
+            produced.append(applied_done)
         if status == "failed":
             # A failure is news the actor needs: what it set out to do did not happen,
             # and it may now do something else. A *success* is not news — the actor

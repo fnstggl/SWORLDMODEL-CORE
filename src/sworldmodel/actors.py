@@ -259,12 +259,23 @@ class LocalView:
     world_version: int = 0
 
     def observed_fields(self) -> dict[str, Any]:
-        """Every field level this actor can currently read: ambient world-field levels
-        plus anything carried in the observations it has noticed."""
+        """Every field level this actor can currently read.
 
-        fields: dict[str, Any] = dict(self.world_fields)
+        Observations fold in the order they were noticed (the view keeps them sorted
+        by notice time), so two messages about the same field resolve by time rather
+        than by an accident of event-id ordering. The world's own *current* field
+        levels are then laid over the top: an ambient level the world determines now
+        is what the actor can read now, and a stale number quoted in an older message
+        must not shadow it. A field the world has not determined stays at whatever
+        the messages carried — the view never invents a level.
+        """
+
+        fields: dict[str, Any] = {}
         for obs in self.observations:
             for name, level in obs.info_fields:
+                fields[name] = level
+        for name, level in self.world_fields:
+            if level is not None:
                 fields[name] = level
         return fields
 

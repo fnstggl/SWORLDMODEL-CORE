@@ -48,6 +48,7 @@ PIPELINE_ARTIFACTS = (
     "event_ledger.jsonl",
     "llm_calls.jsonl",
     "branch_schedule.json",
+    "temporal_report.json",
     "trajectory_audit.json",
     "run_audit.json",
     # the observability set (OBS-1..4, OBS-7, OBS-8), derived at trace-write time
