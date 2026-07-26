@@ -396,6 +396,24 @@ def _review(
             f"QUESTION THE WORLD MUST RESOLVE: {question}",
             "## THE COMPILED WORLD\n"
             + json.dumps(summarize_world(compiled), indent=2, sort_keys=True, default=str),
+            # The review fights the system's own legitimacy rules unless told them: a
+            # population run declared an input uncertainty with honestly-labeled
+            # symmetric weights over cited anchors, this review called the weights
+            # arbitrary and the uncertainty an answer in disguise, and the forced
+            # recompile deleted it — leaving a single-branch world that could only end
+            # unresolved. What the mechanical gates already permit and police is not
+            # for this review to re-litigate.
+            "## WHAT IS ALREADY LEGAL HERE\n"
+            "Branch weights labeled symmetric_ignorance_assumption are not arbitrary: "
+            "the label is the honest state of knowledge, and the runtime reports "
+            "bounds instead of a calibrated point wherever such weights matter. Fail "
+            "branch_weights_arbitrary only for a weight wearing a GROUNDED provenance "
+            "its citations do not support. Likewise an uncertainty is the answer in "
+            "disguise only when the terminal reads its drawn value through no real "
+            "computation — a mechanical gate upstream already refuses that. An "
+            "uncertainty over an input the terminal computes from via cited anchors "
+            "is the honest shape of not knowing; demanding its removal produces a "
+            "world that can only end unresolved.",
             _settled_record_block(compiled),
             "## THE VERIFIED EVIDENCE IT WAS BUILT FROM\n" + evidence_render,
             "## ANSWER EACH\n" + body,

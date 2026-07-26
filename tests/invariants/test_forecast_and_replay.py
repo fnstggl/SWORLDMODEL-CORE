@@ -825,6 +825,13 @@ def test_the_pre_rollout_review_is_told_when_the_record_already_answered() -> No
     (req2,) = [r for r in gw2.seen if r.task_kind == "world_review"]
     assert "CITED FACTUAL RESOLUTION" not in req2.prompt
 
+    # Every review is told the system's standing legitimacy rules: a population run's
+    # honestly-labeled symmetric-ignorance uncertainty was called arbitrary and the
+    # forced recompile deleted it, leaving a world that could only end unresolved.
+    for r in (req, req2):
+        assert "WHAT IS ALREADY LEGAL HERE" in r.prompt
+        assert "symmetric_ignorance_assumption" in r.prompt
+
 
 def test_a_world_whose_initial_values_already_answer_yes_uncited_is_refused() -> None:
     """The OPEC+ shape: the answer baked into an uncited initial value.

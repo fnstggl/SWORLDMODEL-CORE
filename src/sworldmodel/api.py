@@ -1016,4 +1016,10 @@ def forecast(
     result, ctx = run_forecast(question, as_of, horizon, config)
     if config.trace_dir is not None:
         ctx.write(config.trace_dir, gateway_calls=config.gateway.calls)
+        # The research checkpoint wrote the INITIAL bundle's trace and store; a review
+        # or gate repair that recompiled replaced both (the simulated plan rides
+        # live_trace["semantic_repair_rounds"], targeted research extends the store).
+        # Rewrite from the bundle that was actually simulated, or every downstream
+        # audit reads a plan nobody executed beside claims nobody used.
+        _write_research_files(config, dict(ctx.bundle.live_trace or {}), ctx.bundle.evidence_store)
     return result

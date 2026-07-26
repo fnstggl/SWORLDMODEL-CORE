@@ -660,3 +660,43 @@ def test_a_final_refusal_and_a_dead_gateway_are_not_replanned() -> None:
     # Recompilable, but the gateway is not live: no replan, no crash.
     exc = _initial_refusal(bundle.evidence_store)
     assert api._replan_initial_compile("q?", AS_OF, HORIZON, config, exc, RepairLog()) is None
+
+
+def test_completion_exports_the_bundle_that_was_actually_simulated(monkeypatch, tmp_path) -> None:
+    """The research checkpoint writes the INITIAL bundle's trace and store; when the
+    pre-rollout review forces a recompile, the simulated plan rides the final bundle's
+    live_trace (semantic_repair_rounds) and the checkpointed artifact describes a plan
+    nobody executed. Completion must rewrite research_trace.json and
+    evidence_store.json from the bundle that was simulated."""
+
+    from dataclasses import replace as dc_replace
+
+    import sworldmodel.api as api
+    from _fakes import FixtureResearchBackend
+    from sworldmodel.config import ForecastConfig
+
+    bundle = build_bundle(_authority_mismatch_world())
+    final_bundle = dc_replace(
+        bundle, live_trace={"semantic_repair_rounds": [{"plan": "the simulated one"}]}
+    )
+
+    class _Ctx:
+        bundle = final_bundle
+
+        def write(self, out_dir, *, gateway_calls=None):
+            return "hash"
+
+    monkeypatch.setattr(api, "run_forecast", lambda *a, **k: (object(), _Ctx()))
+    config = ForecastConfig(
+        gateway=_wait_gateway(),
+        research_backend=FixtureResearchBackend(bundle),
+        trace_dir=tmp_path,
+    )
+    api.forecast("q?", AS_OF, HORIZON, config)
+
+    import json as _json
+
+    trace = _json.loads((tmp_path / "research_trace.json").read_text())
+    assert trace == {"semantic_repair_rounds": [{"plan": "the simulated one"}]}
+    store = _json.loads((tmp_path / "evidence_store.json").read_text())
+    assert {c["id"] for c in store} == {c.id for c in final_bundle.evidence_store.all()}
