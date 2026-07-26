@@ -1157,6 +1157,62 @@ def validate_semantic_plan(
 
     check_terminal(plan.terminal, "terminal")
 
+    # -- decorative objects: declared, but nothing in the world touches them -------
+    #
+    # The coverage gate refuses a compiled world whose evidence-derived objects are
+    # "represented but not causally wired" — an entity that participates in nothing,
+    # a state nothing reads or writes. Measured in the eight-case A/B, that refusal
+    # arrives AFTER compilation and costs a whole new compile cycle: a fresh plan
+    # delta, fresh validator rounds and a fresh independent review, four to six
+    # serially dependent model calls. Every one of those defects is visible right
+    # here, mechanically, at zero model cost. Catching them turns a cycle-triggering
+    # gate failure into one in-cycle delta round.
+    #
+    # This is the same standard the independent reviewer is already asked to apply
+    # ("Is anything present that is decorative — unable to move any terminal-relevant
+    # state?"), enforced where it is free rather than where it is expensive.
+    read_states: set[str] = set()
+    for a in plan.affordances:
+        for c in a.changes:
+            read_states |= c.value.states_read() if c.value else set()
+            read_states |= c.amount.states_read() if c.amount else set()
+    for p in plan.processes:
+        read_states |= set(p.inputs)
+        for o in p.occurrences:
+            for c in o.changes:
+                read_states |= c.value.states_read() if c.value else set()
+                read_states |= c.amount.states_read() if c.amount else set()
+
+    def terminal_states(t: TerminalQuery) -> set[str]:
+        out: set[str] = set()
+        if t.state:
+            out.add(t.state)
+        if t.threshold is not None:
+            out |= t.threshold.states_read()
+        for part in t.parts:
+            out |= terminal_states(part)
+        return out
+
+    read_states |= terminal_states(plan.terminal)
+    touched_states = read_states | written_states | uncertain_states
+    for s in plan.states:
+        if s.name and s.name not in touched_states:
+            errors.append(
+                f"state {s.name!r} is decorative: nothing reads it, nothing writes it, "
+                "and no uncertainty sets it, so it cannot affect the outcome — wire it "
+                "into the causal path (read it, produce it, or put an uncertainty on "
+                "it) or remove it"
+            )
+
+    # Deliberately NOT extended to entities. A non-deciding entity that owns no state
+    # and participates in nothing may still be a faithful part of the world's
+    # description — the observatory a telescope belongs to, the authority a reservoir
+    # sits under — and the coverage gate only judges candidates the EVIDENCE names,
+    # which this validator cannot identify. An entity rule here refused three of the
+    # invented-domain regression worlds outright, which is a stricter standard than
+    # the gate it was meant to anticipate: the check would be inventing refusals
+    # rather than moving one earlier.
+
     if not plan.terminal_producer_note:
         errors.append(
             "terminal_producer_note is required: say what produces the resolving state "

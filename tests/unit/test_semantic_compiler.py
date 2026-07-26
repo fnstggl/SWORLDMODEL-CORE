@@ -1397,3 +1397,40 @@ def test_a_twice_unreadable_plan_refuses_as_the_pipeline_not_as_a_value_error() 
     assert exc.value.details["failure"] == "semantic_plan_invalid"
     assert exc.value.details["recompilable"] is True
     assert any("all_of" in e for e in exc.value.details["semantic_errors"])
+
+
+def test_a_state_nothing_touches_is_refused_before_the_coverage_gate() -> None:
+    """An inert state is caught mechanically, at zero model cost.
+
+    The eight-case A/B measured the alternative: a declared-but-unwired object
+    survives the plan validator, gets compiled, and is refused by the COVERAGE gate
+    afterwards — which costs an entire extra compile cycle (a fresh plan delta, fresh
+    validator rounds and a fresh independent review, four to six serially dependent
+    model calls). A state nothing reads, nothing writes and no uncertainty draws
+    cannot affect the outcome under any semantics, so the validator refuses it where
+    the refusal is free.
+
+    The rule is deliberately confined to states: an entity rule was tried and refused
+    three of the invented-domain worlds below, a stricter standard than the gate it
+    was anticipating.
+    """
+
+    data = harbor_plan()
+    data["states"] = [
+        {
+            "name": "harbor visitor count",
+            "owner": "world",
+            "state_type": "quantity",
+            "unit": "visitors",
+            "initial": "UNKNOWN",
+            "why_material": "claimed to matter, wired to nothing",
+            "evidence_claim_ids": [],
+        }
+    ]
+    errors = _valid(data)
+    assert any("decorative" in e and "harbor visitor count" in e for e in errors)
+
+    # The invented-domain worlds all still validate: the rule catches inert states,
+    # not faithful ones.
+    for plan in (harbor_plan(), council_plan(), observatory_plan()):
+        assert not [e for e in _valid(plan) if "decorative" in e]
