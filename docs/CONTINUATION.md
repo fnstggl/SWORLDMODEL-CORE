@@ -52,6 +52,7 @@ context window ended.
 
 ## Blockers / user decisions pending
 
-- None hard-blocking. Standing offer to user: review the 8 preregistered
-  actor-fidelity pastcast questions before the freeze (otherwise CTO freezes and
-  proceeds; sealed per D8).
+- None hard-blocking. EVAL-1 suite DRAFT-FROZEN in
+  docs/acceptance/ACTOR_FIDELITY_SUITE.md (10 cases, outcome commitments sealed in
+  artifacts/sealed/outcomes.json, sha256 committed). User veto window announced
+  in-session; store freeze happens in one commit before any scoring run.
