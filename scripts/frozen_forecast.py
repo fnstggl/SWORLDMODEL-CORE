@@ -19,61 +19,25 @@ Exit codes: 0 completed forecast; 1 refused (diagnosis written); 4 unexpected er
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import urlparse
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "src"))
+sys.path.insert(0, str(REPO / "scripts"))
+
+from _store_loader import load_store, prepare_run_dir  # noqa: E402
 
 from sworldmodel.api import compile_for_mode, forecast  # noqa: E402
 from sworldmodel.config import ForecastConfig  # noqa: E402
 from sworldmodel.deepseek_gateway import DeepSeekGateway  # noqa: E402
 from sworldmodel.diagnosis import ForecastRefused, RunDiagnosis  # noqa: E402
-from sworldmodel.evidence import EvidenceClaim, EvidenceStore  # noqa: E402
+from sworldmodel.evidence import EvidenceStore  # noqa: E402
 from sworldmodel.http import UrllibTransport  # noqa: E402
 from sworldmodel.ids import canonical_json  # noqa: E402
-from sworldmodel.models import (  # noqa: E402
-    AuthorityLevel,
-    EpistemicType,
-    SourceType,
-)
 from sworldmodel.research import assemble_bundle  # noqa: E402
-
-
-def load_store(path: Path) -> EvidenceStore:
-    raw = json.loads(path.read_text())
-    store = EvidenceStore()
-    for c in raw:
-        available = datetime.fromisoformat(c["available_at"])
-        url = str(c.get("source_url") or "")
-        host = urlparse(url).hostname or "unknown"
-        store.add(
-            EvidenceClaim(
-                id=str(c["id"]),
-                proposition=str(c["proposition"]),
-                normalized_value=str(c.get("normalized_value") or ""),
-                entities=tuple(c.get("entities") or ()),
-                valid_from=available,
-                valid_until=None,
-                published_at=available,
-                available_at=available,
-                source_id=host,
-                source_url=url,
-                source_title=host,
-                source_type=SourceType("contemporaneous_reporting"),
-                authority_level=AuthorityLevel["MEDIUM"],
-                supporting_excerpt=str(c.get("supporting_excerpt") or ""),
-                lineage_event_id=f"ev_{c['id']}",
-                epistemic_type=EpistemicType(str(c.get("epistemic_type") or "observation")),
-                confidence=0.8,
-                retrieved_at=available,
-            )
-        )
-    return store
 
 
 class FrozenResearchBackend:
@@ -125,7 +89,9 @@ def main() -> int:
     as_of = datetime.fromisoformat(args.as_of)
     horizon = datetime.fromisoformat(args.horizon)
     out = Path(args.out)
-    out.mkdir(parents=True, exist_ok=True)
+    # Stamp the run and clear any prior run's pipeline artifacts, so a refusal here
+    # can never leave a stale forecast.json for downstream readers to score as fresh.
+    prepare_run_dir(out, question=args.question, as_of=as_of, horizon=horizon, mode=args.mode)
 
     store = load_store(Path(args.store))
     gateway = DeepSeekGateway(UrllibTransport())
