@@ -14,14 +14,14 @@ mypy --strict clean (52 files); forensic verdicts RECONSTRUCTED ×3
 
 | ID | Requirement | Owner / Reviewer | Status |
 | --- | --- | --- | --- |
-| OBS-1 | Per-branch complete initial state persisted (post-scenario, pre-event) | obs-trace / obs-reviewer | OPEN |
-| OBS-2 | Every state diff persisted with trigger, authority, evidence lineage, terminal relevance (§12) | obs-trace / obs-reviewer | OPEN |
-| OBS-3 | Communications persisted with §11 fields (sender, recipient, channel, send/deliver, notice, interpretation) | obs-trace / obs-reviewer | OPEN |
-| OBS-4 | Process transitions persisted (§ process-by-process trace) | obs-trace / obs-reviewer | OPEN |
-| OBS-5 | Actor calls + model calls persisted exact and complete (prompts, raw responses, chronology) | done pre-run (71393bb, 189c88d) / obs-reviewer | RUN-PROVEN |
-| OBS-6 | Replay viewer reconstructs the real run: timeline, actors, comms, processes, state, calls, branches, weights, lineage, cost, audit views; real artifacts only | obs-viewer / obs-reviewer | OPEN |
-| OBS-7 | Initial state + ordered diffs reconstruct the world with zero LLM calls (D7 replay core, shared by trace writer, publication gate, forensics) | obs-trace / obs-reviewer | OPEN |
-| OBS-8 | Complete chronological dossier (§13, 26 sections) emitted per real run | obs-trace / obs-reviewer | OPEN |
+| OBS-1 | Per-branch complete initial state persisted (post-scenario, pre-event) | obs-trace / obs-reviewer | CLOSED (obs-reviewer APPROVE, 127f8a7) |
+| OBS-2 | Every state diff persisted with trigger, authority, evidence lineage, terminal relevance (§12) | obs-trace / obs-reviewer | CLOSED (obs-reviewer APPROVE, 127f8a7) |
+| OBS-3 | Communications persisted with §11 fields (sender, recipient, channel, send/deliver, notice, interpretation) | obs-trace / obs-reviewer | CLOSED (obs-reviewer APPROVE, 127f8a7) |
+| OBS-4 | Process transitions persisted (§ process-by-process trace) | obs-trace / obs-reviewer | CLOSED (obs-reviewer APPROVE, 127f8a7) |
+| OBS-5 | Actor calls + model calls persisted exact and complete (prompts, raw responses, chronology) | done pre-run (71393bb, 189c88d) / obs-reviewer | CLOSED (obs-reviewer APPROVE, 127f8a7) |
+| OBS-6 | Replay viewer reconstructs the real run: timeline, actors, comms, processes, state, calls, branches, weights, lineage, cost, audit views; real artifacts only | obs-viewer / obs-reviewer | CLOSED (obs-reviewer APPROVE, 127f8a7) |
+| OBS-7 | Initial state + ordered diffs reconstruct the world with zero LLM calls (D7 replay core, shared by trace writer, publication gate, forensics) | obs-trace / obs-reviewer | CLOSED (obs-reviewer APPROVE, 127f8a7) |
+| OBS-8 | Complete chronological dossier (§13, 26 sections) emitted per real run | obs-trace / obs-reviewer | CLOSED (obs-reviewer APPROVE, 127f8a7) |
 
 ## ACT — Actor fidelity (Phase 2)
 

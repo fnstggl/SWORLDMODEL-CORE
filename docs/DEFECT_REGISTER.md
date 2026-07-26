@@ -14,8 +14,8 @@ MEDIUM, LOW.
 | FD-2 | CRITICAL | Ungrounded disagreeing weights published their average as headline (BoE 0.25, Tesla 0.50) | aggregation/publication | forecast-integrity / forensic auditor | FI-2 |
 | FD-3 | CRITICAL | Threshold-straddling invented alternatives (0.8/1.05 vs break-even 0.8331) undetected end-to-end | semantic validation | world-compiler-impl / causal-adversary | CWF-4, FI-5 |
 | FD-4 | CRITICAL | Responsibility classification exists only in the offline forensic script; publication is ungated (a BRANCH_WEIGHTS_DOMINATED run published normally) | forecast assembly | forecast-integrity / forensic auditor | FI-3,4 |
-| FD-5 | HIGH | No per-branch initial state, state diffs, communications, or process transitions in the production trace (forensics had to derive them) | trace write | obs-trace / obs-reviewer | OBS-1..4,7 |
-| FD-6 | HIGH | Replay viewer does not render the forensic/observability artifact set | viewer | obs-viewer / obs-reviewer | OBS-6 |
+| FD-5 (CLOSED 127f8a7, obs-reviewer) | HIGH | No per-branch initial state, state diffs, communications, or process transitions in the production trace (forensics had to derive them) | trace write | obs-trace / obs-reviewer | OBS-1..4,7 |
+| FD-6 (CLOSED 127f8a7, obs-reviewer) | HIGH | Replay viewer does not render the forensic/observability artifact set | viewer | obs-viewer / obs-reviewer | OBS-6 |
 | FD-7 | HIGH | BoE branch: `release_at: null` collapsed all data releases to t0; outcome decided at first invocation; 10/14 invocations causally inert; actor re-signaled 3× (run's own audit: HIGH) | semantic planning + scheduling | runtime-impl + world-compiler-impl / realism-adversary | TMP-4, ACT-8 |
 | FD-8 | HIGH | OPEC+ resolution-scope ambiguity (group-wide quota vs sub-group unwinding) silently resolved; store contained both readings; published 1.00 with [1,1] bounds | resolution contract | world-compiler-impl / retrieval-adversary | CWF-7 |
 | FD-9 | HIGH | Zero-actor worlds admissible without evidence that no human decision matters (Tesla passed compile with no actors) | compile gates | world-compiler-impl / causal-adversary | CWF-5 |

@@ -57,6 +57,11 @@ rows close and Phase 2 launches (runtime-impl + realism-adversary per plan). Not
 three structurally different plans across runs (0.25 four-branch, 0.50-class, 1.0
 factual resolution) — repeatability work is Phase 5.
 
+## PHASE 1 CLOSED (obs-reviewer APPROVE at 127f8a7; OBS-1..8 CLOSED; FD-5, FD-6 closed)
+
+Phase 2 launched: runtime-impl building ACT-5..7 production-path harnesses + TMP-2
+temporal report; realism-adversary reviews on completion; then Phase 3 per plan.
+
 ## Next exact steps
 
 1. Integrate `fix/observability-trace` then `fix/observability-viewer` (in that
