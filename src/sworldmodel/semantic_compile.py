@@ -457,7 +457,24 @@ def semantic_compile_live(
                 attempt=attempt + 100,
             )
             responses.append(resp2)
-            plan = parse_semantic_plan(raw2)  # a second failure propagates
+            try:
+                plan = parse_semantic_plan(raw2)
+            except SemanticPlanError as exc2:
+                # A second unreadable shape is a real refusal — but it must refuse AS
+                # the pipeline's own refusal type. Raw SemanticPlanError is a
+                # ValueError: it bypassed the repair registry, was misfiled as a
+                # research-stage failure, and threw away a completed live research
+                # record (a FIFA holdout run lost 10 queries' evidence to
+                # "terminal.parts[0]: all_of needs at least 2 part(s)").
+                raise WorldIntegrityError(
+                    "the semantic plan is unreadable after a shape-correction round: "
+                    + "; ".join(exc2.errors[:6]),
+                    details={
+                        "failure": "semantic_plan_invalid",
+                        "recompilable": True,
+                        "semantic_errors": list(exc2.errors),
+                    },
+                ) from exc2
             raw = raw2
         return plan, raw
 

@@ -1354,3 +1354,33 @@ def test_a_repair_with_a_prior_plan_revises_instead_of_rerolling() -> None:
     )
     first2 = next(r for r in gw2.seen if r.task_kind == "semantic_plan")
     assert "REVISE the previous semantic plan" not in first2.prompt
+
+
+def test_a_twice_unreadable_plan_refuses_as_the_pipeline_not_as_a_value_error() -> None:
+    """A FIFA holdout run's planner emitted an all_of terminal with one part twice;
+    the raw SemanticPlanError (a ValueError) bypassed the repair registry, was
+    misfiled as a research-stage failure, and a completed live research record was
+    thrown away. A second unreadable shape must refuse as WorldIntegrityError with
+    failure=semantic_plan_invalid and recompilable=True, so the research rides the
+    exception and the registered repair gets its chance."""
+
+    import pytest
+
+    from _fakes import ProgrammableGateway
+    from sworldmodel.errors import WorldIntegrityError
+    from sworldmodel.semantic_compile import semantic_compile_live
+
+    bad = harbor_plan()
+    bad["terminal"] = {"form": "all_of", "parts": [{"form": "event_exists", "event": "x"}]}
+    view = _store_for(harbor_plan())
+    gw = ProgrammableGateway(
+        {
+            "semantic_plan": bad,  # returned for the first call AND the reparse round
+            "semantic_review": {"verdict": "APPROVE", "reasons": [], "corrections": []},
+        }
+    )
+    with pytest.raises(WorldIntegrityError) as exc:
+        semantic_compile_live(gw, "q?", AS_OF, HORIZON, view)
+    assert exc.value.details["failure"] == "semantic_plan_invalid"
+    assert exc.value.details["recompilable"] is True
+    assert any("all_of" in e for e in exc.value.details["semantic_errors"])

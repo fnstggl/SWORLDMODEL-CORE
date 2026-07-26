@@ -1264,12 +1264,14 @@ Return JSON {{"reconcilable": true|false, "reading": "<one line: how both are tr
                 horizon,
                 store.view(as_of),
             )
-        except WorldIntegrityError as exc:
-            # The research preceding this refusal is COMPLETE — queries, sources,
+        except Exception as exc:
+            # The research preceding this failure is COMPLETE — queries, sources,
             # claims, the whole record. It rides on the exception so the caller can
             # checkpoint it and name the true stage; without this, a compile-stage
             # refusal erased the run's entire research record and its diagnosis read
-            # the zeros as a discovery failure.
+            # the zeros as a discovery failure. EVERY exception type, not only the
+            # gates' own: a raw parser ValueError from the compile boundary threw
+            # away a completed research pass the same way.
             exc.partial_live_trace = trace.to_dict(plan, store)  # type: ignore[attr-defined]
             exc.partial_evidence_store = store  # type: ignore[attr-defined]
             raise
