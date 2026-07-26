@@ -36,3 +36,6 @@ env/
 .vscode/
 *.swp
 .DS_Store
+
+# Claude Code session infrastructure (agent worktrees, local settings) — never source
+.claude/
