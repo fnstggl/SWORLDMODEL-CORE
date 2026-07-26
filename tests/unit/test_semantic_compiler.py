@@ -888,6 +888,73 @@ def test_the_lowered_world_clears_the_existing_gates_unchanged() -> None:
     assert compiled.spec.actions and compiled.spec.process.nodes
 
 
+def test_wake_rules_are_derived_so_the_world_is_not_inert_between_moments() -> None:
+    """H-3: the engine consults spec.wake_rules only after the directed/asked/revisit/
+    communication checks, and field writes and appended records stay ambient unless a
+    compiled rule says otherwise. A lowering that emitted wake_rules=[] made every
+    semantic world inert between dated actor moments. The rules must be derived: a
+    process input changing wakes the deciders that react to it, a declared event wakes
+    its deciding participants, and the terminal's counted records wake everyone who can
+    still act."""
+
+    from sworldmodel.worldspec import parse_wake_rule
+
+    data = harbor_plan()
+    data["states"] = [
+        {
+            "name": "queued night arrivals",
+            "owner": "world",
+            "state_type": "quantity",
+            "unit": "vessels",
+            "initial": 4,
+            "why_material": "pressure on the docking decision",
+            "evidence_claim_ids": ["c-r1"],
+        }
+    ]
+    data["processes"].append(
+        {
+            "name": "arrival ledger updates",
+            "meaning": "the ledger accrues queued night arrivals through the window",
+            "kind": "operational",
+            "inputs": ["queued night arrivals"],
+            "occurrences": [
+                {
+                    "description": "weekly ledger update",
+                    "at": "2026-01-20T00:00:00+00:00",
+                    "changes": [
+                        {"op": "increase", "target": "queued night arrivals", "amount": 2}
+                    ],
+                }
+            ],
+            "evidence_claim_ids": ["c-r1"],
+        }
+    )
+    assert _valid(data) == []
+    compilation, _ = lower_plan(parse_semantic_plan(data))
+    spec = compilation["world_spec"]
+    rules = spec["wake_rules"]
+    assert rules, "a world with mechanisms and deciders must compile wake rules"
+
+    entity_ids = {e["entity_id"] for e in spec["entities"]}
+    field_ids = {f["field_id"] for f in spec["fields"]}
+    for r in rules:
+        parsed = parse_wake_rule(r)
+        assert parsed.is_checkable(), f"rule {r['rule_id']!r} has no trigger"
+        assert r["wakes"], f"rule {r['rule_id']!r} wakes nobody"
+        assert set(r["wakes"]) <= entity_ids, f"rule {r['rule_id']!r} wakes unknown entities"
+
+    # (a) the operational process's input changing wakes the decider that reads it.
+    field_rules = [r for r in rules if r["on_field_change"]]
+    assert field_rules and all(r["on_field_change"] in field_ids for r in field_rules)
+    # (b) the declared event wakes its deciding participant, quoting the plan's meaning.
+    event_rules = [r for r in rules if r["on_event_type"]]
+    assert event_rules
+    assert any(harbor_plan()["events"][0]["meaning"] in r["reason"] for r in event_rules)
+    # (c) the terminal counts this event's records, so appending one wakes the deciders.
+    record_rules = [r for r in rules if r["on_record_in"]]
+    assert record_rules and all(set(r["wakes"]) == entity_ids for r in record_rules)
+
+
 def test_an_occurrence_at_or_before_the_cutoff_is_refused() -> None:
     """The simulation cannot re-perform history: a t0 occurrence that records the
     resolving event let a branch resolve YES off a re-enactment nobody produced."""

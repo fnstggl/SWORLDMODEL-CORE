@@ -400,6 +400,132 @@ def _lower_terminal(q: TerminalQuery, t: SymbolTable) -> dict[str, Any]:
 _VALUE_TYPES = {"quantity": "number", "boolean": "bool", "category": "string", "text": "string"}
 
 
+def _terminal_counted_events(q: TerminalQuery) -> set[str]:
+    """Event names whose records the terminal counts (event_exists / record_count)."""
+
+    out: set[str] = set()
+    if q.form == "event_exists" and q.event:
+        out.add(q.event)
+    if q.form == "record_count" and q.record_event:
+        out.add(q.record_event)
+    for part in q.parts:
+        out |= _terminal_counted_events(part)
+    return out
+
+
+def _wake_rules(plan: SemanticPlan, t: SymbolTable) -> list[dict[str, Any]]:
+    """Deterministic wake rules — who is brought back when the world moves.
+
+    The engine consults ``spec.wake_rules`` only after the directed / asked / revisit /
+    communication checks, and field writes, data releases and appended records stay
+    ambient unless a compiled rule says otherwise. A lowering that emits no rules
+    therefore produces a world that is inert between dated actor moments: nothing any
+    mechanism does ever wakes a decider. Three universal derivations, every reason
+    quoting the plan's own meaning text:
+
+      (a) a state named in a process's ``inputs`` wakes every deciding entity when it
+          changes — a mechanism input changing is exactly what its readers react to;
+      (b) a declared event wakes its deciding participants (all deciding entities when
+          it is public with no participants);
+      (c) a record collection the terminal counts wakes every deciding entity — the
+          resolving tally moving is material to anyone who can still act.
+
+    A derivation whose wake set is empty (a world with no deciding entities, or an
+    event none of whose participants decide) is recorded as a "dropped" mapping entry,
+    never silently discarded.
+    """
+
+    decider_names = {e.name for e in plan.entities if e.decides}
+    deciders = sorted(t.resolve("entity", n) for n in decider_names)
+    rules: list[dict[str, Any]] = []
+
+    def emit(
+        name: str,
+        *,
+        wakes: list[str],
+        reason: str,
+        trigger_key: str,
+        trigger: str,
+        rule: str,
+        evidence: tuple[str, ...],
+        dropped_why: str,
+    ) -> None:
+        if not wakes:
+            t.records.append(
+                {
+                    "semantic": name,
+                    "namespace": "dropped",
+                    "runtime_id": "",
+                    "lowering_rule": f"carried nowhere: {dropped_why}",
+                    "evidence_claim_ids": list(evidence),
+                }
+            )
+            return
+        rule_id = t.mint("wake_rule", name, rule=rule, evidence=evidence)
+        entry: dict[str, Any] = {
+            "rule_id": rule_id,
+            "wakes": wakes,
+            "reason": reason,
+            "on_record_in": "",
+            "on_field_change": "",
+            "on_event_type": "",
+            "evidence_claim_ids": list(evidence),
+        }
+        entry[trigger_key] = trigger
+        rules.append(entry)
+
+    for p in plan.processes:
+        for inp in p.inputs:
+            emit(
+                f"wake when {inp} changes (input to {p.name})",
+                wakes=deciders,
+                reason=f"{inp!r} is an input to {p.name!r}: {p.meaning}",
+                trigger_key="on_field_change",
+                trigger=t.resolve("field", inp),
+                rule="process input → wake_rules[].on_field_change waking every "
+                "deciding entity",
+                evidence=p.evidence_claim_ids,
+                dropped_why="no deciding entity exists to wake when this input changes",
+            )
+
+    for ev in plan.events:
+        participant_ids = sorted(
+            {t.resolve("entity", who) for _, who in ev.participants if who in decider_names}
+        )
+        wakes = participant_ids
+        if not wakes and ev.visibility == "public" and not ev.participants:
+            wakes = deciders
+        emit(
+            f"wake on event {ev.name}",
+            wakes=wakes,
+            reason=f"{ev.name!r}: {ev.meaning}",
+            trigger_key="on_event_type",
+            trigger=t.resolve("event", ev.name),
+            rule="event → wake_rules[].on_event_type waking its deciding participants "
+            "(all deciding entities when public with no participants)",
+            evidence=ev.evidence_claim_ids,
+            dropped_why="no deciding entity participates in or is woken by this event",
+        )
+
+    for name in sorted(_terminal_counted_events(plan.terminal)):
+        ev2 = next((e for e in plan.events if e.name == name), None)
+        meaning = ev2.meaning if ev2 is not None else name
+        evidence = ev2.evidence_claim_ids if ev2 is not None else ()
+        emit(
+            f"wake on recorded {name} (terminal)",
+            wakes=deciders,
+            reason=f"the terminal counts records of {name!r}: {meaning}",
+            trigger_key="on_record_in",
+            trigger=t.resolve("event", name),
+            rule="terminal-counted event → wake_rules[].on_record_in waking every "
+            "deciding entity",
+            evidence=evidence,
+            dropped_why="no deciding entity exists to wake when this record is appended",
+        )
+
+    return rules
+
+
 def lower_plan(
     plan: SemanticPlan, *, structure_id: str = "primary"
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -699,7 +825,7 @@ def lower_plan(
         "actions": actions,
         "process": {"nodes": nodes},
         "external_processes": externals,
-        "wake_rules": [],
+        "wake_rules": _wake_rules(plan, t),
         "terminal": {
             "yes_when": _lower_terminal(plan.terminal, t),
             "unresolved_when": _unresolved_when(plan, t),
