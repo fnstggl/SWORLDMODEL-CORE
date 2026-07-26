@@ -510,6 +510,15 @@ class RunDiagnosis:
                     "the world could not have resolved whatever happened in it",
                 }
             )
+        if gate == "terminal_unset_fields_unguarded":
+            out.append(
+                {
+                    "cause": "unexecutable_compilation",
+                    "why": "the terminal reads fields the world never initializes and the "
+                    "unresolved condition does not test them for being unset, so an "
+                    "absent value would have resolved a confident answer",
+                }
+            )
         if gate in ("malformed_compilation", "unknown_expression_operator"):
             out.append(
                 {
