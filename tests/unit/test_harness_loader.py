@@ -206,3 +206,82 @@ def test_prepare_run_dir_clears_stale_artifacts_and_stamps(tmp_path):
     assert stamp["mode"] == "semantic"
     assert stamp["commit"]
     assert stamp["started_at"]
+
+
+def test_exporter_to_loader_round_trip_preserves_recorded_contradictions(tmp_path):
+    """A recorded decisive contradiction must survive export → load, or the coverage
+    gate's conflict check flips silently on replay."""
+
+    import json
+    import sys
+    from datetime import datetime
+    from pathlib import Path as _P
+
+    scripts = str(_P(__file__).resolve().parent.parent.parent / "scripts")
+    if scripts not in sys.path:
+        sys.path.insert(0, scripts)
+    from _store_loader import load_store
+
+    from sworldmodel.api import _claim_record
+    from sworldmodel.evidence import EvidenceClaim, EvidenceStore
+    from sworldmodel.models import AuthorityLevel, EpistemicType, SourceType
+
+    def claim(cid: str) -> EvidenceClaim:
+        t = datetime.fromisoformat("2026-01-05T00:00:00+00:00")
+        return EvidenceClaim(
+            id=cid,
+            proposition=f"p {cid}",
+            normalized_value=cid,
+            entities=("X",),
+            valid_from=t,
+            valid_until=None,
+            published_at=t,
+            available_at=t,
+            source_id="s",
+            source_url="https://example.test/a",
+            source_title="s",
+            source_type=SourceType("contemporaneous_reporting"),
+            authority_level=AuthorityLevel.MEDIUM,
+            supporting_excerpt="e",
+            lineage_event_id=f"ev_{cid}",
+            epistemic_type=EpistemicType("observation"),
+            confidence=0.9,
+            retrieved_at=t,
+        )
+
+    store = EvidenceStore()
+    store.add(claim("c-a"))
+    store.add(claim("c-b"))
+    store.record_contradiction("c-a", "c-b")
+    out = tmp_path / "evidence_store.json"
+    out.write_text(json.dumps([_claim_record(c) for c in store.all()], default=str))
+    replayed = load_store(out)
+    assert {tuple(sorted(pair)) for pair in replayed.contradictions()} == {("c-a", "c-b")}
+
+
+def test_gateway_budget_is_per_run_not_lifetime():
+    from sworldmodel.gateway import GatewayRequest, GatewayResponse, ModelGateway
+
+    class _G(ModelGateway):
+        is_live = False
+        model_id = "test"
+
+        def _generate(self, request):
+            return GatewayResponse(
+                task_kind=request.task_kind,
+                data={"ok": True},
+                raw_text="{}",
+                model="test",
+                params={},
+                seed=0,
+                prompt_hash="x",
+                tokens_in=1,
+                tokens_out=1,
+            )
+
+    g = _G()
+    g.set_budget(max_calls=2)
+    for _ in range(2):
+        g.generate(GatewayRequest(task_kind="t", prompt="p", context={}, seed=0))
+    g.set_budget(max_calls=2)  # a NEW run: ceiling resets against a fresh snapshot
+    g.generate(GatewayRequest(task_kind="t", prompt="p", context={}, seed=0))

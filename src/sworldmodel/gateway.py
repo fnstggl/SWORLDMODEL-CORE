@@ -88,18 +88,25 @@ class ModelGateway(abc.ABC):
         with self._lock:
             self._max_calls = max_calls
             self._max_tokens_total = max_tokens_total
+            # The ceilings are PER RUN: a caller reusing one gateway across runs must
+            # not have run two refused at its first call because run one spent the
+            # lifetime counters. Snapshot here and compare deltas.
+            self._budget_base_calls = self.call_count
+            self._budget_base_tokens = self.total_tokens
 
     def _check_budget(self, request: GatewayRequest) -> None:
         with self._lock:
-            if self._max_calls is not None and self.call_count >= self._max_calls:
+            spent_calls = self.call_count - getattr(self, "_budget_base_calls", 0)
+            if self._max_calls is not None and spent_calls >= self._max_calls:
                 raise GatewayError(
-                    f"call budget exhausted: {self.call_count} model calls made, cap "
+                    f"call budget exhausted: {spent_calls} model calls made, cap "
                     f"{self._max_calls}; refusing {request.task_kind!r} rather than "
                     "spending past the configured ceiling"
                 )
-            if self._max_tokens_total is not None and self.total_tokens >= self._max_tokens_total:
+            spent_tokens = self.total_tokens - getattr(self, "_budget_base_tokens", 0)
+            if self._max_tokens_total is not None and spent_tokens >= self._max_tokens_total:
                 raise GatewayError(
-                    f"token budget exhausted: {self.total_tokens} tokens used, cap "
+                    f"token budget exhausted: {spent_tokens} tokens used, cap "
                     f"{self._max_tokens_total}; refusing {request.task_kind!r} rather "
                     "than spending past the configured ceiling"
                 )

@@ -1090,8 +1090,11 @@ def test_no_validated_field_vanishes_without_lowering_or_a_dropped_record() -> N
     assert _valid(data2) == []
     comp2, mapping2 = lower_plan(parse_semantic_plan(data2))
     nodes = {n["node_id"]: n for n in comp2["world_spec"]["process"]["nodes"]}
-    assert nodes["february_observing_runs"]["deadline"] == "2026-02-27T00:00:00+00:00"
-    assert not any(r["namespace"] == "dropped" and "deadline" in r["semantic"] for r in mapping2)
+    # The engine schedules deadline entries only for a node's participants; on a
+    # participant-less operational node the field would be inert, so it is recorded as
+    # honestly dropped rather than carried in name only.
+    assert "deadline" not in nodes["february_observing_runs"]
+    assert any(r["namespace"] == "dropped" and "deadline" in r["semantic"] for r in mapping2)
 
 
 def test_must_refuse_false_gaps_skip_the_revision_round(

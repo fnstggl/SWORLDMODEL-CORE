@@ -741,15 +741,28 @@ def lower_plan(
                         "participants": [],
                         "action_ids": [],
                         "allow_novel": False,
-                        # A deadline is a deadline whatever the process kind: every
-                        # emitted node carries it, not only actor moments.
-                        "deadline": p.deadline,
+                        # The engine schedules a deadline entry only for a node's
+                        # participants; on a participant-less operational node the field
+                        # is inert, and an inert field is a silent drop wearing a
+                        # carried one's shape. Recorded as dropped below instead.
                         "effects": effects,
                         "next_nodes": [],
                         "evidence_claim_ids": list(p.evidence_claim_ids),
                     }
                 )
                 last_node_of_process[p.name] = node_id
+            if p.deadline:
+                t.records.append(
+                    {
+                        "semantic": f"{p.name} deadline",
+                        "namespace": "dropped",
+                        "runtime_id": "",
+                        "lowering_rule": "carried nowhere: the engine schedules deadline "
+                        "entries only for a node's participants, and an operational node "
+                        "has none",
+                        "evidence_claim_ids": [],
+                    }
+                )
         else:
             occurrences = []
             for o in p.occurrences:

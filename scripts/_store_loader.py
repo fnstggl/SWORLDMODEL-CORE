@@ -53,6 +53,10 @@ _PROVENANCE_KEYS = (
     "retrieved_at",
     "lineage_event_id",
 )
+# Re-check provenance (contradiction_ids, retrieved_url, archived_at, content_sha256,
+# extraction_prompt_sha256) is READ whenever present — dropping a recorded
+# contradiction silently flipped the coverage gate's conflict check on replay — but its
+# absence alone does not mark a store legacy: it does not affect authority ranking.
 
 # Everything any harness run (full route or compile slice, completed or refused) may
 # write into --out. Deleted before a run starts so nothing stale can be read as fresh.
@@ -161,6 +165,16 @@ def load_store(path: Path) -> EvidenceStore:
                 retrieved_at=(_parse_dt(c["retrieved_at"]) or available)
                 if "retrieved_at" in c
                 else available,
+                # Re-check provenance. Dropping contradiction_ids silently erased a
+                # recorded decisive contradiction on replay, flipping the coverage
+                # gate's conflict check for the same store.
+                contradiction_ids=tuple(str(x) for x in (c.get("contradiction_ids") or ())),
+                retrieved_url=str(c.get("retrieved_url") or ""),
+                archived_at=_parse_dt(c["archived_at"])
+                if c.get("archived_at") is not None
+                else None,
+                content_sha256=str(c.get("content_sha256") or ""),
+                extraction_prompt_sha256=str(c.get("extraction_prompt_sha256") or ""),
             )
         )
     if defaulted:
