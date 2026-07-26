@@ -85,8 +85,53 @@ the regression suite's invented worlds) compiles through exactly the same code p
 
 ## Status
 
-Vertical slice proven on frozen evidence stores; `scripts/semantic_slice.py` is the
-inner-loop harness (`--mode semantic|direct` on the same store is the A/B switch). The
-mode becomes the default only if the PART-12 promotion standard is met on the frozen
-acceptance set plus pre-registered holdouts (`artifacts_holdouts.json`); until then
-`direct` remains the default.
+The FULL canonical route now runs from frozen evidence stores:
+`scripts/frozen_forecast.py` executes `api.forecast()` itself — repair loop,
+pre-rollout world review, structural alternatives, the event runtime, aggregation and
+both auditors — with the only substitution at the retrieval boundary (claims come from
+a prior run's exported store). `scripts/semantic_slice.py` remains the fast
+compile-only inner loop (plan → review → validate → lower → gates, no simulation). On
+both, `--mode semantic|direct` on the same store is the A/B switch. Both harnesses
+share `scripts/_store_loader.py`: a full-fidelity export keeps every claim's real
+provenance (authority level, source type, publication/validity dates, source id,
+confidence) so authority ranking matches the live run; a legacy 8-field store falls
+back to defaulted provenance with a loud warning, because a defaulted store ranks
+evidence differently than the live run did. Each harness run stamps its output
+directory (`run_stamp.json`) and clears any prior run's pipeline artifacts first, so a
+refusal can never leave a stale `forecast.json` to be scored as fresh.
+
+The static validator additionally enforces the **re-perform-history rule**
+(`validate_semantic_plan` in `semantic_plan.py`): a process occurrence or actor_moment
+dated at or before the cutoff is refused — the simulation window opens at the cutoff
+and the world may not re-enact history. An outcome the record already establishes
+belongs in a cited initial state value or `world_facts`, never in a scheduled
+occurrence; a live run once resolved YES off a simulated re-enactment of the very
+event the question asked about, which this rule now makes impossible.
+
+Two lowering capabilities are the design contract of work landing in parallel; until
+it lands the lowerer emits them empty, which is a known fidelity gap versus the
+direct route, not parity:
+
+- **Wake-rule derivation.** The lowered WorldSpec currently carries
+  `wake_rules: []`. The contract: wake rules are derived deterministically from the
+  plan's declared meanings so semantic worlds get the same event-driven "wakes only
+  the actors it affects" behavior the direct compiler's specs express, instead of an
+  empty rule set.
+- **Required-reality-facts lowering.** The compilation currently carries
+  `required_reality_facts: []`. The contract: they are lowered from the plan's cited
+  reality (not emitted empty) so the reality-integrity gate can check the compiled
+  world against the facts it is REQUIRED to contain on the semantic route exactly as
+  it does on the direct route.
+
+### The A/B benchmark procedure
+
+Promotion is decided on frozen stores so retrieval variance is zero by construction:
+every question in the frozen acceptance set (`artifacts/acceptance/questions.json`)
+plus the pre-registered holdouts (`artifacts_holdouts.json`) is run through
+`scripts/frozen_forecast.py` twice from the SAME store — once `--mode semantic`, once
+`--mode direct`. The per-question outcome matrix (mode, outcome, failure stage, wall
+seconds, model calls, probability) is accumulated in `artifacts/ab_matrix.json` and
+the human-readable comparison is written to `artifacts/ab/RESULTS.md`. The semantic
+mode becomes the default only if the PART-12 promotion standard is met on that
+matrix; until then `direct` remains the default. Neither artifact exists yet — the
+benchmark has not been run.

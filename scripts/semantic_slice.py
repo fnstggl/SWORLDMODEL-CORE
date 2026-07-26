@@ -8,11 +8,11 @@ re-running research or the simulation. No mocks stand in for any of those stages
 only substitution is the input: claims come from a prior run's exported store instead
 of a live retrieval pass.
 
-The exported store is a reduced projection (id, proposition, value, entities,
-availability, url, excerpt). Reconstruction keeps every one of those real and defaults
-only the provenance decoration (source_id from the URL host, published_at from
-available_at) — stated here so nobody mistakes the harness for a full-fidelity replay
-of research.
+Store reconstruction is shared with the full-route harness (``scripts/_store_loader.py``):
+a full-fidelity export keeps every claim's real provenance (authority level, source
+type, publication and validity dates, source id, confidence) so authority ranking
+matches the live run; a legacy 8-field store falls back to defaulted provenance with a
+loud warning, because a defaulted store ranks evidence differently than the live run.
 
     PYTHONPATH=src python3 scripts/semantic_slice.py \
         --store artifacts/acceptance/individual/run_trace/evidence_store.json \
@@ -31,56 +31,20 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import urlparse
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "src"))
+sys.path.insert(0, str(REPO / "scripts"))
+
+from _store_loader import load_store, prepare_run_dir  # noqa: E402
 
 from sworldmodel.deepseek_gateway import DeepSeekGateway  # noqa: E402
 from sworldmodel.errors import SWorldModelError, WorldIntegrityError  # noqa: E402
-from sworldmodel.evidence import EvidenceClaim, EvidenceStore  # noqa: E402
 from sworldmodel.http import UrllibTransport  # noqa: E402
-from sworldmodel.models import (  # noqa: E402
-    AuthorityLevel,
-    EpistemicType,
-    ResolutionContract,
-    SourceType,
-)
+from sworldmodel.models import ResolutionContract  # noqa: E402
 from sworldmodel.research import assemble_bundle  # noqa: E402
 from sworldmodel.semantic_compile import semantic_compile_live  # noqa: E402
 from sworldmodel.world_compiler import compile_world  # noqa: E402
-
-
-def load_store(path: Path, as_of: datetime) -> EvidenceStore:
-    raw = json.loads(path.read_text())
-    store = EvidenceStore()
-    for c in raw:
-        available = datetime.fromisoformat(c["available_at"])
-        url = str(c.get("source_url") or "")
-        host = urlparse(url).hostname or "unknown"
-        store.add(
-            EvidenceClaim(
-                id=str(c["id"]),
-                proposition=str(c["proposition"]),
-                normalized_value=str(c.get("normalized_value") or ""),
-                entities=tuple(c.get("entities") or ()),
-                valid_from=available,
-                valid_until=None,
-                published_at=available,
-                available_at=available,
-                source_id=host,
-                source_url=url,
-                source_title=host,
-                source_type=SourceType("contemporaneous_reporting"),
-                authority_level=AuthorityLevel["MEDIUM"],
-                supporting_excerpt=str(c.get("supporting_excerpt") or ""),
-                lineage_event_id=f"ev_{c['id']}",
-                epistemic_type=EpistemicType(str(c.get("epistemic_type") or "observation")),
-                confidence=0.8,
-                retrieved_at=available,
-            )
-        )
-    return store
 
 
 def _metrics(gateway, *, mode: str, outcome: str, failure: str, seconds: float) -> dict:
@@ -117,9 +81,11 @@ def main() -> int:
     as_of = datetime.fromisoformat(args.as_of)
     horizon = datetime.fromisoformat(args.horizon)
     out = Path(args.out)
-    out.mkdir(parents=True, exist_ok=True)
+    # Stamp the run and clear any prior run's pipeline artifacts, so a refusal here
+    # can never leave stale compile artifacts for downstream readers to score as fresh.
+    prepare_run_dir(out, question=args.question, as_of=as_of, horizon=horizon, mode=args.mode)
 
-    store = load_store(Path(args.store), as_of)
+    store = load_store(Path(args.store))
     view = store.view(as_of)
     print(f"[store]   {len(store.all())} claims, {len(view.available())} admissible at cutoff")
 
@@ -133,24 +99,36 @@ def main() -> int:
                 gateway, args.question, as_of, horizon, view
             )
         else:
-            compilation, _resp = semantic_compile_live(
-                gateway, args.question, as_of, horizon, view
-            )
+            compilation, _resp = semantic_compile_live(gateway, args.question, as_of, horizon, view)
     except (WorldIntegrityError, SWorldModelError) as exc:
         stage = str(getattr(exc, "details", {}).get("failure") or "unknown")
         seconds = time.monotonic() - t0
         print(f"[REFUSED] {args.mode} path stopped: {stage}")
         print(f"          {exc}")
         (out / "refusal.json").write_text(
-            json.dumps({"failure": stage, "message": str(exc), "details": {
-                k: v for k, v in getattr(exc, "details", {}).items()
-                if isinstance(v, (str, int, bool, list))
-            }}, indent=1, default=str)
+            json.dumps(
+                {
+                    "failure": stage,
+                    "message": str(exc),
+                    "details": {
+                        k: v
+                        for k, v in getattr(exc, "details", {}).items()
+                        if isinstance(v, (str, int, bool, list))
+                    },
+                },
+                indent=1,
+                default=str,
+            )
         )
         (out / "metrics.json").write_text(
             json.dumps(
-                _metrics(gateway, mode=args.mode, outcome="refused_compile",
-                         failure=stage, seconds=seconds),
+                _metrics(
+                    gateway,
+                    mode=args.mode,
+                    outcome="refused_compile",
+                    failure=stage,
+                    seconds=seconds,
+                ),
                 indent=1,
             )
         )
@@ -162,14 +140,14 @@ def main() -> int:
     print(f"[plan]    ok in {plan_seconds:.1f}s — review verdict: {review.get('verdict')}")
     for r in (review.get("reasons") or [])[:6]:
         print(f"          · {r}")
-    (out / "semantic_plan.json").write_text(
-        json.dumps(semantic.get("plan"), indent=1, default=str)
-    )
+    (out / "semantic_plan.json").write_text(json.dumps(semantic.get("plan"), indent=1, default=str))
     (out / "semantic_map.json").write_text(
         json.dumps(semantic.get("mapping"), indent=1, default=str)
     )
     (out / "lowered_compilation.json").write_text(
-        json.dumps({k: v for k, v in compilation.items() if k != "_semantic"}, indent=1, default=str)
+        json.dumps(
+            {k: v for k, v in compilation.items() if k != "_semantic"}, indent=1, default=str
+        )
     )
 
     spec_dict = compilation["world_spec"]
@@ -220,13 +198,19 @@ def main() -> int:
         print(f"[GATES]   refused: {details.get('failure') or type(exc).__name__}")
         print(f"          {exc}")
         (out / "gate_refusal.json").write_text(
-            json.dumps({"failure": details.get("failure"), "message": str(exc)}, indent=1, default=str)
+            json.dumps(
+                {"failure": details.get("failure"), "message": str(exc)}, indent=1, default=str
+            )
         )
         (out / "metrics.json").write_text(
             json.dumps(
-                _metrics(gateway, mode=args.mode, outcome="refused_gates",
-                         failure=str(details.get("failure") or type(exc).__name__),
-                         seconds=time.monotonic() - t0),
+                _metrics(
+                    gateway,
+                    mode=args.mode,
+                    outcome="refused_gates",
+                    failure=str(details.get("failure") or type(exc).__name__),
+                    seconds=time.monotonic() - t0,
+                ),
                 indent=1,
             )
         )
@@ -237,8 +221,13 @@ def main() -> int:
     )
     (out / "metrics.json").write_text(
         json.dumps(
-            _metrics(gateway, mode=args.mode, outcome="compiled",
-                     failure="", seconds=time.monotonic() - t0),
+            _metrics(
+                gateway,
+                mode=args.mode,
+                outcome="compiled",
+                failure="",
+                seconds=time.monotonic() - t0,
+            ),
             indent=1,
         )
     )
