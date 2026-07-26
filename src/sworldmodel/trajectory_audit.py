@@ -129,6 +129,26 @@ def _audit(
     classification = _classify(compiled, run_result, mechanical)
     if gateway is None:
         return TrajectoryAudit(findings=mechanical, classification=classification)
+    if classification == "factual_resolution":
+        # There is no simulated trajectory to judge: the deterministic layer has
+        # already verified that every terminal term was established by pre-window
+        # evidence with no runtime writer. Putting the realism questions to a model
+        # anyway produced five CRITICALs against a legitimate resolution — "no actor
+        # calls exist", "time advanced in a single jump" — attacking the absence of a
+        # shape this run is not supposed to have.
+        basis = AuditFinding(
+            key="factual_resolution_basis",
+            severity="PASS",
+            finding=(
+                "the record answered the question before the window opened; the "
+                "trajectory-realism review does not apply to a cited factual resolution"
+            ),
+            evidence_basis=(
+                "every terminal term is established by evidence citation and nothing "
+                "at runtime wrote it (computed from the run's own record)"
+            ),
+        )
+        return TrajectoryAudit(findings=mechanical + (basis,), classification=classification)
     model_findings, error = _model_review(run_result, gateway, question=question)
     return TrajectoryAudit(
         findings=mechanical + model_findings,

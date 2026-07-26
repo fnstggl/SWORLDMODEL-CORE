@@ -550,3 +550,25 @@ def test_parse_findings_tolerates_garbage_shapes() -> None:
         }
     )
     assert f.severity == "MEDIUM"
+
+
+def test_a_factual_resolution_skips_the_realism_review_it_cannot_fail() -> None:
+    """A geopolitical run resolved YES from the cited record and the model layer then
+    filed five CRITICALs against it — "no actor calls exist", "time advanced in a
+    single jump" — attacking the absence of a trajectory the run is not supposed to
+    have. When the deterministic classifier says factual_resolution, the realism
+    questions are not applicable and no model call is spent on them."""
+
+    run = _run(branches=(_branch("b1", "YES"),), final_worlds={"b1": _world("b1")})
+    compiled = _compiled(_spec(field_cites=("c1",)), (_scenario("b1"),))
+
+    class _Exploding:
+        def generate(self, request):  # pragma: no cover - must never be reached
+            raise AssertionError("the realism review must not run for a factual resolution")
+
+    audit = audit_trajectory(compiled, run, _Exploding(), question="q")
+    assert audit.classification == "factual_resolution"
+    assert not audit.error
+    by_key = {f.key: f for f in audit.findings}
+    assert by_key["factual_resolution_basis"].severity == "PASS"
+    assert "actor_calls_causally_motivated" not in by_key
