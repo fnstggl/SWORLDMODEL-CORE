@@ -37,6 +37,18 @@ context window ended.
   artifacts each incl. run_dossier.html).
 - A/B record: artifacts/ab/ab_results.jsonl + RESULTS.md (commit f30ff03).
 
+## Phase 1 status (2026-07-26 ~19:10)
+
+Integrated at 04a5395 (obs-trace replaycore + trace artifacts; obs-viewer dossier
+views). CTO-verified: 313 tests, mypy --strict 53 files, forensic verdicts
+byte-identical. Real gate run artifacts/phase1/individual/ completed at the
+integrated commit with the FULL observability set; it took the settled-record path
+and published established_before_simulation_from_cited_record (new honest label
+working in production). Read-only reviewer `obs-reviewer` is auditing it now —
+Phase-1 exit awaits its APPROVE. Note for FD-12: same frozen store has now produced
+three structurally different plans across runs (0.25 four-branch, 0.50-class, 1.0
+factual resolution) — repeatability work is Phase 5.
+
 ## Next exact steps
 
 1. Integrate `fix/observability-trace` then `fix/observability-viewer` (in that
