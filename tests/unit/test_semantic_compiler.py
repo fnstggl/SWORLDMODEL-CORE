@@ -1106,6 +1106,103 @@ def test_no_validated_field_vanishes_without_lowering_or_a_dropped_record() -> N
     )
 
 
+def test_must_refuse_false_gaps_skip_the_revision_round(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """M-3: LoweringGap.must_refuse was written into the gap's details and never read
+    — every gap took the one-revision-then-refuse path. must_refuse=False means "no
+    rephrasing can help" (an unresolved reference is a validator defect, not a plan
+    defect), so semantic_compile_live must refuse immediately without spending the
+    revision round; the default True keeps the existing path. The gateway stub stands
+    in ONLY for the external model provider; everything else is the production path."""
+
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    import sworldmodel.semantic_compile as sc
+    from _fakes import ProgrammableGateway, build_bundle
+    from sworldmodel.semantic_plan import SemanticPlan
+
+    compilation, _ = lower_plan(parse_semantic_plan(harbor_plan()))
+    bundle = build_bundle(
+        {
+            "world_spec": compilation["world_spec"],
+            "reality": {
+                "subject_entity": compilation["subject_entity"],
+                "resolution_units": compilation["resolution_units"],
+                "target_outcome": compilation["target_outcome"],
+                "as_of": AS_OF.isoformat(),
+                "horizon": HORIZON.isoformat(),
+            },
+            "claims": [
+                {
+                    "id": "c-r1",
+                    "proposition": "The harbormaster of Port Solent holds sole "
+                    "authority over docking rules",
+                    "value": "sole authority",
+                    "entities": ["Harbormaster of Port Solent"],
+                    "published_at": "2026-01-05T00:00:00+00:00",
+                }
+            ],
+        }
+    )
+    view = bundle.evidence_store.view(AS_OF)
+
+    def run_with(gap: LoweringGap) -> tuple[int, LoweringGap]:
+        gw = ProgrammableGateway(
+            {
+                "semantic_plan": harbor_plan(),
+                "semantic_review": {"verdict": "APPROVE", "reasons": [], "corrections": []},
+            }
+        )
+
+        def raising_lower(
+            plan: SemanticPlan, *, structure_id: str = "primary"
+        ) -> tuple[dict, list]:
+            raise gap
+
+        monkeypatch.setattr(sc, "lower_plan", raising_lower)
+        with pytest.raises(LoweringGap) as exc:
+            sc.semantic_compile_live(
+                gw,
+                "Will the harbormaster publicly authorize night docking before March 1?",
+                AS_OF,
+                HORIZON,
+                view,
+            )
+        planner_calls = sum(1 for r in gw.seen if r.task_kind == "semantic_plan")
+        return planner_calls, exc.value
+
+    stubborn = LoweringGap(
+        "a construct a rephrased plan might avoid",
+        why="the mapping cannot represent it as phrased",
+        composable=True,
+        smallest_missing="a universal mapping",
+    )
+    calls, err = run_with(stubborn)
+    assert calls == 2, "must_refuse=True must keep the one-revision-then-refuse path"
+    assert err is stubborn
+
+    hopeless = LoweringGap(
+        "an unresolved reference",
+        why="no rephrasing can help; the validator should have refused this plan",
+        composable=False,
+        smallest_missing="nothing",
+        must_refuse=False,
+    )
+    calls, err = run_with(hopeless)
+    assert calls == 1, "must_refuse=False must skip the revision round entirely"
+    assert err is hopeless
+
+    # The flag is set where it belongs: the production unresolved-reference gap
+    # (a validator defect, not a plan defect) refuses without a revision.
+    table = build_symbols(parse_semantic_plan(harbor_plan()))
+    with pytest.raises(LoweringGap) as ref:
+        table.resolve("entity", "never declared anywhere")
+    assert ref.value.must_refuse is False
+
+
 def test_an_occurrence_at_or_before_the_cutoff_is_refused() -> None:
     """The simulation cannot re-perform history: a t0 occurrence that records the
     resolving event let a branch resolve YES off a re-enactment nobody produced."""

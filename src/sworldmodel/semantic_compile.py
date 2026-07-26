@@ -510,6 +510,12 @@ def semantic_compile_live(
     try:
         compilation, mapping = lower_guarded(plan)
     except LoweringGap as gap:
+        if not gap.must_refuse:
+            # must_refuse=False marks a gap no plan rephrasing can close — an
+            # unresolved reference is a defect of the validator, not of the plan's
+            # wording — so a revision round would burn a model call reproducing the
+            # same failure. The gap itself is the refusal.
+            raise
         # One revision naming the gap, then the gap is real and refuses.
         plan, raw = build(
             raw,

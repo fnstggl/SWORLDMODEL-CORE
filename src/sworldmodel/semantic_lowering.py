@@ -40,6 +40,12 @@ class LoweringGap(WorldIntegrityError):
     what construct, why existing changes cannot express it, whether it composes from
     current primitives, and the smallest genuinely universal capability that is
     missing.
+
+    ``must_refuse`` is the revision policy: True (the default) means a differently
+    phrased plan might avoid the gap, so the compiler may spend its one revision round
+    before refusing. False means no rephrasing can help — an unresolved reference is a
+    defect of the validator, not of the plan's wording — so the compiler refuses
+    immediately instead of burning a model call reproducing the same failure.
     """
 
     def __init__(
@@ -51,6 +57,7 @@ class LoweringGap(WorldIntegrityError):
         smallest_missing: str,
         must_refuse: bool = True,
     ) -> None:
+        self.must_refuse = must_refuse
         super().__init__(
             f"LOWERING_GAP: {construct} — {why}",
             details={
@@ -123,6 +130,7 @@ class SymbolTable:
                 composable=False,
                 smallest_missing="nothing — this is an unresolved reference, not a "
                 "missing capability",
+                must_refuse=False,
             )
         return self.by_key[key]
 
@@ -252,6 +260,7 @@ def _lower_change(c: SemanticChange, t: SymbolTable, plan: SemanticPlan) -> list
                 "should have refused this plan before lowering",
                 composable=False,
                 smallest_missing="nothing — this is an unresolved reference",
+                must_refuse=False,
             )
         # The event's declared meaning survives whole: its visibility governs who the
         # runtime delivers it to, and its participants and created information ride in
