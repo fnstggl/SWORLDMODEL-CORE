@@ -101,15 +101,20 @@ sworldmodel inspect artifacts/<run> --summary        # invocations per actor, an
 sworldmodel inspect artifacts/<run> --actor <id> --prompts
 ```
 
-The kernel has **zero runtime dependencies**. Producing a forecast requires a
-`DEEPSEEK_API_KEY` and network access, by design.
+The kernel has **zero runtime dependencies**. Producing a forecast requires network
+access and provider keys, by design: `DEEPSEEK_API_KEY` (compiler and actors) plus
+`JINA_API_KEY` and `SERPER_API_KEY` (live research retrieval). Key *names* only —
+values are never committed. See `docs/GETTING_STARTED.md` for clean-environment
+setup, including running everything uninstalled with `PYTHONPATH=src`.
 
 ## Repository layout
 
 ```
 src/sworldmodel/      the canonical kernel — every file is on the live path
 tests/                invariants + unit, plus the test-only fakes and worlds
+scripts/              frozen-store harnesses and acceptance tooling (not on the live path)
 docs/                 audit, port manifest, architecture and semantics
+viz/                  replay viewer for written traces
 artifacts/            generated run artifacts (git-ignored)
 ```
 
