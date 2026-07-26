@@ -1264,3 +1264,93 @@ def test_the_plan_reviewer_is_told_the_standing_legitimacy_rules() -> None:
     assert "symmetric-ignorance" in prompt
     assert "NO cited anchor and NO representable" in prompt
     assert "REVISE toward it instead" in prompt
+
+
+def _store_for(plan: dict) -> object:
+    """An evidence view containing exactly the claim ids the plan cites."""
+
+    from sworldmodel.evidence import EvidenceClaim, EvidenceStore
+    from sworldmodel.models import AuthorityLevel, EpistemicType, SourceType
+
+    ids: set[str] = set()
+
+    def walk(obj: object) -> None:
+        if isinstance(obj, dict):
+            ids.update(str(x) for x in (obj.get("evidence_claim_ids") or []))
+            for v in obj.values():
+                walk(v)
+        elif isinstance(obj, list):
+            for v in obj:
+                walk(v)
+
+    walk(plan)
+    store = EvidenceStore()
+    published = AS_OF
+    for cid in sorted(ids):
+        store.add(
+            EvidenceClaim(
+                id=cid,
+                proposition=f"fixture claim {cid}",
+                normalized_value="recorded",
+                entities=("Harbormaster of Port Solent",),
+                valid_from=published,
+                valid_until=None,
+                published_at=published,
+                available_at=published,
+                source_id="src",
+                source_url="https://example.test/doc",
+                source_title="fixture source",
+                source_type=SourceType.OFFICIAL_INSTITUTIONAL,
+                authority_level=AuthorityLevel.AUTHORITATIVE,
+                supporting_excerpt=f"fixture claim {cid}",
+                lineage_event_id=f"ev_{cid}",
+                epistemic_type=EpistemicType.OBSERVATION,
+                confidence=0.95,
+                retrieved_at=published,
+            )
+        )
+    return store.view(AS_OF)
+
+
+def test_a_repair_with_a_prior_plan_revises_instead_of_rerolling() -> None:
+    """A review-forced recompile that re-planned from scratch replaced a plan whose
+    downside alternative cited the constraint claims with four uncited growth-only
+    scenarios — the cited NO branch vanished and the run reported 1.0. A repair that
+    carries the prior plan must issue a REVISE call holding the planner to exactly
+    the named corrections; a repair with no prior plan stays a fresh plan."""
+
+    from _fakes import ProgrammableGateway
+    from sworldmodel.semantic_compile import semantic_compile_live
+
+    view = _store_for(harbor_plan())
+    responses = {
+        "semantic_plan": harbor_plan(),
+        "semantic_review": {"verdict": "APPROVE", "reasons": [], "corrections": []},
+    }
+
+    gw = ProgrammableGateway(dict(responses))
+    semantic_compile_live(
+        gw,
+        "q?",
+        AS_OF,
+        HORIZON,
+        view,
+        extra_instruction="the review found X; fix exactly X",
+        prior_plan=harbor_plan(),
+    )
+    first = next(r for r in gw.seen if r.task_kind == "semantic_plan")
+    assert "REVISE the previous semantic plan" in first.prompt
+    assert "the review found X; fix exactly X" in first.prompt
+    assert "keep every cited value" in first.prompt
+
+    gw2 = ProgrammableGateway(dict(responses))
+    semantic_compile_live(
+        gw2,
+        "q?",
+        AS_OF,
+        HORIZON,
+        view,
+        extra_instruction="the review found X; fix exactly X",
+    )
+    first2 = next(r for r in gw2.seen if r.task_kind == "semantic_plan")
+    assert "REVISE the previous semantic plan" not in first2.prompt

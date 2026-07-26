@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any
 
@@ -34,6 +34,7 @@ from .errors import GatewayError
 from .evidence import EvidenceView
 from .gateway import GatewayRequest, ModelGateway
 from .ids import prompt_hash
+from .uncertainty import UNGROUNDED_PROVENANCES
 from .world_compiler import terminal_producers
 
 __all__ = ["AuditFinding", "WorldReview", "review_world"]
@@ -258,6 +259,11 @@ def summarize_world(compiled: CompiledWorld) -> dict[str, Any]:
             {
                 "variable": u.variable_id,
                 "why_unknown": u.why_unknown,
+                # The citation count was invisible here while every other section
+                # showed one — so for a world whose numbers live in its uncertainty,
+                # "do the numbers have evidence?" could only ever be answered no,
+                # against alternatives that in fact cited the constraint claims.
+                "cited": len(u.constraining_evidence_ids),
                 "outcomes": [
                     {
                         "value": o.value,
@@ -444,4 +450,30 @@ def _review(
     except GatewayError as exc:
         return WorldReview(error=f"the review could not run: {exc}")
 
-    return _from_findings(_parse_findings(resp.data))
+    findings = _parse_findings(resp.data)
+    if _every_weight_wears_an_ignorance_label(compiled):
+        # A deterministic backstop for the legitimacy rule the prompt states: when
+        # every branch weight in the world already carries an ungrounded-provenance
+        # label, "the weights are arbitrary" cannot block — the label IS the honest
+        # state, and the runtime prices it as bounds rather than a calibrated point.
+        # A weight CLAIMING a grounded provenance stays fully attackable.
+        findings = tuple(
+            replace(
+                f,
+                severity="MEDIUM",
+                finding=f.finding
+                + " [not blocking: every weight already wears an ungrounded-provenance "
+                "label, which the runtime prices as bounds]",
+            )
+            if f.key == "branch_weights_arbitrary" and f.is_blocking
+            else f
+            for f in findings
+        )
+    return _from_findings(findings)
+
+
+def _every_weight_wears_an_ignorance_label(compiled: CompiledWorld) -> bool:
+    """True when every uncertainty-outcome weight is honestly labeled ungrounded."""
+
+    outcomes = [o for u in compiled.uncertainty_variables for o in u.outcomes]
+    return bool(outcomes) and all(o.weight.provenance in UNGROUNDED_PROVENANCES for o in outcomes)

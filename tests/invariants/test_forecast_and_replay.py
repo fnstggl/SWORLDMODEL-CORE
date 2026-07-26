@@ -833,6 +833,47 @@ def test_the_pre_rollout_review_is_told_when_the_record_already_answered() -> No
         assert "symmetric_ignorance_assumption" in r.prompt
 
 
+def test_arbitrary_weights_cannot_block_a_world_of_labeled_ignorance() -> None:
+    """The prompt rule alone did not hold: a population review still filed CRITICAL
+    branch_weights_arbitrary against weights labeled symmetric ignorance, and the
+    forced recompile lost the cited downside alternative. When every weight in the
+    world already wears an ungrounded-provenance label, the deterministic backstop
+    downgrades that finding — the label IS the honest state, priced as bounds. The
+    reviewer must also be able to SEE the uncertainty's citations in the summary."""
+
+    from sworldmodel.world_review import _QUESTIONS, review_world, summarize_world
+
+    data = _split_world()
+    _, compiled = _compile(data, _gateway(_signal_sensitive))
+
+    for u in summarize_world(compiled)["uncertainties"]:
+        assert "cited" in u, "the citation count must be visible to the reviewer"
+
+    findings = {
+        "findings": [
+            {"key": k, "severity": "PASS", "finding": "ok", "evidence_basis": "the world"}
+            for k, _ in _QUESTIONS
+            if k != "branch_weights_arbitrary"
+        ]
+        + [
+            {
+                "key": "branch_weights_arbitrary",
+                "severity": "CRITICAL",
+                "finding": "weights are only symmetric ignorance",
+                "evidence_basis": "the compiled world's uncertainty outcomes",
+            }
+        ]
+    }
+    gw = ProgrammableGateway({"world_review": findings})
+    review = review_world(compiled, None, gw, question="q?", evidence_render="the evidence")
+    assert not review.error
+    assert "branch_weights_arbitrary" not in review.failed_blocking
+    assert not review.should_repair
+    downgraded = next(f for f in review.findings if f.key == "branch_weights_arbitrary")
+    assert downgraded.severity == "MEDIUM"
+    assert "not blocking" in downgraded.finding
+
+
 def test_a_world_whose_initial_values_already_answer_yes_uncited_is_refused() -> None:
     """The OPEC+ shape: the answer baked into an uncited initial value.
 

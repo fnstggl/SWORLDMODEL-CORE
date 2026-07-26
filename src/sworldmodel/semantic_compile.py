@@ -404,10 +404,19 @@ def semantic_compile_live(
     *,
     extra_instruction: str = "",
     structure_id: str = "primary",
+    prior_plan: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], Any]:
     """Compile via the semantic path. Same signature and return contract as
     ``compile_world_spec_live`` — ``(compilation_dict, last_gateway_response)`` — so
-    the two modes are interchangeable at every call site."""
+    the two modes are interchangeable at every call site.
+
+    ``prior_plan`` makes a repair a REVISION rather than a re-roll: a review-forced
+    recompile that re-planned from scratch replaced a plan whose downside alternative
+    cited the constraint claims with four uncited growth-only scenarios — the cited
+    NO branch vanished and the run reported 1.0. With the prior plan supplied, the
+    planner is held to the same discipline the validator rounds already use: apply
+    exactly the named corrections and change nothing else.
+    """
 
     evidence = render_evidence(view)
     checklist = evidence_checklist(view, as_of=as_of, horizon=horizon)
@@ -452,7 +461,17 @@ def semantic_compile_live(
             raw = raw2
         return plan, raw
 
-    plan, raw = build(None, None, 0)
+    if prior_plan is not None and extra_instruction:
+        plan, raw = build(
+            prior_plan,
+            [
+                "apply the repair instruction above to the previous plan; keep every "
+                "cited value, alternative, and structure the instruction does not name"
+            ],
+            0,
+        )
+    else:
+        plan, raw = build(None, None, 0)
     errors = validate_semantic_plan(plan, as_of=as_of, horizon=horizon, known_claim_ids=known)
     validator_rounds = 0
     while errors and validator_rounds < 2:

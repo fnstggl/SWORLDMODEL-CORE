@@ -301,6 +301,27 @@ class CompileModeConfig(Protocol):
     def gateway(self) -> ModelGateway: ...
 
 
+def _latest_semantic_plan(live_trace: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The most recent semantic plan this run produced, if any.
+
+    Repair rounds ride ``semantic_repair_rounds`` (newest last); the initial compile's
+    plan sits under ``semantic_compilation`` (both research backends store it there).
+    A repair that can see the previous plan revises it instead of re-rolling it —
+    re-rolls are how a cited downside alternative vanished from a recompiled world.
+    """
+
+    trace = live_trace or {}
+    rounds = trace.get("semantic_repair_rounds")
+    if isinstance(rounds, list) and rounds:
+        last = rounds[-1]
+        if isinstance(last, dict) and isinstance(last.get("plan"), dict):
+            return dict(last["plan"])
+    initial = trace.get("semantic_compilation")
+    if isinstance(initial, dict) and isinstance(initial.get("plan"), dict):
+        return dict(initial["plan"])
+    return None
+
+
 def compile_for_mode(
     config: CompileModeConfig,
     question: str,
@@ -310,6 +331,7 @@ def compile_for_mode(
     *,
     extra_instruction: str = "",
     structure_id: str = "primary",
+    prior_plan: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The one compile entry point both modes share, at every call site.
 
@@ -335,6 +357,7 @@ def compile_for_mode(
             view,
             extra_instruction=extra_instruction,
             structure_id=structure_id,
+            prior_plan=prior_plan,
         )
     else:
         data, resp = compile_world_spec_live(
@@ -437,6 +460,7 @@ def _replan_initial_compile(
                 store.view(as_of),
                 extra_instruction=plan.instruction,
                 structure_id="primary",
+                prior_plan=_latest_semantic_plan(getattr(exc, "partial_live_trace", None)),
             )
         except WorldIntegrityError as retry_exc:
             log.record(
@@ -522,6 +546,9 @@ def _recompile(
             bundle.evidence_store.view(as_of),
             extra_instruction=instruction,
             structure_id="primary",
+            # A repair that can see the plan it is repairing revises it; one that
+            # cannot re-rolls the whole world and can silently lose cited structure.
+            prior_plan=_latest_semantic_plan(bundle.live_trace),
         )
         # Carry the research record forward. A compiler-only repair does no new
         # research, so `assemble_bundle` has no trace to build — and without this the

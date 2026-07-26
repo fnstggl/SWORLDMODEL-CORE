@@ -577,9 +577,18 @@ def test_an_initial_compile_refusal_is_replanned_not_refused_outright(monkeypatc
     seen: dict[str, object] = {}
 
     def fake_compile(
-        config, question, as_of, horizon, view, *, extra_instruction="", structure_id="primary"
+        config,
+        question,
+        as_of,
+        horizon,
+        view,
+        *,
+        extra_instruction="",
+        structure_id="primary",
+        prior_plan=None,
     ):
         seen["instruction"] = extra_instruction
+        seen["prior_plan"] = prior_plan
         return {"compiled": True}
 
     def fake_assemble(store, data):
