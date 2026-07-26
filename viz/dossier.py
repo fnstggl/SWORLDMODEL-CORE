@@ -18,7 +18,8 @@ Artifacts read (run directory first, then the forensics directory):
         forecast.json world_manifest.json structural_uncertainty.json
         branch_schedule.json event_ledger.jsonl actor_decisions.jsonl llm_calls.jsonl
         evidence_manifest.json evidence_store.json coverage_report.json
-        world_review.json trajectory_audit.json compiled_world.json (newer runs)
+        world_review.json trajectory_audit.json
+        compiled_world.json branch_initial_state.json (newer runs)
         run_stamp.json diagnosis.json (older runs)
     forensic derivations (moving into the production trace under the same names):
         forensic_timeline.jsonl state_diffs.jsonl communications.jsonl
@@ -30,6 +31,7 @@ Artifacts read (run directory first, then the forensics directory):
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -67,13 +69,89 @@ def _resolve_trace(trace_dir: str | Path) -> Path:
     return p
 
 
+def _records_this_directory(trace: Path, candidate: Path, run_dir: Any) -> bool:
+    """True only when the verdict's recorded run_dir resolves to the trace directory.
+
+    An absolute recorded path must resolve to the trace itself (or its case directory
+    when the trace is a ``run_trace`` subdirectory). A relative recorded path is
+    resolved against the places the forensic script plausibly ran from — the current
+    working directory and the ancestors of the forensics directory — and must resolve
+    to the same directory. Never a suffix or basename comparison: a recorded
+    ``artifacts/slice92/individual`` can only ever identify that directory.
+    """
+
+    rec = str(run_dir or "").strip()
+    if not rec:
+        return False
+    trace_res = trace.resolve()
+    targets = {trace_res}
+    if trace_res.name == "run_trace":
+        targets.add(trace_res.parent)
+    p = Path(rec)
+    if p.is_absolute():
+        try:
+            return p.resolve() in targets
+        except OSError:
+            return False
+    for base in (Path.cwd(), *candidate.resolve().parents):
+        try:
+            if (base / p).resolve() in targets:
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def _commit_and_question_match(trace: Path, verdict: dict[str, Any]) -> bool:
+    """True only when the verdict's recorded commit AND question both match the run.
+
+    The commit must equal the run's run_stamp.json commit exactly; the question must
+    hash to the run's recorded question_sha256 or equal the forecast.json question
+    string exactly. Either fact absent on either side → no match.
+    """
+
+    commit = str(verdict.get("commit") or "").strip()
+    question = verdict.get("question")
+    if not commit or not isinstance(question, str) or not question:
+        return False
+    stamp = _load(trace / "run_stamp.json") or {}
+    if str(stamp.get("commit") or "").strip() != commit:
+        return False
+    question_hash = str(stamp.get("question_sha256") or "").strip()
+    if question_hash and hashlib.sha256(question.encode("utf-8")).hexdigest() == question_hash:
+        return True
+    forecast = _load(trace / "forecast.json") or {}
+    return forecast.get("question") == question
+
+
+def _forensics_belongs_to_run(trace: Path, candidate: Path) -> bool:
+    """Positive identity agreement between a forensics directory and one run.
+
+    The candidate's forensic_verdict.json must record either a run_dir resolving to
+    this trace directory, or this run's exact commit and question. A candidate with
+    no verdict carries no identity and is never attached.
+    """
+
+    verdict = _load(candidate / "forensic_verdict.json")
+    if not isinstance(verdict, dict):
+        return False
+    return _records_this_directory(trace, candidate, verdict.get("run_dir")) or (
+        _commit_and_question_match(trace, verdict)
+    )
+
+
 def resolve_forensics(trace_dir: str | Path, forensics: str | Path | None) -> Path | None:
     """The forensics directory for one run, or None.
 
-    ``forensics`` may be the run's own forensics directory, or a root holding one
-    subdirectory per run label (``artifacts/forensics/{individual,...}``). A root is
-    matched to the run first by the ``run_dir`` its forensic_verdict.json records, then
-    by directory basename. No match → None (the dossier then says what is absent).
+    ``forensics`` may be a run's forensics directory, or a root holding one
+    subdirectory per run (``artifacts/forensics/{individual,...}``). A directory is
+    attached ONLY on positive identity agreement with the run: its
+    forensic_verdict.json records a run_dir that resolves to the same directory as
+    the trace, or records this run's exact commit and question (question hash or
+    exact string — see ``_forensics_belongs_to_run``). Directory basenames prove
+    nothing (two runs of the same case share a basename) and are never used. No
+    identity match → None, and the dossier says what is absent instead of showing
+    another run's reconstruction.
     """
 
     if forensics is None:
@@ -81,24 +159,17 @@ def resolve_forensics(trace_dir: str | Path, forensics: str | Path | None) -> Pa
     f = Path(forensics)
     if not f.is_dir():
         return None
-    if any((f / m).exists() for m in FORENSIC_MARKERS):
-        return f
     trace = _resolve_trace(trace_dir)
-    label = trace.parent.name if trace.name == "run_trace" else trace.name
-    trace_posix = trace.resolve().as_posix()
-    base_match: Path | None = None
+    if any((f / m).exists() for m in FORENSIC_MARKERS):
+        return f if _forensics_belongs_to_run(trace, f) else None
     try:
         subdirs = sorted(p for p in f.iterdir() if p.is_dir())
     except OSError:
         return None
     for sub in subdirs:
-        verdict = _load(sub / "forensic_verdict.json") or {}
-        run_dir = str(verdict.get("run_dir") or "").strip("/")
-        if run_dir and trace_posix.endswith(run_dir):
+        if _forensics_belongs_to_run(trace, sub):
             return sub
-        if sub.name == label:
-            base_match = sub
-    return base_match
+    return None
 
 
 class _Reader:
@@ -216,6 +287,9 @@ def build_dossier(trace_dir: str | Path, forensics_dir: str | Path | None = None
     trajectory = r.json("trajectory_audit.json")
     grounding = r.json("actor_grounding.json") or {}
 
+    # Written by newer runs: the exact per-branch initial state (never diff-derived).
+    initial_state = r.json("branch_initial_state.json")
+
     # Forensic-derived set: run dir first, forensics fallback, honest absence.
     state_diffs = r.jsonl("state_diffs.jsonl")
     comms = r.jsonl("communications.jsonl")
@@ -282,7 +356,7 @@ def build_dossier(trace_dir: str | Path, forensics_dir: str | Path | None = None
             ],
             "notice": r.notice("process_transitions.jsonl", "non-actor process transitions"),
         },
-        "world_state": _world_state(forecast, state_diffs, local_of, r),
+        "world_state": _world_state(forecast, state_diffs, initial_state, local_of, r),
         "llm": _llm(llm, llm_full, r),
         "branches": _branches(
             forecast,
@@ -597,18 +671,44 @@ def _communications(
 def _world_state(
     forecast: dict[str, Any],
     state_diffs: list[dict[str, Any]] | None,
+    initial_state: dict[str, Any] | None,
     local_of,  # noqa: ANN001 — closure
     r: _Reader,
 ) -> dict[str, Any]:
     """Per-branch field evolution, scrubbing the ordered state diffs; initial vs final.
 
-    The diffs are the recorded reconstruction (initial state + ordered diffs replay the
-    branch with no model call — D7); the forecast's per-branch world_state is shown
-    beside the diff-derived final state so a reader can compare the two records."""
+    When the run wrote branch_initial_state.json, the initial state comes from that
+    artifact exactly — never derived from the diffs — and a branch with zero recorded
+    diffs renders final == initial from the same artifact (its state never changed
+    after initialization). The diffs are the recorded reconstruction (initial state +
+    ordered diffs replay the branch with no model call — D7); the forecast's
+    per-branch world_state is shown beside the diff-derived final state so a reader
+    can compare the two records."""
 
     by_branch: dict[str, list[dict[str, Any]]] = {}
     for d in state_diffs or []:
         by_branch.setdefault(local_of(d.get("branch_id")), []).append(d)
+
+    init_by_loc: dict[str, dict[str, Any]] = {}
+    if isinstance(initial_state, dict):
+        for bid, entry in initial_state.items():
+            if isinstance(entry, dict):
+                init_by_loc[local_of(bid)] = entry
+
+    def initial_and_final(
+        loc: str, steps: list[dict[str, Any]]
+    ) -> tuple[Any, Any, str | None, str | None]:
+        entry = init_by_loc.get(loc)
+        if entry is not None:
+            initial = entry.get("fields")
+            initial_source = "branch_initial_state.json"
+            initial_note = entry.get("source")
+        else:
+            initial = steps[0].get("state_before") if steps else None
+            initial_source = "state_diffs.jsonl" if steps else None
+            initial_note = None
+        final = steps[-1].get("state_after") if steps else initial
+        return initial, final, initial_source, initial_note
 
     branches = []
     forecast_branches = forecast.get("branches") or []
@@ -620,12 +720,15 @@ def _world_state(
             by_branch.get(loc, []),
             key=lambda x: (x.get("simulation_time") or "", x.get("event_id") or ""),
         )
+        initial, final, initial_source, initial_note = initial_and_final(loc, steps)
         branches.append(
             {
                 "id": fb.get("branch_id"),
                 "local_id": loc,
-                "initial": (steps[0].get("state_before") if steps else None),
-                "final": (steps[-1].get("state_after") if steps else None),
+                "initial": initial,
+                "initial_source": initial_source,
+                "initial_note": initial_note,
+                "final": final,
                 "forecast_final": fb.get("world_state"),
                 "steps": [
                     {
@@ -647,12 +750,15 @@ def _world_state(
         steps = sorted(
             steps, key=lambda x: (x.get("simulation_time") or "", x.get("event_id") or "")
         )
+        initial, final, initial_source, initial_note = initial_and_final(loc, steps)
         branches.append(
             {
                 "id": loc,
                 "local_id": loc,
-                "initial": steps[0].get("state_before"),
-                "final": steps[-1].get("state_after"),
+                "initial": initial,
+                "initial_source": initial_source,
+                "initial_note": initial_note,
+                "final": final,
                 "forecast_final": None,
                 "steps": [
                     {
@@ -669,7 +775,8 @@ def _world_state(
             }
         )
     return {
-        "recorded": state_diffs is not None,
+        "recorded": state_diffs is not None or initial_state is not None,
+        "initial_state_recorded": initial_state is not None,
         "branches": branches,
         "notice": r.notice("state_diffs.jsonl", "the ordered per-branch state diffs"),
     }
@@ -677,13 +784,52 @@ def _world_state(
 
 _MISSING_PREFIX = "__missing_"
 
+# Fields only the fuller of the two model-call logs may carry.
+_LLM_DETAIL_FIELDS = (
+    "prompt",
+    "exact_prompt",
+    "response",
+    "started_at",
+    "latency_ms",
+    "estimated_cost_usd",
+)
+
+
+def _model_call_rows(
+    llm: list[dict[str, Any]],
+    llm_full: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """Which model-call log backs the LLM and cost views.
+
+    The run's OWN llm_calls.jsonl wins whenever its rows carry the full
+    instrumentation (prompt / started_at — writers post-71393bb record both).
+    llm_calls_full.jsonl reaches this function only after the identity check in
+    ``resolve_forensics`` (it always belongs to this run), and even then it is used
+    only when it covers at least as many calls and records detail fields the run's
+    own log lacks — so another run's ``__missing_*`` notices or cost profile can
+    never displace what this run actually wrote.
+    """
+
+    def recorded(rows: list[dict[str, Any]], *fields: str) -> bool:
+        return any(row.get(f) is not None for f in fields for row in rows)
+
+    if llm and recorded(llm, "prompt", "exact_prompt", "started_at"):
+        return llm
+    if llm_full and len(llm_full) >= len(llm):
+        adds_detail = any(
+            recorded(llm_full, f) and not recorded(llm, f) for f in _LLM_DETAIL_FIELDS
+        )
+        if adds_detail or not llm:
+            return llm_full
+    return llm
+
 
 def _llm(
     llm: list[dict[str, Any]],
     llm_full: list[dict[str, Any]] | None,
     r: _Reader,
 ) -> dict[str, Any]:
-    rows = llm_full if llm_full and len(llm_full) >= len(llm) else llm
+    rows = _model_call_rows(llm, llm_full)
     calls = []
     missing_notes: dict[str, str] = {}
     for i, c in enumerate(rows):
@@ -864,7 +1010,7 @@ def _cost(
     diagnosis: dict[str, Any],
     r: _Reader,
 ) -> dict[str, Any]:
-    rows = llm_full if llm_full and len(llm_full) >= len(llm) else llm
+    rows = _model_call_rows(llm, llm_full)
     stages: dict[str, dict[str, Any]] = {}
     for c in rows:
         kind = c.get("task_kind") or "?"
