@@ -1008,6 +1008,43 @@ def test_a_participantless_private_event_is_refused() -> None:
     assert any("private event with no participants" in e for e in errors)
 
 
+def test_required_reality_facts_are_derived_from_cited_plan_content() -> None:
+    """H-2: emitting required_reality_facts=[] made reality-gate check 4 vacuous in
+    semantic mode only — nothing was ever checked against the evidence and
+    evidence_coverage reported a meaningless 1.0. What the plan states as established
+    (a cited world_fact, a citation-established initial state) must become facts the
+    gate verifies against available evidence."""
+
+    from sworldmodel.world_compiler import parse_required_facts
+
+    data = observatory_plan()
+    data["world_facts"] = [
+        {
+            "text": "The observatory's sky log is the official record",
+            "evidence_claim_ids": ["c-o1"],
+        }
+    ]
+    assert _valid(data) == []
+    compilation, _ = lower_plan(parse_semantic_plan(data))
+    facts = compilation["required_reality_facts"]
+    assert facts, "cited plan content must yield required reality facts"
+    for f in facts:
+        assert f["key"] and f["description"]
+        assert f["evidence_claim_ids"], f"fact {f['key']!r} cites no claims"
+
+    descriptions = [f["description"] for f in facts]
+    # The cited world_fact is required, citing its claim ids.
+    fact = next(f for f in facts if "official record" in f["description"])
+    assert fact["evidence_claim_ids"] == ["c-o1"]
+    # The citation-established initial state is required; the UNKNOWN one must not be.
+    state_fact = next(f for f in facts if "logged clear-sky hours" in f["description"])
+    assert state_fact["evidence_claim_ids"] == ["c-o1"]
+    assert not any("february clear fraction" in d for d in descriptions)
+    # And the real downstream parser reads every entry, so check 4 has work to do.
+    parsed = parse_required_facts(facts)
+    assert len(parsed) == len(facts) and all(f.evidence_claim_ids for f in parsed)
+
+
 def test_an_occurrence_at_or_before_the_cutoff_is_refused() -> None:
     """The simulation cannot re-perform history: a t0 occurrence that records the
     resolving event let a branch resolve YES off a re-enactment nobody produced."""

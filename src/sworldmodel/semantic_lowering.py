@@ -841,6 +841,45 @@ def lower_plan(
         },
     }
 
+    # Required reality facts, derived from what the plan itself claims about reality.
+    # Emitting [] here made reality-gate check 4 vacuous in semantic mode only: with
+    # no required facts, nothing was ever checked against the evidence and
+    # evidence_coverage reported a meaningless 1.0. What the plan states as established
+    # — a cited world_fact, a state whose initial value citations establish — is
+    # exactly what rollout depends on being true, so each becomes a fact the gate must
+    # find satisfied by available evidence.
+    required_facts: list[dict[str, Any]] = []
+    for text, ids in plan.world_facts:
+        if ids:
+            required_facts.append(
+                {
+                    "key": t.mint(
+                        "reality_fact",
+                        text,
+                        rule="cited world_fact → required_reality_facts[].key",
+                        evidence=ids,
+                    ),
+                    "description": text,
+                    "evidence_claim_ids": list(ids),
+                }
+            )
+    for s in plan.states:
+        if s.initial is not None and s.initial != UNKNOWN and s.evidence_claim_ids:
+            required_facts.append(
+                {
+                    "key": t.mint(
+                        "reality_fact",
+                        f"initial {s.name}",
+                        rule="citation-established initial state → "
+                        "required_reality_facts[].key",
+                        evidence=s.evidence_claim_ids,
+                    ),
+                    "description": f"initial value of {s.name} is {s.initial!r}, "
+                    "established by the cited evidence",
+                    "evidence_claim_ids": list(s.evidence_claim_ids),
+                }
+            )
+
     compilation = {
         "subject_entity": plan.subject_entity,
         "resolution_units": plan.resolution_units,
@@ -858,7 +897,7 @@ def lower_plan(
             }
             for text, ids in plan.world_facts
         ],
-        "required_reality_facts": [],
+        "required_reality_facts": required_facts,
     }
 
     exe_hash = hashlib.sha256(
