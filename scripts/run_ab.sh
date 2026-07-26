@@ -7,6 +7,7 @@ set -u
 cd /home/user/SWORLDMODEL-CORE
 COMMIT=$(git rev-parse --short HEAD)
 OUT=artifacts/ab
+mkdir -p "$OUT"
 RESULTS=$OUT/ab_results.jsonl
 : > "$RESULTS"
 echo "A/B at commit $COMMIT"
