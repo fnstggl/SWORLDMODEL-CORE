@@ -20,11 +20,9 @@ never leave a previous run's ``forecast.json`` sitting beside this run's
 
 from __future__ import annotations
 
-import hashlib
 import json
-import subprocess
 import sys
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -35,6 +33,11 @@ if str(REPO / "src") not in sys.path:
 
 from sworldmodel.evidence import EvidenceClaim, EvidenceStore  # noqa: E402
 from sworldmodel.models import AuthorityLevel, EpistemicType, SourceType  # noqa: E402
+
+# The canonical artifact list and clearing rule live in src beside the writers, so the
+# harness cannot drift behind what the pipeline actually writes. Re-exported here
+# because both harnesses (and their tests) import them from this module.
+from sworldmodel.rundir import PIPELINE_ARTIFACTS, prepare_run_dir  # noqa: E402,F401
 
 LEGACY_STORE_WARNING = (
     "legacy store: provenance defaulted (authority ranking will differ from the live run)"
@@ -57,28 +60,6 @@ _PROVENANCE_KEYS = (
 # extraction_prompt_sha256) is READ whenever present — dropping a recorded
 # contradiction silently flipped the coverage gate's conflict check on replay — but its
 # absence alone does not mark a store legacy: it does not affect authority ranking.
-
-# Everything any harness run (full route or compile slice, completed or refused) may
-# write into --out. Deleted before a run starts so nothing stale can be read as fresh.
-PIPELINE_ARTIFACTS = (
-    "forecast.json",
-    "compiled_world.json",
-    "actor_decisions.jsonl",
-    "event_ledger.jsonl",
-    "llm_calls.jsonl",
-    "report.md",
-    "world_manifest.json",
-    "world_review.json",
-    "trajectory_audit.json",
-    "run_audit.json",
-    "diagnosis.json",
-    "research_trace.json",
-    "evidence_store.json",
-    "lowered_compilation.json",
-    "refusal.json",
-    "gate_refusal.json",
-    "metrics.json",
-)
 
 
 def _parse_dt(value: Any) -> datetime | None:
@@ -180,46 +161,3 @@ def load_store(path: Path) -> EvidenceStore:
     if defaulted:
         print(f"WARNING: {LEGACY_STORE_WARNING}", file=sys.stderr)
     return store
-
-
-def _git_commit() -> str:
-    try:
-        proc = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=REPO,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return "unknown"
-    return proc.stdout.strip() or "unknown"
-
-
-def prepare_run_dir(
-    out: Path, *, question: str, as_of: datetime, horizon: datetime, mode: str
-) -> None:
-    """Make ``out`` safe for a fresh run: clear stale artifacts, then stamp it.
-
-    Downstream readers resolve artifacts by filename, so a refusal that writes only
-    ``diagnosis.json`` beside a PREVIOUS run's ``forecast.json`` gets the stale
-    forecast scored as this run's result. Every pipeline artifact a prior run could
-    have left is deleted up front (the directory itself is kept), and
-    ``run_stamp.json`` records which question/cutoff/mode/commit the surviving
-    artifacts belong to.
-    """
-
-    out.mkdir(parents=True, exist_ok=True)
-    for name in PIPELINE_ARTIFACTS:
-        (out / name).unlink(missing_ok=True)
-    for stale in out.glob("semantic_*.json"):
-        stale.unlink(missing_ok=True)
-    stamp = {
-        "question_sha256": hashlib.sha256(question.encode("utf-8")).hexdigest(),
-        "as_of": as_of.isoformat(),
-        "horizon": horizon.isoformat(),
-        "mode": mode,
-        "commit": _git_commit(),
-        "started_at": datetime.now(UTC).isoformat(),
-    }
-    (out / "run_stamp.json").write_text(json.dumps(stamp, indent=1, sort_keys=True) + "\n")

@@ -37,6 +37,7 @@ from .ids import canonical_json
 from .live_research import ResearchBudget
 from .models import ForecastResult
 from .research import ResearchBundle
+from .rundir import prepare_run_dir
 from .tracing import TraceContext
 
 
@@ -210,6 +211,13 @@ def cmd_forecast(args: argparse.Namespace) -> int:
     as_of = datetime.fromisoformat(args.as_of)
     horizon = datetime.fromisoformat(args.horizon)
     out = Path(args.trace) if args.trace else None
+    if out is not None:
+        # A reused --trace directory holding an earlier run's forecast.json beside this
+        # run's refusal is a stale result wearing a fresh stamp. Clear and re-stamp it
+        # before anything can write.
+        prepare_run_dir(
+            out, question=args.question, as_of=as_of, horizon=horizon, mode=args.compiler
+        )
 
     config = ForecastConfig.live(
         seed=args.seed,

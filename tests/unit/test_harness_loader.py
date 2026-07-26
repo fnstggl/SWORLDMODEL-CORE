@@ -285,3 +285,41 @@ def test_gateway_budget_is_per_run_not_lifetime():
         g.generate(GatewayRequest(task_kind="t", prompt="p", context={}, seed=0))
     g.set_budget(max_calls=2)  # a NEW run: ceiling resets against a fresh snapshot
     g.generate(GatewayRequest(task_kind="t", prompt="p", context={}, seed=0))
+
+
+def test_the_canonical_artifact_list_covers_every_writer() -> None:
+    """The clearing list drifted when it lived in the harness: tracing.py had grown six
+    artifacts (pre_outcome_forecast.json, coverage_report.json, actor_grounding.json,
+    branch_schedule.json, structural_uncertainty.json, evidence_manifest.json) that a
+    stale run could leave beside a fresh refusal with nothing to delete them. The list
+    now lives beside the writers; this pins every known writer's filenames into it and
+    scans the sources for simple `dir / "name.json"` drift."""
+
+    import re
+    from pathlib import Path
+
+    from sworldmodel import rundir
+    from sworldmodel.rundir import PIPELINE_ARTIFACTS
+
+    for name in (
+        "forecast.json",
+        "pre_outcome_forecast.json",
+        "report.md",
+        "pre_outcome_report.md",
+        "coverage_report.json",
+        "actor_grounding.json",
+        "branch_schedule.json",
+        "structural_uncertainty.json",
+        "evidence_manifest.json",
+        "world_review.json",
+        "trajectory_audit.json",
+    ):
+        assert name in PIPELINE_ARTIFACTS, name
+
+    src = Path(rundir.__file__).resolve().parent
+    pattern = re.compile(r'/\s*"([a-z_0-9]+\.(?:json|jsonl|md))"')
+    written: set[str] = set()
+    for py in src.glob("*.py"):
+        written |= {m.group(1) for m in pattern.finditer(py.read_text())}
+    missing = written - set(PIPELINE_ARTIFACTS) - {"run_stamp.json"}
+    assert not missing, f"artifacts written but never cleared: {sorted(missing)}"
