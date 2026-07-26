@@ -28,13 +28,14 @@ import hashlib
 import time
 from dataclasses import replace
 from datetime import datetime
-from typing import Any
+from typing import Any, Protocol
 
 from .compiled import CompiledWorld
 from .config import ForecastConfig
 from .diagnosis import ForecastRefused
 from .engine import RunResult, run
 from .errors import GatewayError, RunInterrupted, SWorldModelError, WorldIntegrityError
+from .gateway import ModelGateway
 from .ids import canonical_json
 from .models import ForecastResult, ResolutionContract
 from .outcomes import aggregate
@@ -288,8 +289,20 @@ def _repair_once(
     return _recompile(question, as_of, horizon, bundle, config, plan.instruction)
 
 
+class CompileModeConfig(Protocol):
+    """The slice of the run configuration the compile-mode dispatch reads.
+
+    :class:`~sworldmodel.config.ForecastConfig` satisfies it; so does the minimal shim
+    the live research backend builds, so the *initial* live compilation dispatches
+    through this same entry point without importing the whole configuration.
+    """
+
+    @property
+    def gateway(self) -> ModelGateway: ...
+
+
 def compile_for_mode(
-    config: ForecastConfig,
+    config: CompileModeConfig,
     question: str,
     as_of: datetime,
     horizon: datetime,
@@ -300,17 +313,21 @@ def compile_for_mode(
 ) -> dict[str, Any]:
     """The one compile entry point both modes share, at every call site.
 
-    Three places compile a world from evidence — the initial research compile, the
-    repair recompile, and each structural alternative — and a mode that exists at two
-    of them is a silent mixed-mode run at the third. Routing all of them here makes
-    missing a site impossible, and stamps the mode into the compilation so the trace
-    can always say which compiler produced which structure.
+    Four places compile a world from evidence — the initial live research compile, the
+    repair recompile, each structural alternative, and the frozen-store replay — and a
+    mode that exists at some of them is a silent mixed-mode run at the others. Routing
+    all of them here makes missing a site impossible, and stamps the mode into the
+    compilation so the trace can always say which compiler produced which structure.
+
+    The gateway response rides along under ``_compile_responses`` (the key
+    ``assemble_bundle`` already reads), so every call site keeps the compile-call
+    record without a second return channel.
     """
 
     if getattr(config, "compiler_mode", "direct") == "semantic":
         from .semantic_compile import semantic_compile_live
 
-        data, _ = semantic_compile_live(
+        data, resp = semantic_compile_live(
             config.gateway,
             question,
             as_of,
@@ -320,7 +337,7 @@ def compile_for_mode(
             structure_id=structure_id,
         )
     else:
-        data, _ = compile_world_spec_live(
+        data, resp = compile_world_spec_live(
             config.gateway,
             question,
             as_of,
@@ -329,7 +346,13 @@ def compile_for_mode(
             extra_instruction=extra_instruction,
             structure_id=structure_id,
         )
+    # Stamp a COPY: both live compilers can hand back the gateway response's own data
+    # dict, and writing the stamp (or the response object itself) into that shared dict
+    # would rewrite the recorded model output — and, under a scripted test gateway, the
+    # fixture it replays.
+    data = dict(data)
     data["compiler_mode"] = getattr(config, "compiler_mode", "direct")
+    data["_compile_responses"] = [resp]
     return data
 
 

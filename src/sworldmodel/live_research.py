@@ -79,7 +79,6 @@ from .source_fetch import (
     fetch_source,
     requires_archived_copy,
 )
-from .world_compiler import compile_world_spec_live
 
 # A search engine's URL length limit; a query longer than this is truncated by the
 # engine anyway, so it is trimmed here where the truncation is visible in the trace.
@@ -253,6 +252,16 @@ class _Session:
     seen_hashes: set[str]
     queries_used: int = 0
     extract_calls: int = 0
+
+
+@dataclass(frozen=True)
+class _ModeDispatchConfig:
+    """The minimal config slice ``api.compile_for_mode`` reads (its
+    ``CompileModeConfig`` protocol), so the initial live compilation goes through the
+    one shared mode dispatch without this module owning a second copy of it."""
+
+    gateway: ModelGateway
+    compiler_mode: str
 
 
 class LiveResearchBackend:
@@ -1241,16 +1250,20 @@ Return JSON {{"reconcilable": true|false, "reading": "<one line: how both are tr
         trace.admissible_claim_count = len(store.view(as_of).available())
         trace.contradictions = [f"{a}<>{b}" for a, b in store.contradictions()]
         try:
-            if self.compiler_mode == "semantic":
-                from .semantic_compile import semantic_compile_live
+            # The initial live compilation dispatches through the SAME entry point as
+            # the repair recompile, the structural alternatives and the frozen replay
+            # (api.compile_for_mode), so the mode switch lives in exactly one place and
+            # the compilation carries its compiler_mode stamp from the start. Imported
+            # locally: api must not be imported at live_research module level.
+            from .api import compile_for_mode
 
-                compilation, resp = semantic_compile_live(
-                    self.gateway, question, as_of, horizon, store.view(as_of)
-                )
-            else:
-                compilation, resp = compile_world_spec_live(
-                    self.gateway, question, as_of, horizon, store.view(as_of)
-                )
+            compilation = compile_for_mode(
+                _ModeDispatchConfig(gateway=self.gateway, compiler_mode=self.compiler_mode),
+                question,
+                as_of,
+                horizon,
+                store.view(as_of),
+            )
         except WorldIntegrityError as exc:
             # The research preceding this refusal is COMPLETE — queries, sources,
             # claims, the whole record. It rides on the exception so the caller can
@@ -1274,7 +1287,7 @@ Return JSON {{"reconcilable": true|false, "reading": "<one line: how both are tr
                 "horizon": horizon.isoformat(),
                 "authoritative_sources": list(plan.authoritative_sources),
             },
-            "_compile_responses": [resp],
+            "_compile_responses": list(compilation.get("_compile_responses") or []),
         }
         try:
             bundle = assemble_bundle(store, data)
@@ -1294,6 +1307,9 @@ Return JSON {{"reconcilable": true|false, "reading": "<one line: how both are tr
                 },
             ) from exc
         live_trace = trace.to_dict(plan, store)
+        # The mode stamp is part of the run's record: which compiler produced this
+        # world must be readable off research_trace.json, not inferred.
+        live_trace["compiler_mode"] = str(compilation.get("compiler_mode") or self.compiler_mode)
         if "_semantic" in compilation:
             # The semantic plan, its independent review and the semantic→runtime mapping
             # are part of this run's record: they land in research_trace.json beside the
