@@ -51,20 +51,48 @@ pastcast, where every source must be retrieved as its archived capture at that c
 (see `README.md`). Inspect the written trace with
 `sworldmodel inspect artifacts/my_run --summary`.
 
+The default compiler is **semantic** — the canonical route: question → research →
+semantic causal-world plan → independent reality review → static semantic validation →
+deterministic lowering → the existing runtime → trajectory-derived result → replay.
+`--compiler direct` (one model call authors the WorldSpec) exists only as an explicit
+diagnostic flag for controlled comparison and regression diagnosis; nothing ever falls
+back to it, and a semantic refusal is the run's result. Every run records its compiler
+mode in `run_stamp.json`, `research_trace.json` and `diagnosis.json`.
+
+## Caching (optional, on by default)
+
+Two on-disk record-and-replay caches speed up repeated runs of the same question
+without changing what a run decides: accepted source text (replayed with its original
+observation times, so cutoff admissibility is judged exactly as the live fetch judged
+it) and extracted claims (keyed by content, question, prompt version, model and seed;
+re-verified on replay). The live gateway also reuses byte-identical model requests
+within a run, and DeepSeek's automatic context caching is exploited by keeping the
+plan prompt an exact prefix of every revision prompt.
+
+| Variable | Meaning | Default |
+| --- | --- | --- |
+| `SWORLDMODEL_CACHE` | `off` disables all on-disk caching | on |
+| `SWORLDMODEL_SOURCE_CACHE_DIR` | accepted-source store | `.cache/sources` |
+| `SWORLDMODEL_EXTRACT_CACHE_DIR` | extraction store | `.cache/extractions` |
+| `SWORLDMODEL_SOURCE_CACHE_TTL` | live-page TTL (seconds) | 21600 |
+| `SWORLDMODEL_ARCHIVE_CACHE_TTL` | archive-capture TTL (seconds) | 2592000 |
+| `SWORLDMODEL_EXTRACT_CACHE_TTL` | extraction TTL (seconds) | 604800 |
+
 ## Replay from a frozen evidence store
 
 The frozen harnesses re-run everything after retrieval from a prior run's exported
 `evidence_store.json` (they still call the model, so `DEEPSEEK_API_KEY` is required):
 
 ```bash
-# Full canonical route (forecast, runtime, auditors) from a frozen store:
+# Full canonical route (forecast, runtime, auditors) from a frozen store.
+# The default mode is semantic; pass --mode direct ONLY for a controlled comparison.
 PYTHONPATH=src python3 scripts/frozen_forecast.py \
-  --store artifacts/<run>/evidence_store.json --mode semantic \
+  --store artifacts/<run>/evidence_store.json \
   --question "…" --as-of <iso> --horizon <iso> --out artifacts/replay1
 
 # Compile-only slice (plan → review → validate → lower → gates), no simulation:
 PYTHONPATH=src python3 scripts/semantic_slice.py \
-  --store artifacts/<run>/evidence_store.json --mode direct \
+  --store artifacts/<run>/evidence_store.json \
   --question "…" --as-of <iso> --horizon <iso> --out artifacts/slice1
 ```
 

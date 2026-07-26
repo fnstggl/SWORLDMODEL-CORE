@@ -93,6 +93,169 @@ class SemanticPlanError(ValueError):
         super().__init__("; ".join(errors) if errors else "invalid semantic plan")
 
 
+# ---------------------------------------------------------------------------
+# Plan deltas — revisions as corrected objects, merged deterministically
+# ---------------------------------------------------------------------------
+
+# The named-object sections of a plan. Every object in them carries a unique "name",
+# which is the merge key: a delta revises, adds or removes objects BY NAME and code
+# rebuilds the section, so a revision round never re-emits (and never re-rolls) the
+# objects it does not correct.
+PLAN_SECTIONS = ("entities", "states", "events", "affordances", "processes", "uncertainties")
+
+# Top-level parts a delta may replace wholesale. They are single values, not named
+# collections, so "corrected" means "replaced".
+PLAN_SCALARS = ("resolution", "terminal", "terminal_producer_note", "world_facts")
+
+
+class PlanDeltaError(ValueError):
+    """A plan revision that is not a readable delta.
+
+    The commonest failure this names is the old behavior: the model re-emitting the
+    complete plan for a one-object correction. That is exactly what the delta contract
+    exists to remove — a full re-emission silently rewrites every object, which is how
+    a cited downside alternative once vanished from a recompiled world — so it is a
+    shape error with a precise message, never silently accepted.
+    """
+
+    def __init__(self, errors: list[str]) -> None:
+        self.errors = errors
+        super().__init__("; ".join(errors) if errors else "invalid plan delta")
+
+
+def _delta_looks_like_full_plan(data: dict[str, Any]) -> bool:
+    """Whether a revision response is the whole plan re-emitted rather than a delta.
+
+    A delta never carries "resolution" AND every named section at top level; a full
+    plan always does. Checking the conjunction keeps legitimate wholesale scalar
+    replacement ("resolution": {...} in a delta) legal.
+    """
+
+    if "revised" in data or "removed" in data:
+        return False
+    top_sections = sum(1 for s in PLAN_SECTIONS if isinstance(data.get(s), list))
+    return "resolution" in data and top_sections >= len(PLAN_SECTIONS) - 1
+
+
+def merge_plan_delta(prior: dict[str, Any], delta: dict[str, Any]) -> dict[str, Any]:
+    """Deterministically apply a revision delta to the accepted prior plan.
+
+    The contract this enforces:
+
+    * objects the delta does not name are carried into the merged plan as the SAME
+      dict objects — byte-equivalent under canonical serialization, citations,
+      weights, uncertainty structure and all;
+    * ``revised`` upserts by name: a matching name replaces in place (preserving the
+      prior plan's object order), a new name appends in the delta's own order;
+    * ``removed`` drops by name, and removing a name the prior plan does not declare
+      is an error, not a no-op — it means the revision is talking about a different
+      plan;
+    * scalars (``resolution``, ``terminal``, ``terminal_producer_note``,
+      ``world_facts``) replace wholesale when present and non-null.
+
+    Raises :class:`PlanDeltaError` with precise messages when the delta cannot be
+    read; the prior plan is never mutated.
+    """
+
+    errors: list[str] = []
+    if not isinstance(delta, dict):
+        raise PlanDeltaError(["the revision must be a JSON object"])
+    if _delta_looks_like_full_plan(delta):
+        raise PlanDeltaError(
+            [
+                "the revision re-emitted a complete plan instead of a delta — return "
+                "ONLY the corrected objects under 'revised' (upsert by name), names to "
+                "drop under 'removed', and any corrected top-level part "
+                f"({', '.join(PLAN_SCALARS)}) at top level"
+            ]
+        )
+
+    revised = delta.get("revised") or {}
+    removed = delta.get("removed") or {}
+    if not isinstance(revised, dict):
+        errors.append("'revised' must be an object mapping section name to a list of objects")
+        revised = {}
+    if not isinstance(removed, dict):
+        errors.append("'removed' must be an object mapping section name to a list of names")
+        removed = {}
+    for key in revised:
+        if key not in PLAN_SECTIONS:
+            errors.append(f"revised.{key}: unknown section (sections: {list(PLAN_SECTIONS)})")
+    for key in removed:
+        if key not in PLAN_SECTIONS:
+            errors.append(f"removed.{key}: unknown section (sections: {list(PLAN_SECTIONS)})")
+
+    merged: dict[str, Any] = dict(prior)
+    for section in PLAN_SECTIONS:
+        upsert_list = revised.get(section) or []
+        removal_list = removed.get(section) or []
+        if not isinstance(upsert_list, list):
+            errors.append(f"revised.{section}: must be a list of complete corrected objects")
+            upsert_list = []
+        if not isinstance(removal_list, list):
+            errors.append(f"removed.{section}: must be a list of object names")
+            removal_list = []
+        upserts: dict[str, dict[str, Any]] = {}
+        for i, obj in enumerate(upsert_list):
+            if not isinstance(obj, dict) or not isinstance(obj.get("name"), str) or not obj["name"]:
+                errors.append(f"revised.{section}[{i}]: every object needs its 'name'")
+                continue
+            if obj["name"] in upserts:
+                errors.append(f"revised.{section}[{i}]: {obj['name']!r} appears twice")
+                continue
+            upserts[obj["name"]] = obj
+        removals = {str(n) for n in removal_list}
+        both = sorted(removals & set(upserts))
+        for name in both:
+            errors.append(f"{section}: {name!r} is both revised and removed — pick one")
+        if not upserts and not removals:
+            continue
+        base = prior.get(section) or []
+        base_list = base if isinstance(base, list) else []
+        prior_names = {
+            obj.get("name") for obj in base_list if isinstance(obj, dict) and obj.get("name")
+        }
+        for name in sorted(removals - prior_names):
+            errors.append(
+                f"removed.{section}: {name!r} is not declared in the previous plan — "
+                "the revision is describing a plan that is not the one being revised"
+            )
+        out: list[Any] = []
+        for obj in base_list:
+            obj_name = obj.get("name") if isinstance(obj, dict) else None
+            if obj_name in removals:
+                continue
+            if isinstance(obj_name, str) and obj_name in upserts:
+                out.append(upserts.pop(obj_name))
+            else:
+                out.append(obj)  # untouched: the same object, byte-equivalent
+        out.extend(upserts.values())  # additions, in the delta's own order
+        merged[section] = out
+
+    for scalar in PLAN_SCALARS:
+        if scalar in delta and delta[scalar] is not None:
+            merged[scalar] = delta[scalar]
+
+    if errors:
+        raise PlanDeltaError(errors)
+    return merged
+
+
+def delta_is_empty(delta: dict[str, Any]) -> bool:
+    """Whether a readable delta changes nothing at all — the model asserting that no
+    correction is needed, which for a validator round means the repair failed."""
+
+    if not isinstance(delta, dict):
+        return True
+    revised = delta.get("revised") or {}
+    removed = delta.get("removed") or {}
+    if any((revised.get(s) or []) for s in PLAN_SECTIONS if isinstance(revised, dict)):
+        return False
+    if any((removed.get(s) or []) for s in PLAN_SECTIONS if isinstance(removed, dict)):
+        return False
+    return all(delta.get(s) is None or s not in delta for s in PLAN_SCALARS)
+
+
 @dataclass(frozen=True)
 class SemanticValue:
     """A value in semantic form: a literal, a named state, or arithmetic over them.

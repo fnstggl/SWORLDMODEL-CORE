@@ -1,9 +1,18 @@
-# The semantic compiler (experimental mode)
+# The semantic compiler (the default and canonical path)
 
-`--compiler semantic` tests one hypothesis: that asking a single model call to
-*understand the causal world* and simultaneously *author a large internally consistent
-executable program* is a major source of compilation failures. The governing principle
-of the alternative path:
+The semantic compiler is the DEFAULT: the CLI, the API, both frozen-store harnesses,
+the acceptance scripts and every example select it when no compiler is named. It began
+as a test of one hypothesis — that asking a single model call to *understand the
+causal world* and simultaneously *author a large internally consistent executable
+program* is a major source of compilation failures — and is now the canonical
+engineering path all development, testing, instrumentation and optimization target.
+
+The direct compiler (one call authors the WorldSpec) survives only behind the explicit
+diagnostic flag `--compiler direct`, for controlled comparison, regression diagnosis
+and removal planning. Nothing ever falls back from semantic to direct; a semantic
+refusal is the run's result; the compiler is never chosen by question type; and resume
+rejects artifacts recorded under the other mode (`compiler_mode_mismatch`). Every run
+records its compiler mode. The governing principle:
 
 > THE LLM SUPPLIES CAUSAL MEANING. CODE SUPPLIES INTERNAL SYMBOLS AND EXECUTABLE SYNTAX.
 
@@ -53,6 +62,22 @@ planner's reasoning — and returns exactly one verdict: APPROVE, REVISE (with e
 semantic corrections) or ABSTAIN. One targeted revision is allowed; one further
 validator-only round may fix mechanical inconsistencies the revision introduced; then
 the refusal is real (`semantic_plan_invalid`, with every unresolved reason).
+
+## Delta revisions (`merge_plan_delta`)
+
+The initial plan is the ONLY full generation of a compile cycle. Every revision —
+validator fix, reviewer correction, lowering gap, repair carried across cycles — is a
+`semantic_plan_delta` call: the prompt appends the accepted prior plan and the exact
+corrections after the unchanged full-plan prompt (so the shared prefix is priced by
+the provider's context cache), and the reply contains only the corrected objects,
+upserted/removed BY NAME. `merge_plan_delta` rebuilds the plan deterministically:
+objects the delta does not name are carried through as the same objects —
+byte-equivalent citations, weights, uncertainty structure and causal wiring — which is
+what makes a revision unable to silently re-roll unchanged structure (the failure that
+once deleted a cited downside alternative). A full-plan re-emission is a named shape
+error re-asked once as a delta; an unusable delta refuses as
+`semantic_plan_invalid`. Each `_semantic` record carries `delta_rounds` so a trace
+reader can verify no full plan was regenerated for a local defect.
 
 ## Deterministic lowering (`semantic_lowering.py`)
 

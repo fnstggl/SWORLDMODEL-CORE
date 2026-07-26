@@ -61,8 +61,11 @@ pastcast. Use the current time for a nowcast.
 ```
 forecast(question, as_of, horizon, config)
    → research        (cited evidence store, built live from the question)
-   → compile         (LLM compiles a WorldSpec: entities, actions→universal effects,
-                      process graph, uncertainties, declarative terminal)
+   → semantic plan   (the model authors causal MEANING only — entities, states,
+                      events, affordances, processes, uncertainties, terminal query)
+   → reality review  (an independent model call judges the plan against the evidence)
+   → validation      (static semantic validation; code, zero model calls)
+   → lowering        (deterministic lowering mints every runtime symbol → WorldSpec)
    → contract        (immutable question definition; locks the declarative terminal)
    → integrity gate  (refuse a structurally false world)
    → structures      (is this even the right world? competing causal structures, each
@@ -74,6 +77,17 @@ forecast(question, as_of, horizon, config)
    → aggregation     (weighted frequency of YES trajectories)
    → report          (fully auditable; probability reconstructable by hand)
 ```
+
+The **semantic compiler is the default** everywhere — CLI, API, harnesses, scripts.
+Plan revisions are deltas merged deterministically into the accepted prior plan
+(unchanged objects survive byte-for-byte), independent branches and structures
+simulate concurrently with results assembled in deterministic order, and the review
+and structural assessment run concurrently — all provably equivalent to serial
+execution (`tests/invariants/test_parallel_equivalence.py`). The direct compiler (one
+model call authors the WorldSpec) exists only behind the explicit diagnostic flag
+`--compiler direct` for controlled comparison; nothing ever falls back to it, and a
+semantic refusal is the run's result. Every run records its compiler mode. See
+`docs/SEMANTIC_COMPILER.md`.
 
 There is exactly one runtime path and it does **not** branch on the kind of question.
 No profiles, no phase pipelines, no mechanism families, no fallbacks, no prior/simulation

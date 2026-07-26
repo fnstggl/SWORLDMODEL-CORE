@@ -26,11 +26,15 @@ import contextlib
 import re
 from dataclasses import dataclass
 from datetime import date, datetime
+from typing import TYPE_CHECKING, Any
 
 from .gateway import GatewayRequest, ModelGateway
 from .ids import prompt_hash
 from .models import AuthorityLevel
 from .source_fetch import FetchedSource
+
+if TYPE_CHECKING:  # import cycle guard: runcache imports source_fetch beside this module
+    from .runcache import ExtractionCache
 
 # How much of one source is shown to the model in a single extraction call. This is a
 # provider input-size bound, not a judgment about the source: the canonical store keeps
@@ -67,6 +71,9 @@ class ExtractionResult:
     prompt_sha256: str = ""
     window_chars: int = 0
     truncated: bool = False
+    # Whether the model output was replayed from the extraction cache rather than a
+    # fresh provider call. Verification runs identically either way.
+    from_cache: bool = False
 
 
 def extract_claims(
@@ -76,28 +83,51 @@ def extract_claims(
     as_of: datetime,
     *,
     window_chars: int = _DEFAULT_WINDOW_CHARS,
+    cache: ExtractionCache | None = None,
 ) -> ExtractionResult:
     """Ask the model for claims this document supports, then verify each one.
 
     Every returned claim carries ``verified_in_text`` and, when false, the reason it
     failed. The caller must not store an unverified claim.
+
+    ``cache`` (a :class:`~sworldmodel.runcache.ExtractionCache`) replays a recorded
+    model output for the identical (content, question, prompt version, model, seed) —
+    the prompt hash covers all of the first three — and the replayed output goes
+    through the SAME verification below, so a cache hit can never admit a claim a
+    fresh call would have refused.
     """
 
     if not source.ok:
         return ExtractionResult()
     window = source.text[:window_chars]
     prompt = _build_prompt(question, source, window)
-    resp = gateway.generate(
-        GatewayRequest(
-            task_kind="extract_claims",
-            prompt=prompt,
-            context={"url": source.fetched_url},
-            seed=int(prompt_hash(source.fetched_url)[:8], 16),
-            expected_keys=("claims",),
+    prompt_sha = prompt_hash(prompt)
+    seed = int(prompt_hash(source.fetched_url)[:8], 16)
+
+    data: dict[str, Any] | None = None
+    from_cache = False
+    if cache is not None:
+        loaded = cache.load(gateway.model_id, prompt_sha, seed)
+        if isinstance(loaded, dict):
+            data = loaded
+            from_cache = True
+    if data is None:
+        resp = gateway.generate(
+            GatewayRequest(
+                task_kind="extract_claims",
+                prompt=prompt,
+                context={"url": source.fetched_url},
+                seed=seed,
+                expected_keys=("claims",),
+            )
         )
-    )
+        data = resp.data
+        if cache is not None:
+            cache.store(gateway.model_id, prompt_sha, seed, dict(data))
+
     out: list[ExtractedClaim] = []
-    for c in resp.data.get("claims", []):
+    raw_claims = data.get("claims", []) if isinstance(data, dict) else []
+    for c in raw_claims if isinstance(raw_claims, list) else []:
         if not isinstance(c, dict):
             continue
         proposition = str(c.get("proposition", "")).strip()
@@ -128,9 +158,10 @@ def extract_claims(
     return ExtractionResult(
         claims=tuple(out),
         prompt=prompt,
-        prompt_sha256=prompt_hash(prompt),
+        prompt_sha256=prompt_sha,
         window_chars=window_chars,
         truncated=len(source.text) > window_chars,
+        from_cache=from_cache,
     )
 
 

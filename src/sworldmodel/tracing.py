@@ -204,6 +204,15 @@ class TraceContext:
         ]
 
     def llm_call_lines(self) -> list[str]:
+        """The call log, in DETERMINISTIC order.
+
+        Branches and structures execute concurrently, so the gateway records calls in
+        completion order — which varies with thread timing. An artifact that changes
+        between two identical runs cannot be diffed, so the lines are sorted by their
+        stable identity (task kind, seed, prompt hash, then content); byte-identical
+        reuses sort adjacent to the call they reuse.
+        """
+
         lines = []
         for r in self._gateway_calls():
             lines.append(
@@ -215,12 +224,14 @@ class TraceContext:
                         "prompt_hash": r.prompt_hash,
                         "tokens_in": r.tokens_in,
                         "tokens_out": r.tokens_out,
+                        "tokens_cached": getattr(r, "tokens_cached", 0),
+                        "memo_hit": bool((getattr(r, "params", {}) or {}).get("memo_hit")),
                         "retries": r.retries,
                         "response": r.data,
                     }
                 )
             )
-        return lines
+        return sorted(lines)
 
     def actor_decision_lines(self) -> list[str]:
         """One record per actor invocation — the stable contract a replay or a frontend

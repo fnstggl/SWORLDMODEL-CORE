@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import hashlib
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime
 from typing import Any, Protocol
@@ -311,6 +312,13 @@ def _latest_semantic_plan(live_trace: dict[str, Any] | None) -> dict[str, Any] |
     """
 
     trace = live_trace or {}
+    recorded_mode = str(trace.get("compiler_mode") or "semantic")
+    if recorded_mode != "semantic":
+        # A trace recorded under another compiler mode has no semantic plan to
+        # revise; consuming one anyway would splice modes. (compile_for_mode already
+        # ignores prior_plan on the direct path — this keeps the artifact side of the
+        # contract explicit too.)
+        return None
     rounds = trace.get("semantic_repair_rounds")
     if isinstance(rounds, list) and rounds:
         last = rounds[-1]
@@ -346,7 +354,11 @@ def compile_for_mode(
     record without a second return channel.
     """
 
-    if getattr(config, "compiler_mode", "direct") == "semantic":
+    # Semantic is the canonical default: a config that never states a mode compiles
+    # semantically. "direct" runs ONLY when explicitly configured (the CLI's
+    # `--compiler direct` diagnostic flag) — never chosen by question type, and never
+    # as a fallback when semantic refuses: a semantic refusal propagates as itself.
+    if getattr(config, "compiler_mode", "semantic") != "direct":
         from .semantic_compile import semantic_compile_live
 
         data, resp = semantic_compile_live(
@@ -374,7 +386,7 @@ def compile_for_mode(
     # would rewrite the recorded model output — and, under a scripted test gateway, the
     # fixture it replays.
     data = dict(data)
-    data["compiler_mode"] = getattr(config, "compiler_mode", "direct")
+    data["compiler_mode"] = getattr(config, "compiler_mode", "semantic")
     data["_compile_responses"] = [resp]
     return data
 
@@ -927,13 +939,40 @@ def run_forecast(
     # a resolution condition that answers a nearby question, a detail nobody sourced, a
     # date that was plausible rather than published. One call, and a clear "no" goes to
     # repair rather than into several minutes of simulating the wrong thing.
-    review = review_world(
-        compiled,
-        bundle.evidence_store.view(as_of),
-        config.gateway,
-        question=question,
-        evidence_render=render_evidence(bundle.evidence_store.view(as_of)),
-    )
+    #
+    # The structural assessment ("is this even the right world?") reads the same
+    # compiled world and the same evidence and is independent of the review's verdict,
+    # so the two calls run CONCURRENTLY. Equivalence with the serial order is kept by
+    # construction: when the review does not force a repair, the assessment below is
+    # exactly the one the serial order would have made; when it does, the reviewed
+    # world is replaced and the speculative assessment described a world nobody will
+    # simulate — so the recompiled world is re-assessed, which is the assessment the
+    # serial order would have made. The probability can never differ; the only cost of
+    # the concurrency is one discarded assessment call on the (rare) repair path,
+    # recorded in the call log like any other.
+    evidence_view = bundle.evidence_store.view(as_of)
+    evidence_rendered = render_evidence(evidence_view)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        review_future = pool.submit(
+            review_world,
+            compiled,
+            evidence_view,
+            config.gateway,
+            question=question,
+            evidence_render=evidence_rendered,
+        )
+        assess_future = pool.submit(
+            assess_structure,
+            contract,
+            evidence_view,
+            compiled.spec,
+            gateway=config.gateway,
+            seed=config.seed,
+            max_alternatives=config.max_structures - 1,
+            evidence_render=evidence_rendered,
+        )
+        review = review_future.result()
+        assessment, structure_response = assess_future.result()
     if review.should_repair:
         outcome = "recompile produced nothing; the reviewed world was simulated"
         repaired = _recompile(question, as_of, horizon, bundle, config, review.repair_instruction())
@@ -944,6 +983,18 @@ def run_forecast(
                 )
                 contract = _build_contract(question, as_of, horizon, bundle)
                 outcome = "recompiled; the world simulated is not the world reviewed here"
+                # The world changed under the assessment: re-assess the world that
+                # will actually be simulated, exactly as the serial order would have.
+                repaired_view = bundle.evidence_store.view(as_of)
+                assessment, structure_response = assess_structure(
+                    contract,
+                    repaired_view,
+                    compiled.spec,
+                    gateway=config.gateway,
+                    seed=config.seed,
+                    max_alternatives=config.max_structures - 1,
+                    evidence_render=render_evidence(repaired_view),
+                )
             except SWorldModelError as exc:
                 # The review is advisory. A recompilation that the mechanical gates then
                 # refuse is worse than the world we already had, which they passed.
@@ -952,44 +1003,61 @@ def run_forecast(
                 )
         review = replace(review, disposition=outcome)
 
-    # Is this even the right world? Ordinary uncertainty asks what a value turns out to
-    # be; this asks whether the causal structure we compiled is the one that decides the
-    # question. When the evidence leaves that open, each structure is simulated.
-    assessment, structure_response = assess_structure(
-        contract,
-        bundle.evidence_store.view(as_of),
-        compiled.spec,
-        gateway=config.gateway,
-        seed=config.seed,
-        max_alternatives=config.max_structures - 1,
-        evidence_render=render_evidence(bundle.evidence_store.view(as_of)),
+    # Simulate the primary structure and every representable alternative. The
+    # structures are independent possible worlds — they share no state, and each
+    # alternative is compiled from the same frozen evidence — so they run
+    # concurrently, bounded by config.max_concurrent_structures (the gateway's own
+    # request semaphore bounds total provider concurrency underneath). Results are
+    # assembled in assessment order, never completion order, so the merged trajectory
+    # set is identical to the serial one.
+    primary_entry = (
+        assessment.primary_weight,
+        compiled.spec.structure_id,
+        _structure_weight_grounded(assessment, compiled.spec.structure_id),
     )
+    frozen_compiled = compiled
 
-    runs: list[tuple[float, str, bool, RunResult]] = [
-        (
-            assessment.primary_weight,
-            compiled.spec.structure_id,
-            _structure_weight_grounded(assessment, compiled.spec.structure_id),
-            run(compiled, config.gateway, seed=config.seed, budget=config.budget),
+    def _run_primary() -> RunResult:
+        return run(
+            frozen_compiled,
+            config.gateway,
+            seed=config.seed,
+            budget=config.budget,
+            max_concurrent_branches=config.max_concurrent_branches,
         )
-    ]
-    unrepresentable: list[tuple[StructuralAlternative, str]] = []
-    for alt in assessment.alternatives:
-        try:
-            _, alt_compiled = _compile_alternative(question, as_of, horizon, bundle, config, alt)
-        except (WorldIntegrityError, GatewayError, ValueError, KeyError) as exc:
-            # A possibility we could not faithfully represent is not a possibility we
-            # get to ignore. Its mass stays unresolved and widens the bounds.
-            unrepresentable.append((alt, f"{type(exc).__name__}: {exc}"))
-            continue
-        runs.append(
-            (
-                alt.weight,
-                alt.structure_id,
-                _structure_weight_grounded(assessment, alt.structure_id),
-                run(alt_compiled, config.gateway, seed=config.seed, budget=config.budget),
+
+    def _run_alternative(alt: StructuralAlternative) -> RunResult:
+        _, alt_compiled = _compile_alternative(question, as_of, horizon, bundle, config, alt)
+        return run(
+            alt_compiled,
+            config.gateway,
+            seed=config.seed,
+            budget=config.budget,
+            max_concurrent_branches=config.max_concurrent_branches,
+        )
+
+    workers = max(1, min(config.max_concurrent_structures, 1 + len(assessment.alternatives)))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        primary_future = pool.submit(_run_primary)
+        alt_futures = [(alt, pool.submit(_run_alternative, alt)) for alt in assessment.alternatives]
+        runs: list[tuple[float, str, bool, RunResult]] = [(*primary_entry, primary_future.result())]
+        unrepresentable: list[tuple[StructuralAlternative, str]] = []
+        for alt, future in alt_futures:
+            try:
+                alt_result = future.result()
+            except (WorldIntegrityError, GatewayError, ValueError, KeyError) as exc:
+                # A possibility we could not faithfully represent is not a possibility
+                # we get to ignore. Its mass stays unresolved and widens the bounds.
+                unrepresentable.append((alt, f"{type(exc).__name__}: {exc}"))
+                continue
+            runs.append(
+                (
+                    alt.weight,
+                    alt.structure_id,
+                    _structure_weight_grounded(assessment, alt.structure_id),
+                    alt_result,
+                )
             )
-        )
 
     run_result = _merge(runs)
     unrepresentable_mass = sum(a.weight for a, _ in unrepresentable) + assessment.undescribed_mass

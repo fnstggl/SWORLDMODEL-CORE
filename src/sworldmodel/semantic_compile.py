@@ -11,6 +11,17 @@ replay viewer are the same executor for both modes.
 
 Bounded, not open-ended: at most one targeted revision (plus one reparse of unreadable
 JSON), then the refusal is real and carries the exact unresolved reasons.
+
+Revisions are DELTAS. The initial plan is the only full generation of a compile cycle;
+every later round — validator fixes, the reviewer's corrections, a lowering gap, a
+repair carried across cycles — sends the accepted prior plan plus the named
+corrections and receives only the corrected objects back, which
+:func:`~sworldmodel.semantic_plan.merge_plan_delta` merges deterministically. Objects
+a correction does not name survive byte-for-byte: their citations, weights,
+uncertainty structure and causal wiring cannot be silently re-rolled, and the round
+stops paying full-plan output tokens for one-object fixes. The revision prompts share
+the full-plan prompt as an exact prefix, so a provider with context caching prices
+the shared tokens of every later round as cache hits.
 """
 
 from __future__ import annotations
@@ -33,8 +44,10 @@ from .semantic_plan import (
     STRUCTURAL_TYPES,
     TERMINAL_FORMS,
     WEIGHT_PROVENANCES,
+    PlanDeltaError,
     SemanticPlan,
     SemanticPlanError,
+    merge_plan_delta,
     parse_semantic_plan,
     validate_semantic_plan,
 )
@@ -222,9 +235,17 @@ def _plan_prompt(
     *,
     checklist: str = "",
     extra_instruction: str = "",
-    prior_plan: dict[str, Any] | None = None,
-    corrections: list[str] | None = None,
 ) -> str:
+    """The full-plan prompt — also the shared PREFIX of every revision prompt.
+
+    Every part here is identical across all rounds of one compile cycle, in the same
+    order, so a provider with prefix/context caching prices the second and later
+    rounds' shared tokens as cache hits. Round-specific content (the prior plan, the
+    corrections, the delta contract) is appended strictly AFTER this prefix by
+    :func:`_delta_prompt` — inserting it near the front, as the old prompt did, made
+    every round's prompt a cache miss from its second line.
+    """
+
     parts = [
         "Design the causal world for this question as a SEMANTIC PLAN. Describe meaning "
         "only — code will mint every identifier and every piece of executable syntax. "
@@ -247,16 +268,70 @@ def _plan_prompt(
     ]
     if extra_instruction:
         parts.insert(1, extra_instruction)
-    if prior_plan is not None and corrections:
-        parts.insert(
-            1,
-            "REVISE the previous semantic plan. Apply exactly these corrections and "
-            "change nothing else:\n- "
-            + "\n- ".join(corrections)
-            + "\nPREVIOUS PLAN:\n"
-            + json.dumps(prior_plan, indent=1, default=str),
-        )
     return "\n\n".join(p for p in parts if p)
+
+
+# The revision reply contract. A revision fixes named defects in an accepted plan; it
+# returns ONLY the corrected objects and code merges them deterministically, so the
+# objects the corrections do not name — their citations, weights, uncertainty structure
+# and causal wiring — survive byte-for-byte. Re-emitting the whole plan is a shape
+# error: a full re-emission silently rewrites every object, which is how a cited
+# downside alternative once vanished from a recompiled world.
+DELTA_CONTRACT = """Return a SINGLE JSON object — a REVISION DELTA, not a plan:
+{
+ "revised": {
+   "entities": [<complete corrected entity objects — only the ones you change or add>],
+   "states": [...], "events": [...], "affordances": [...], "processes": [...],
+   "uncertainties": [...]
+ },
+ "removed": {"entities": ["<name>"], "states": [...], "events": [...],
+   "affordances": [...], "processes": [...], "uncertainties": [...]},
+ "resolution": <corrected resolution object, or null if unchanged>,
+ "terminal": <corrected terminal object, or null if unchanged>,
+ "terminal_producer_note": <corrected note, or null if unchanged>,
+ "world_facts": <corrected complete world_facts list, or null if unchanged>
+}
+
+RULES OF THE DELTA:
+- every object in "revised" is COMPLETE (all its fields, in the schema above) and is
+  matched to the previous plan BY NAME: an existing name replaces that object in
+  place, a new name adds it;
+- an object you do not name is kept exactly as it was — do NOT re-emit unchanged
+  objects, and NEVER return the whole plan;
+- to rename an object, add the new name under "revised" and put the old name under
+  "removed" (and revise everything that referenced the old name);
+- omit any key you do not need; an empty delta means you claim nothing needs fixing;
+- apply exactly the corrections listed above and change nothing else."""
+
+
+def _delta_prompt(
+    question: str,
+    as_of: datetime,
+    horizon: datetime,
+    evidence: str,
+    *,
+    checklist: str,
+    extra_instruction: str,
+    prior_plan: dict[str, Any],
+    corrections: list[str],
+) -> str:
+    prefix = _plan_prompt(
+        question,
+        as_of,
+        horizon,
+        evidence,
+        checklist=checklist,
+        extra_instruction=extra_instruction,
+    )
+    return "\n\n".join(
+        [
+            prefix,
+            "PREVIOUS PLAN (accepted as the basis of this revision — revise it, do "
+            "not re-roll it):\n" + json.dumps(prior_plan, indent=1, default=str),
+            "CORRECTIONS TO APPLY (exactly these, nothing else):\n- " + "\n- ".join(corrections),
+            DELTA_CONTRACT,
+        ]
+    )
 
 
 _REVIEW_CHECKLIST = """Check, against the evidence only:
@@ -338,10 +413,10 @@ def _call_planner(
     *,
     checklist: str = "",
     extra_instruction: str,
-    prior: dict[str, Any] | None,
-    corrections: list[str] | None,
     attempt: int,
 ) -> tuple[dict[str, Any], Any]:
+    """One FULL plan generation — the initial plan of a compile cycle, only."""
+
     resp = gateway.generate(
         GatewayRequest(
             task_kind="semantic_plan",
@@ -352,12 +427,48 @@ def _call_planner(
                 evidence,
                 checklist=checklist,
                 extra_instruction=extra_instruction,
-                prior_plan=prior,
-                corrections=corrections,
             ),
             context={"question": question, "attempt": attempt},
             seed=int(prompt_hash(f"semantic{question}{attempt}")[:8], 16),
             expected_keys=("resolution", "terminal"),
+        )
+    )
+    data = resp.data
+    return (data if isinstance(data, dict) else {}), resp
+
+
+def _call_delta(
+    gateway: ModelGateway,
+    question: str,
+    as_of: datetime,
+    horizon: datetime,
+    evidence: str,
+    *,
+    checklist: str,
+    extra_instruction: str,
+    prior: dict[str, Any],
+    corrections: list[str],
+    attempt: int,
+) -> tuple[dict[str, Any], Any]:
+    """One revision call. The reply is a delta — only the corrected objects — and the
+    caller merges it into the accepted prior plan deterministically."""
+
+    resp = gateway.generate(
+        GatewayRequest(
+            task_kind="semantic_plan_delta",
+            prompt=_delta_prompt(
+                question,
+                as_of,
+                horizon,
+                evidence,
+                checklist=checklist,
+                extra_instruction=extra_instruction,
+                prior_plan=prior,
+                corrections=corrections,
+            ),
+            context={"question": question, "attempt": attempt},
+            seed=int(prompt_hash(f"semanticdelta{question}{attempt}")[:8], 16),
+            expected_keys=(),
         )
     )
     data = resp.data
@@ -422,11 +533,20 @@ def semantic_compile_live(
     checklist = evidence_checklist(view, as_of=as_of, horizon=horizon)
     known = frozenset(c.id for c in view.available())
     responses: list[Any] = []
+    delta_rounds = 0
 
-    def build(
-        prior: dict[str, Any] | None, corrections: list[str] | None, attempt: int
+    def revise(
+        prior: dict[str, Any], corrections: list[str], attempt: int
     ) -> tuple[SemanticPlan, dict[str, Any]]:
-        raw, resp = _call_planner(
+        """One revision round: a DELTA against the accepted prior plan, merged
+        deterministically. A local validator, reviewer or lowering defect never
+        regenerates the full plan — full regeneration is how unchanged cited
+        structure got silently re-rolled, and it pays the whole plan's output
+        tokens for a one-object fix."""
+
+        nonlocal delta_rounds
+        delta_rounds += 1
+        delta, resp = _call_delta(
             gateway,
             question,
             as_of,
@@ -440,11 +560,12 @@ def semantic_compile_live(
         )
         responses.append(resp)
         try:
-            plan = parse_semantic_plan(raw)
-        except SemanticPlanError as exc:
-            # One reparse round: unreadable shape is a defect of one response, not of
-            # the world. Name every field error exactly.
-            raw2, resp2 = _call_planner(
+            merged = merge_plan_delta(prior, delta)
+        except PlanDeltaError as exc:
+            # One reshape round: an unreadable delta (including the whole plan
+            # re-emitted) is a defect of one response. Name every shape error exactly.
+            delta_rounds += 1
+            delta2, resp2 = _call_delta(
                 gateway,
                 question,
                 as_of,
@@ -452,22 +573,17 @@ def semantic_compile_live(
                 evidence,
                 checklist=checklist,
                 extra_instruction=extra_instruction,
-                prior=raw,
-                corrections=[f"fix the plan's shape: {e}" for e in exc.errors[:12]],
-                attempt=attempt + 100,
+                prior=prior,
+                corrections=corrections
+                + [f"the previous revision was not a readable delta: {e}" for e in exc.errors[:8]],
+                attempt=attempt + 200,
             )
             responses.append(resp2)
             try:
-                plan = parse_semantic_plan(raw2)
-            except SemanticPlanError as exc2:
-                # A second unreadable shape is a real refusal — but it must refuse AS
-                # the pipeline's own refusal type. Raw SemanticPlanError is a
-                # ValueError: it bypassed the repair registry, was misfiled as a
-                # research-stage failure, and threw away a completed live research
-                # record (a FIFA holdout run lost 10 queries' evidence to
-                # "terminal.parts[0]: all_of needs at least 2 part(s)").
+                merged = merge_plan_delta(prior, delta2)
+            except PlanDeltaError as exc2:
                 raise WorldIntegrityError(
-                    "the semantic plan is unreadable after a shape-correction round: "
+                    "the plan revision is not a readable delta after a reshape round: "
                     + "; ".join(exc2.errors[:6]),
                     details={
                         "failure": "semantic_plan_invalid",
@@ -475,11 +591,51 @@ def semantic_compile_live(
                         "semantic_errors": list(exc2.errors),
                     },
                 ) from exc2
-            raw = raw2
+        try:
+            plan = parse_semantic_plan(merged)
+        except SemanticPlanError as exc:
+            # The merged plan is unreadable — the revision introduced shape defects the
+            # delta contract could not catch. It must refuse AS the pipeline's own
+            # refusal type: raw SemanticPlanError is a ValueError that bypassed the
+            # repair registry, was misfiled as a research-stage failure, and threw
+            # away a completed live research record (a FIFA holdout run lost 10
+            # queries' evidence to "terminal.parts[0]: all_of needs at least 2
+            # part(s)").
+            raise WorldIntegrityError(
+                "the revised semantic plan is unreadable: " + "; ".join(exc.errors[:6]),
+                details={
+                    "failure": "semantic_plan_invalid",
+                    "recompilable": True,
+                    "semantic_errors": list(exc.errors),
+                },
+            ) from exc
+        return plan, merged
+
+    def build_full(attempt: int) -> tuple[SemanticPlan, dict[str, Any]]:
+        """The one full generation of a compile cycle: the initial plan. An unreadable
+        shape gets one delta-based correction round against its own output."""
+
+        raw, resp = _call_planner(
+            gateway,
+            question,
+            as_of,
+            horizon,
+            evidence,
+            checklist=checklist,
+            extra_instruction=extra_instruction,
+            attempt=attempt,
+        )
+        responses.append(resp)
+        try:
+            plan = parse_semantic_plan(raw)
+        except SemanticPlanError as exc:
+            return revise(
+                raw, [f"fix the plan's shape: {e}" for e in exc.errors[:12]], attempt + 100
+            )
         return plan, raw
 
     if prior_plan is not None and extra_instruction:
-        plan, raw = build(
+        plan, raw = revise(
             prior_plan,
             [
                 "apply the repair instruction above to the previous plan; keep every "
@@ -488,7 +644,7 @@ def semantic_compile_live(
             0,
         )
     else:
-        plan, raw = build(None, None, 0)
+        plan, raw = build_full(0)
     errors = validate_semantic_plan(plan, as_of=as_of, horizon=horizon, known_claim_ids=known)
     validator_rounds = 0
     while errors and validator_rounds < 2:
@@ -497,7 +653,7 @@ def semantic_compile_live(
         # shrinks monotonically when the fixes land, and a plan still broken after two
         # precise rounds has a real coherence problem.
         validator_rounds += 1
-        plan, raw = build(raw, [f"validator: {e}" for e in errors[:16]], validator_rounds)
+        plan, raw = revise(raw, [f"validator: {e}" for e in errors[:16]], validator_rounds)
         errors = validate_semantic_plan(plan, as_of=as_of, horizon=horizon, known_claim_ids=known)
     if errors:
         raise WorldIntegrityError(
@@ -529,10 +685,10 @@ def semantic_compile_live(
     if verdict == "REVISE" and corrections:
         # One targeted revision on the reviewer's exact corrections, then one
         # validator-only round if the revision broke a mechanical rule.
-        plan, raw = build(raw, [f"reviewer: {c}" for c in corrections[:16]], 2)
+        plan, raw = revise(raw, [f"reviewer: {c}" for c in corrections[:16]], 2)
         errors = validate_semantic_plan(plan, as_of=as_of, horizon=horizon, known_claim_ids=known)
         if errors:
-            plan, raw = build(raw, [f"validator: {e}" for e in errors[:16]], 3)
+            plan, raw = revise(raw, [f"validator: {e}" for e in errors[:16]], 3)
             errors = validate_semantic_plan(
                 plan, as_of=as_of, horizon=horizon, known_claim_ids=known
             )
@@ -575,7 +731,7 @@ def semantic_compile_live(
             # same failure. The gap itself is the refusal.
             raise
         # One revision naming the gap, then the gap is real and refuses.
-        plan, raw = build(
+        plan, raw = revise(
             raw,
             [
                 "the plan uses a construct the universal change mapping cannot "
@@ -608,6 +764,10 @@ def semantic_compile_live(
             "reasons": reasons,
             "revision_applied": bool(verdict == "REVISE" and corrections),
         },
+        # How many revision rounds were delta calls. Every revision in this cycle is
+        # one — the count is here so a trace reader can verify no full plan was
+        # regenerated for a local defect.
+        "delta_rounds": delta_rounds,
         "compiler_mode": "semantic",
     }
     return compilation, (responses[-1] if responses else None)

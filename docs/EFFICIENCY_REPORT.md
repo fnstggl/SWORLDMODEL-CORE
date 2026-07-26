@@ -102,3 +102,40 @@ Consumer mode 1–5 minutes median: current measured walls are 7.1–9.0 minutes
 The two structural levers above (delta plan revisions, parallel branches) are the
 path; both preserve the exact research, gate, and audit behavior. A deeper mode
 (more branches, more structures) remains explicitly selected, not default.
+
+## Implemented (this branch)
+
+Every lever above is now implemented, with equivalence proven by focused regressions
+before any benchmark:
+
+- **Delta plan revisions** — revisions return only corrected semantic objects;
+  `merge_plan_delta` merges them deterministically into the accepted prior plan;
+  unchanged objects survive byte-for-byte (`tests/unit/test_plan_delta.py`,
+  `tests/unit/test_semantic_delta_compile.py`). No full plan is ever regenerated for
+  a local validator or reviewer defect; revision output budget drops from 12k to 6k
+  tokens and actual revision output is the corrected objects only.
+- **Prompt-prefix reuse** — every revision prompt carries the full-plan prompt as an
+  exact byte prefix, so DeepSeek's automatic context caching prices rounds 2..n's
+  shared tokens as cache hits; `prompt_cache_hit_tokens` is read from usage and
+  reported per run (`cache hit rate` in `run_audit.json`).
+- **Bounded parallel execution** — branches (engine thread pool, bounded), the
+  primary structure and its alternatives (pipeline pool, bounded), and the
+  world_review + assess_structure pair all run concurrently; results assemble in
+  deterministic order and `llm_calls.jsonl` serializes deterministically. Proven
+  identical to serial execution — probability, branch table, ledger, decisions, call
+  log — by `tests/invariants/test_parallel_equivalence.py`. The live gateway caps
+  total concurrent requests (default 8) under the provider's rate limits.
+- **Identical-request memoization with in-flight dedup** — a byte-identical (model,
+  task, prompt, seed, temperature) request is answered once per run; racing
+  duplicates collapse to one provider call, which is also what makes parallel
+  execution request-level deterministic.
+- **Accepted-source and extracted-claim caches** — on-disk record-and-replay keyed by
+  URL/retrieval regime and by (content, question, prompt version, model, seed);
+  replayed extractions re-verify exactly as live ones (`tests/unit/test_runcache.py`).
+  Budgets count cache hits like live work, so a cache-hot run walks the same
+  discovery path as a cold one.
+- **Query/URL/document dedup** — pre-existing (seen queries, seen URLs, seen content
+  hashes) plus normalization-aware URL dedup (fragments and tracking parameters).
+
+The final 8-case A/B numbers at the unchanged benchmark commit are in
+`docs/OPTIMIZATION_BENCHMARK.md`.

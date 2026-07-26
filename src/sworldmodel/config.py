@@ -39,12 +39,23 @@ class ForecastConfig:
     # from outside with nothing written. Reaching this stops repairing and refuses with
     # the last gate's own diagnosis, which is a result; being killed is not.
     max_compile_seconds: float = 900.0
-    # Which compiler builds the world from the evidence. "direct": one model call
-    # authors the executable WorldSpec. "semantic": the model authors a semantic causal
-    # plan, an independent call reviews it, and deterministic code lowers it into the
-    # same WorldSpec. Both feed the identical gates and runtime; the mode is recorded in
-    # every trace.
-    compiler_mode: str = "direct"
+    # Which compiler builds the world from the evidence. "semantic" — the canonical
+    # default: the model authors a semantic causal plan, an independent call reviews
+    # it, and deterministic code lowers it into the executable WorldSpec. "direct" —
+    # one model call authors the WorldSpec; it exists only behind the explicit
+    # `--compiler direct` diagnostic flag, for controlled comparison, regression
+    # diagnosis and removal planning. Both feed the identical gates and runtime; the
+    # mode is recorded in every trace, and nothing ever falls back from one mode to
+    # the other.
+    compiler_mode: str = "semantic"
+    # Bounded parallelism. Branches of one structure are independent possible worlds
+    # and run concurrently inside the engine; structures (the primary world plus each
+    # representable alternative) are independent of each other and run concurrently in
+    # the pipeline. Both bounds exist so parallel execution cannot stampede the
+    # provider — the live gateway additionally caps total concurrent requests. 1
+    # reproduces fully serial execution, which the equivalence regressions rely on.
+    max_concurrent_branches: int = 4
+    max_concurrent_structures: int = 2
     # Per-run spend ceilings, enforced at the gateway (see ModelGateway.set_budget):
     # wall clocks alone cannot stop a run whose calls are cheap and fast. Exhaustion
     # raises GatewayError, which existing handlers convert into an honest refusal or an
@@ -67,9 +78,11 @@ class ForecastConfig:
         now: datetime | None = None,
         model: str | None = None,
         budget: RunBudget | None = None,
-        compiler_mode: str = "direct",
+        compiler_mode: str = "semantic",
         max_calls: int | None = 400,
         max_tokens_total: int | None = 2_000_000,
+        max_concurrent_branches: int = 4,
+        max_concurrent_structures: int = 2,
     ) -> ForecastConfig:
         """The production configuration: live DeepSeek + live research, one transport."""
 
@@ -98,6 +111,8 @@ class ForecastConfig:
             compiler_mode=compiler_mode,
             max_calls=max_calls,
             max_tokens_total=max_tokens_total,
+            max_concurrent_branches=max_concurrent_branches,
+            max_concurrent_structures=max_concurrent_structures,
         )
 
     @property
