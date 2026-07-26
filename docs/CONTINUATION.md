@@ -73,6 +73,17 @@ path handed to the reviewing agent. Subagents verify artifacts; they do not own
 long-lived processes. Also: check transcript size + child-process liveness, not just
 elapsed time, when judging whether an agent is progressing.
 
+## PHASE 2 CLOSED (realism-adversary APPROVE at 89e04c0)
+
+ACT-5..8, TMP-2, TMP-4, COM-1..2 CLOSED; FD-7, FD-13, FD-18..21 closed. Verified by
+adversarial probe, not assertion: 8 collapse attacks on per-date releases all failed;
+message identities sent=delivered+undelivered and delivered=noticed+missed hold on a
+world where both diverge (7=6+1, 6=4+2); D10's deadline cancellation verified on a
+five-participant probe (acted->cancelled; declined/rejected/waited/own-revisit->kept);
+the new harness proven to FAIL under pre-fix rules (12 decisions read an unpublished
+figure 19 days early). New non-blocking: FD-22 (replaycore comm kinds not narrowed),
+FD-23 (LOW notes). Phase 3 launches: world-compiler-impl (CWF-1..8) + causal-adversary.
+
 ## Next exact steps
 
 1. Integrate `fix/observability-trace` then `fix/observability-viewer` (in that

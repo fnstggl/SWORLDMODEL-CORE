@@ -31,26 +31,26 @@ mypy --strict clean (52 files); forensic verdicts RECONSTRUCTED ×3
 | ACT-2 | Wake causes restricted to the §10 list; every wake records its cause | runtime-impl / realism-adversary | OPEN (partial exists) |
 | ACT-3 | Prompt separates verified facts / visible state / memory / interpretation / private assumptions / feasible actions / unavailable info | runtime-impl / realism-adversary | OPEN (partial) |
 | ACT-4 | Environment validates authority, feasibility, timing, resources, consistency; actor never narrates final reality | runtime-impl / realism-adversary | RUN-PROVEN (existing gates) |
-| ACT-5 | Complete information→notice→interpretation→action lifecycle harness (production functions, mocked providers) | runtime-impl / realism-adversary | OPEN |
-| ACT-6 | Multi-actor communication chain harness: send→deliver→notice→interpret→respond→consequence | runtime-impl / realism-adversary | OPEN |
-| ACT-7 | Rejected/failed action followed by actor reconsideration harness | runtime-impl / realism-adversary | OPEN |
-| ACT-8 | No repeated actor calls without materially new information (measured; flagged) | runtime-impl / realism-adversary | OPEN |
+| ACT-5 | Complete information→notice→interpretation→action lifecycle harness (production functions, mocked providers) | runtime-impl / realism-adversary | CLOSED (realism-adversary APPROVE, 89e04c0) |
+| ACT-6 | Multi-actor communication chain harness: send→deliver→notice→interpret→respond→consequence | runtime-impl / realism-adversary | CLOSED (realism-adversary APPROVE, 89e04c0) |
+| ACT-7 | Rejected/failed action followed by actor reconsideration harness | runtime-impl / realism-adversary | CLOSED (realism-adversary APPROVE, 89e04c0) |
+| ACT-8 | No repeated actor calls without materially new information (measured; flagged) | runtime-impl / realism-adversary | CLOSED (realism-adversary APPROVE, 89e04c0) |
 
 ## TMP — Temporal fidelity (Phase 2)
 
 | ID | Requirement | Owner / Reviewer | Status |
 | --- | --- | --- | --- |
 | TMP-1 | Time from verified dates, grounded delays, schedules, durations, dependencies, deadlines — no arbitrary rounds/microsteps | runtime-impl / realism-adversary | OPEN (partial) |
-| TMP-2 | Per-run temporal report: all §9 counters (timestamps, jumps, zero-duration actions, wake novelty, comms, process updates, terminal checks) | runtime-impl / realism-adversary | OPEN |
+| TMP-2 | Per-run temporal report: all §9 counters (timestamps, jumps, zero-duration actions, wake novelty, comms, process updates, terminal checks) | runtime-impl / realism-adversary | CLOSED (realism-adversary APPROVE, 89e04c0) |
 | TMP-3 | Realism adversary rejects: frozen-timestamp repeats, unexplained instant action/comms, jumps over material events, early termination, fixed turn counts | realism-adversary / CTO | OPEN |
-| TMP-4 | Known scheduled material events fire inside the window (BoE t0-collapse class fixed) | runtime-impl / realism-adversary | OPEN |
+| TMP-4 | Known scheduled material events fire inside the window (BoE t0-collapse class fixed) | runtime-impl / realism-adversary | CLOSED (realism-adversary APPROVE, 89e04c0) |
 
 ## COM — Communication fidelity (Phase 2)
 
 | ID | Requirement | Owner / Reviewer | Status |
 | --- | --- | --- | --- |
-| COM-1 | Sending ≠ delivery ≠ notice ≠ agreement ≠ execution preserved and visible | runtime-impl / realism-adversary | OPEN (partial exists) |
-| COM-2 | Every communication carries §11 fields end-to-end into artifacts | obs-trace / realism-adversary | OPEN |
+| COM-1 | Sending ≠ delivery ≠ notice ≠ agreement ≠ execution preserved and visible | runtime-impl / realism-adversary | CLOSED (realism-adversary APPROVE, 89e04c0) |
+| COM-2 | Every communication carries §11 fields end-to-end into artifacts | obs-trace / realism-adversary | CLOSED (realism-adversary APPROVE, 89e04c0) |
 
 ## CWF — Causal-world fidelity (Phase 3)
 
