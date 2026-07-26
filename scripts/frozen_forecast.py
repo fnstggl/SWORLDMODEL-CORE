@@ -34,6 +34,7 @@ from sworldmodel.api import compile_for_mode, forecast  # noqa: E402
 from sworldmodel.config import ForecastConfig  # noqa: E402
 from sworldmodel.deepseek_gateway import DeepSeekGateway  # noqa: E402
 from sworldmodel.diagnosis import ForecastRefused, RunDiagnosis  # noqa: E402
+from sworldmodel.errors import WorldIntegrityError  # noqa: E402
 from sworldmodel.evidence import EvidenceStore  # noqa: E402
 from sworldmodel.http import UrllibTransport  # noqa: E402
 from sworldmodel.ids import canonical_json  # noqa: E402
@@ -58,13 +59,26 @@ class FrozenResearchBackend:
 
     def research(self, question: str, as_of: datetime, horizon: datetime):
         config = self._config_ref["config"]
-        data = compile_for_mode(
-            config,
-            question,
-            as_of,
-            horizon,
-            self.store.view(as_of),
-        )
+        try:
+            data = compile_for_mode(
+                config,
+                question,
+                as_of,
+                horizon,
+                self.store.view(as_of),
+            )
+        except WorldIntegrityError as exc:
+            # Mirror live_research._compile: the initial compile runs inside
+            # ``research()``, so without this a compile-stage refusal on the frozen
+            # route is misfiled as stage="research" with no research artifacts. The
+            # frozen route's research IS the loaded store — attach it so the caller
+            # checkpoints it and names the true stage.
+            exc.partial_live_trace = {  # type: ignore[attr-defined]
+                "frozen_store": True,
+                "claim_count": len(self.store.all()),
+            }
+            exc.partial_evidence_store = self.store  # type: ignore[attr-defined]
+            raise
         bundle = assemble_bundle(self.store, data)
         live_trace: dict = {"frozen_store": True, "claim_count": len(self.store.all())}
         if "_semantic" in data:
