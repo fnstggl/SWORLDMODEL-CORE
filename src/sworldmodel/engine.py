@@ -47,6 +47,7 @@ from .expressions import evaluate
 from .gateway import ModelGateway
 from .models import BranchOutcome, BranchWeight, Event, TrajectorySummary, Visibility
 from .schedule import (
+    KIND_SCENARIO_RELEASE,
     ORIGIN_ACTOR_PLAN,
     ORIGIN_CONSEQUENCE,
     ORIGIN_EXTERNAL,
@@ -412,19 +413,21 @@ def _seed_branch(
                 world.schedule.push(
                     make_entry(
                         at=release_at,
-                        kind=KIND_DEFERRED_EFFECT,
+                        # The dedicated schedule kind: when the compiled world models
+                        # the release event itself — as an occurrence at the same
+                        # instant OR as a deferred at-stamped placeholder — this
+                        # branch's hypothesis states what that release *revealed*, so
+                        # it must land strictly after everything else scheduled at
+                        # its instant. The schedule's ordering class guarantees that
+                        # structurally; a plain deferred entry used to tie with the
+                        # placeholder and the winner fell to entry-id hash order.
+                        kind=KIND_SCENARIO_RELEASE,
                         payload={
                             "op": "release_data",
                             "params": {"fields": dict(scenario.field_levels)},
                         },
                         origin=ORIGIN_EXTERNAL,
                         origin_detail=f"scenario_release:{scenario.scenario_id}",
-                        # One causal layer after any compiled occurrence at the same
-                        # instant: when the compiled world models the release event
-                        # itself, this branch's hypothesis states what that release
-                        # *revealed*, so it lands after the occurrence's baseline
-                        # placeholder rather than being overwritten by it.
-                        microstep=1,
                     )
                 )
             )
@@ -690,7 +693,9 @@ def _dispatch(
         return _fire_process_node(world, spec, entry, effects, ledger)
     if kind == KIND_EXTERNAL:
         return _fire_external(world, spec, entry, effects, ledger)
-    if kind == KIND_DEFERRED_EFFECT:
+    if kind in (KIND_DEFERRED_EFFECT, KIND_SCENARIO_RELEASE):
+        # A scenario release is applied exactly like a deferred effect once its
+        # moment (and its dedicated ordering slot) arrives.
         return _fire_deferred(world, spec, entry, effects, ledger)
     if kind == KIND_ACTION_COMPLETION:
         return _complete_action(world, spec, entry, action_exec, ledger)
@@ -1225,6 +1230,11 @@ def _invoke_actor(
     )
     state_before = actor.state_dict()
     version_at_decision = world.version
+    # What had been delivered to this actor AT the moment it decided. Snapshotted
+    # here, before the decision's own events apply: reading it after `world.apply`
+    # quietly credited the decision with its own consequences — the record claimed
+    # the actor had been handed things that only existed because it acted.
+    delivered_at_decision = [d.event_id for d in world.deliveries if d.actor_id == aid]
 
     result = actor_runtime.step(actor, view, seed=seed)
     world = world.with_actor(result.actor)
@@ -1287,7 +1297,7 @@ def _invoke_actor(
             wake_reason=reason,
             wake_detail=detail,
             trigger_event_ids=list(entry.causal_parents),
-            delivered_observation_ids=[d.event_id for d in world.deliveries if d.actor_id == aid],
+            delivered_observation_ids=delivered_at_decision,
             noticed_observation_ids=result.noticed_obs_ids,
             retrieved_memory_ids=result.retrieved_memory_ids,
             plan_before=result.plan_before,

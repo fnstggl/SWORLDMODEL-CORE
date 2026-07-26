@@ -42,6 +42,23 @@ ORIGIN_ACTOR_PLAN = "actor_plan"
 
 VALID_ORIGINS = frozenset({ORIGIN_PROCESS, ORIGIN_EXTERNAL, ORIGIN_CONSEQUENCE, ORIGIN_ACTOR_PLAN})
 
+# The one entry kind with a dedicated ordering class: a branch's own scenario release
+# (its hypothesis about what an uncertain value turns out to be when it becomes
+# public). It fires strictly AFTER every other entry scheduled at its instant — see
+# ``pop_batch`` — so the branch's defining condition can never be overwritten by a
+# same-instant compiled placeholder. Before this class existed, a deferred
+# ``at``-stamped placeholder release tied with the hypothesis at the same
+# ``(at, microstep)`` and the winner fell to content-hash order of entry ids: two
+# spelled-differently-but-equivalent compiled worlds produced opposite branch states.
+KIND_SCENARIO_RELEASE = "scenario_release_due"
+
+
+def _ordering_class(entry: ScheduledEntry) -> int:
+    """0 for ordinary entries, 1 for the scenario release — the outermost tie level
+    within one instant, ahead of ``microstep``."""
+
+    return 1 if entry.kind == KIND_SCENARIO_RELEASE else 0
+
 
 @dataclass(frozen=True)
 class ScheduledEntry:
@@ -80,9 +97,18 @@ class ScheduledEntry:
         )
 
     def sort_key(self) -> tuple[Any, ...]:
-        """Content-derived and insertion-order invariant."""
+        """Content-derived and insertion-order invariant. The ordering class sits
+        ahead of ``microstep`` so a scenario release sorts — and fires — after every
+        ordinary entry at its instant, never on an entry-id hash tie."""
 
-        return (self.at, self.microstep, self.kind, self.actor_id or "", self.entry_id)
+        return (
+            self.at,
+            _ordering_class(self),
+            self.microstep,
+            self.kind,
+            self.actor_id or "",
+            self.entry_id,
+        )
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -166,21 +192,28 @@ class Schedule:
 
     def pop_batch(self, *, horizon: datetime) -> tuple[Schedule, tuple[ScheduledEntry, ...]]:
         """Pop the next causal layer: the earliest in-horizon timestamp, and within it
-        the earliest microstep.
+        the earliest ``(ordering class, microstep)``.
 
         Entries in a returned batch are genuinely *simultaneous and independent* — an
         actor in the batch has not seen the others' results. Entries that causally
         depend on something at the same timestamp carry a higher microstep and are held
         back to the next layer, so a message delivered by an action at time T is
         noticed strictly after that action, without needing the clock to move.
+
+        The scenario release (``KIND_SCENARIO_RELEASE``) is held back until every
+        ordinary entry at its instant has fired: the branch's hypothesis states what
+        the released value *turned out to be*, so nothing else scheduled at that same
+        moment — in particular a compiled placeholder release of the same fields — may
+        land after it and overwrite the branch's defining condition. Without the
+        dedicated class the collision was decided by entry-id hash order.
         """
 
         t = self.next_time(horizon=horizon)
         if t is None:
             return self, ()
         at_t = [e for e in self.entries if e.at == t]
-        layer = min(e.microstep for e in at_t)
-        batch = tuple(e for e in at_t if e.microstep == layer)
+        layer = min((_ordering_class(e), e.microstep) for e in at_t)
+        batch = tuple(e for e in at_t if (_ordering_class(e), e.microstep) == layer)
         taken = {e.entry_id for e in batch}
         rest = tuple(e for e in self.entries if e.entry_id not in taken)
         return replace(self, entries=rest, fired=self.fired | taken), batch

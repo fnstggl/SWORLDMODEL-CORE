@@ -262,12 +262,15 @@ class LocalView:
         """Every field level this actor can currently read.
 
         Observations fold in the order they were noticed (the view keeps them sorted
-        by notice time), so two messages about the same field resolve by time rather
-        than by an accident of event-id ordering. The world's own *current* field
-        levels are then laid over the top: an ambient level the world determines now
-        is what the actor can read now, and a stale number quoted in an older message
-        must not shadow it. A field the world has not determined stays at whatever
-        the messages carried — the view never invents a level.
+        by notice time, then by event id), so two messages about the same field
+        noticed at different times resolve to the later one; two noticed at the SAME
+        instant resolve deterministically by event id — an arbitrary but stable
+        tie-break, not a claim about which message "wins" in the world. The world's
+        own *current* field levels are then laid over the top: an ambient level the
+        world determines now is what the actor can read now, and a stale number
+        quoted in an older message must not shadow it. A field the world has not
+        determined stays at whatever the messages carried — the view never invents a
+        level.
         """
 
         fields: dict[str, Any] = {}

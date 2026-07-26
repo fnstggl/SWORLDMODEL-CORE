@@ -17,8 +17,9 @@ from _fakes import ProgrammableGateway, act, build_bundle, wait_decision
 from _worlds import AS_OF as AS_OF_S
 from _worlds import HORIZON as HORIZON_S
 from _worlds import scheduled_multiparty_world, single_response_world
+from sworldmodel import replaycore
 from sworldmodel.compiled import CompiledWorld
-from sworldmodel.engine import RunResult, run
+from sworldmodel.engine import WAKE_OWN_ACTION, RunResult, run
 from sworldmodel.ids import canonical_json
 from sworldmodel.models import ResolutionContract
 from sworldmodel.outcomes import aggregate
@@ -134,9 +135,16 @@ def test_every_section9_counter_on_a_known_run() -> None:
     assert flag["actor_id"] == "recipient"
     assert flag["branch_time"] == "2026-06-05T08:00:00+00:00"
 
-    # Every action accounted for; every message accounted for.
+    # The novelty trail makes both verdicts auditable, wake by wake.
+    trail = b["wake_ups"]["trail"]
+    assert [t["materially_new_information"] for t in trail] == [True, False]
+
+    # Every action accounted for; every message accounted for. ``sent`` counts the
+    # exact kinds communications.jsonl extracts (deliver_information + create_event
+    # here: the request and the terminal's result_recorded line), so the two
+    # artifacts reconcile row-for-row.
     assert b["actions"] == {"started": 1, "completed": 1, "failed": 0, "rejected": 0}
-    assert b["messages"] == {"sent": 1, "delivered": 1, "noticed": 1, "missed": 0}
+    assert b["messages"] == {"sent": 2, "delivered": 1, "noticed": 1, "missed": 0}
 
     # The request's arrival is the one non-actor process update; the terminal was
     # checked once before anything ran and recorded once at the end.
@@ -269,13 +277,186 @@ def test_the_report_is_computed_per_branch_and_totalled() -> None:
     assert set(report["branches"]) == {"sc_external_signal:high", "sc_external_signal:low"}
     high = report["branches"]["sc_external_signal:high"]
     low = report["branches"]["sc_external_signal:low"]
-    # Only the high branch had a note circulated: one more message, more wakes.
-    assert high["messages"]["sent"] == low["messages"]["sent"] + 1
+    # Only the high branch had a note circulated. A circulated note is two
+    # communications.jsonl rows (its deliver_information and its note_circulated
+    # create_event), and the report counts exactly those kinds.
+    assert high["messages"]["sent"] == low["messages"]["sent"] + 2
     assert high["wake_ups"]["total"] > low["wake_ups"]["total"]
     run_block = report["run"]
     assert run_block["branch_count"] == 2
     assert run_block["messages"]["sent"] == high["messages"]["sent"] + low["messages"]["sent"]
     assert run_block["wake_ups"]["total"] == high["wake_ups"]["total"] + low["wake_ups"]["total"]
+
+
+# ---------------------------------------------------------------------------
+# ACT-8 wake novelty: noticed-based, content-keyed, never self-contaminated
+# ---------------------------------------------------------------------------
+
+
+def test_a_wake_between_delivery_and_notice_is_not_credited_with_unread_mail() -> None:
+    """Adversary probe shape: the reviewer glances at its calendar at 12:10 — after
+    the request was DELIVERED (12:00) but before it is NOTICED (12:30). The diary
+    wake must not be credited with the unread message, and the 12:30 wake at which
+    the actor actually reads it must be the one credited — never flagged as a
+    repeat."""
+
+    import test_actor_lifecycles as act_lc
+
+    data = act_lc.two_actor_exchange_world()
+    data["world_spec"]["process"]["nodes"].append(
+        {
+            "node_id": "reviewer_diary",
+            "stage": "correspondence",
+            "at": "2026-05-20T12:10:00+00:00",
+            "description": "the reviewer looks at their calendar",
+            "participants": ["reviewer"],
+            "action_ids": ["send_answer"],
+        }
+    )
+
+    def decide(ctx: dict[str, Any]) -> dict[str, Any]:
+        if ctx["actor_id"] == "proposer":
+            if ctx["current_action"] is None and not ctx["observations"]:
+                return act("send_request", {"text": "please confirm the figure by Friday"})
+            return wait_decision("waiting")
+        if any("please confirm" in o["summary"] for o in ctx["observations"]):
+            return act("send_answer", {"answer": "yes"})
+        return wait_decision("nothing has reached me")
+
+    gw = _gateway(decide)
+    _, compiled = _compile_pair(data, gw)
+    result = run(compiled, gw, seed=0)
+    b = compute_temporal_report(result)["branches"]["baseline"]
+
+    by_wake = {(t["actor_id"], t["branch_time"]): t for t in b["wake_ups"]["trail"]}
+    diary = by_wake[("reviewer", "2026-05-20T12:10:00+00:00")]
+    reading = by_wake[("reviewer", "2026-05-20T12:30:00+00:00")]
+    assert diary["materially_new_information"] is False, (
+        "a wake was credited with information the actor had not noticed"
+    )
+    assert reading["materially_new_information"] is True, (
+        "the wake that actually read the message was not credited"
+    )
+    assert not any(
+        f["actor_id"] == "reviewer" and f["branch_time"] == "2026-05-20T12:30:00+00:00"
+        for f in b["wake_ups"]["flagged_repeats"]
+    ), "the wake that truly brought new information was flagged as a repeat"
+
+
+def test_byte_identical_redelivered_content_is_not_materially_new() -> None:
+    """Adversary probe shape: the same reminder sent twice under fresh event ids.
+    Novelty is keyed on content, so the wake noticing the second, identical
+    reminder is a repeat without materially new information — an id-keyed rule
+    would credit it and a nagging cascade would never be flagged."""
+
+    data = single_response_world()
+    data["world_spec"]["external_processes"] = [
+        {
+            "process_id": "nagger",
+            "description": "the same reminder is sent twice",
+            "occurrences": [
+                {
+                    "at": f"2026-06-0{day}T09:00:00+00:00",
+                    "description": "reminder",
+                    "effects": [
+                        {
+                            "op": "deliver_information",
+                            "to": ["recipient"],
+                            "text": "REMINDER: please reply",
+                        }
+                    ],
+                }
+                for day in (1, 3)
+            ],
+        }
+    ]
+
+    gw = _gateway(lambda ctx: wait_decision("never acting"))
+    _, compiled = _compile_pair(data, gw)
+    b = compute_temporal_report(run(compiled, gw, seed=0))["branches"]["baseline"]
+
+    trail = {t["branch_time"]: t for t in b["wake_ups"]["trail"]}
+    first = trail["2026-06-01T09:00:00+00:00"]
+    second = trail["2026-06-03T09:00:00+00:00"]
+    assert first["materially_new_information"] is True
+    assert second["materially_new_information"] is False, (
+        "byte-identical re-delivered content was counted as materially new"
+    )
+    assert any(
+        f["branch_time"] == "2026-06-03T09:00:00+00:00" for f in b["wake_ups"]["flagged_repeats"]
+    )
+
+
+def test_the_reconsideration_after_a_rejection_counts_as_materially_new() -> None:
+    """The refusal the world hands back IS new information: the ACT-7
+    reconsideration wake notices the rejection and must never be flagged as a
+    repeat (a live OPEC+ run flagged exactly this wake). And the record of the
+    decision that CAUSED the rejection must not list the rejection among what had
+    been delivered to it — the snapshot is taken before the decision's own
+    consequences apply."""
+
+    data = single_response_world()
+    attempts: list[str] = []
+
+    def decide(ctx: dict[str, Any]) -> dict[str, Any]:
+        if WAKE_OWN_ACTION in str(ctx["why_you_are_deciding_now"]["trigger"]):
+            return act("send_reply", {"answer": "no"})
+        if not attempts:
+            attempts.append("x")
+            return act("send_reply", {"answer": "maybe"})
+        return wait_decision()
+
+    gw = _gateway(decide)
+    _, compiled = _compile_pair(data, gw)
+    result = run(compiled, gw, seed=0)
+
+    rejected = next(d for d in result.actor_decisions if d.validation_status == "rejected")
+    (rejection_ev,) = [e for e in result.event_ledger if e.kind == "action_rejected"]
+    assert rejection_ev.event_id not in rejected.delivered_observation_ids, (
+        "the decision's record credits it with its own consequence"
+    )
+
+    b = compute_temporal_report(result)["branches"]["baseline"]
+    recon = next(t for t in b["wake_ups"]["trail"] if WAKE_OWN_ACTION in t["wake_reason"])
+    assert recon["materially_new_information"] is True, (
+        "the reconsideration wake — which noticed the world's refusal — was not "
+        "credited with new information"
+    )
+    assert rejection_ev.event_id in recon["noticed_event_ids"]
+    assert not any(WAKE_OWN_ACTION in f["wake_reason"] for f in b["wake_ups"]["flagged_repeats"]), (
+        "the required ACT-7 reconsideration was flagged as an inert repeat"
+    )
+
+
+def test_message_counts_reconcile_with_communications_jsonl_rows() -> None:
+    """M1: ``messages.sent`` equals, branch for branch, the number of rows the
+    communications.jsonl writer (``replaycore.extract_communications``) derives
+    from the same run record — one kind set, two consumers."""
+
+    data = scheduled_multiparty_world()
+
+    def decide(ctx: dict[str, Any]) -> dict[str, Any]:
+        if ctx["stage"] == "session":
+            return act("record_position", {"position": "hold"})
+        if ctx["actor_id"] == "member_0":
+            return act("circulate_note", {"text": "a note for the others"})
+        return wait_decision()
+
+    gw = _gateway(decide)
+    _, compiled = _compile_pair(data, gw)
+    result = run(compiled, gw, seed=0)
+    report = compute_temporal_report(result)
+
+    rows = replaycore.extract_communications(result.event_ledger, result.actor_decisions)
+    rows_per_branch: dict[str, int] = {}
+    for row in rows:
+        bid = str(row["branch_id"])
+        rows_per_branch[bid] = rows_per_branch.get(bid, 0) + 1
+    assert rows_per_branch, "no communications extracted at all"
+    for bid, branch_report in report["branches"].items():
+        assert branch_report["messages"]["sent"] == rows_per_branch.get(bid, 0), (
+            f"{bid}: temporal report and communications.jsonl disagree"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -358,6 +539,85 @@ def test_a_future_release_is_not_applied_at_seed_time() -> None:
         assert observed.get("external_signal") == 3.5, (
             f"{d.branch_id}/{d.actor_id} saw the future: {observed}"
         )
+
+
+def test_a_same_instant_deferred_placeholder_never_overwrites_the_hypothesis() -> None:
+    """Adversary regression (probe_tie_flip): the compiled world announces at 06-01
+    that the value WILL be released at 06-09 — an ``at``-stamped deferred
+    ``release_data`` placeholder that lands at the very instant of the branch's own
+    scenario release. This exact shape (process id and hypothesis value found by
+    the probe's search) used to be decided by schedule-entry-id hash order, and the
+    placeholder overwrote the branch's defining condition (final field 3.5 instead
+    of the hypothesized 2.0). The scenario release now carries a dedicated ordering
+    class and fires strictly last at its instant, for every shape."""
+
+    data = scheduled_multiparty_world()
+    data["world_spec"]["external_processes"] = [
+        {
+            "process_id": "signal_release",
+            "description": "announcement now, release later",
+            "occurrences": [
+                {
+                    "at": "2026-06-01T08:00:00+00:00",
+                    "description": "the release is scheduled",
+                    "effects": [
+                        {
+                            "op": "release_data",
+                            "fields": {"external_signal": 3.5},
+                            "at": "2026-06-09T12:00:00+00:00",
+                        }
+                    ],
+                }
+            ],
+            "evidence_claim_ids": ["c_session"],
+        }
+    ]
+    data["uncertainties"] = [
+        {
+            "variable": "external_signal",
+            "why_unknown": "published after the cutoff",
+            "reversal_capable": True,
+            "release_at": "2026-06-09T12:00:00+00:00",
+            "outcomes": [
+                {
+                    "value": "low",
+                    "weight": 0.5,
+                    "provenance": "symmetric_ignorance_assumption",
+                    "field_effects": [["external_signal", 2.0]],
+                },
+                {
+                    "value": "other",
+                    "weight": 0.5,
+                    "provenance": "symmetric_ignorance_assumption",
+                    "field_effects": [["external_signal", 99.0]],
+                },
+            ],
+        }
+    ]
+
+    def decide(ctx: dict[str, Any]) -> dict[str, Any]:
+        if ctx["stage"] == "session":
+            return act("record_position", {"position": "hold"})
+        return wait_decision()
+
+    gw = _gateway(decide)
+    _, compiled = _compile_pair(data, gw)
+    result = run(compiled, gw, seed=0)
+    release_time = datetime.fromisoformat("2026-06-09T12:00:00+00:00")
+
+    for branch_id, world in result.final_worlds.items():
+        want = 2.0 if branch_id.endswith("low") else 99.0
+        releases = [e for e in world.event_history if e.kind == "release_data"]
+        values = [dict(e.payload_dict.get("fields") or {}).get("external_signal") for e in releases]
+        assert all(e.time == release_time for e in releases)
+        # The placeholder DID fire — it is real compiled world, not suppressed —
+        # and the branch's hypothesis fired strictly after it.
+        assert 3.5 in values, f"{branch_id}: the compiled placeholder never fired"
+        assert values[-1] == want, (
+            f"{branch_id}: the placeholder overwrote the branch's defining condition "
+            f"(releases in apply order: {values})"
+        )
+        assert world.get_field("external_signal") == want
 
 
 # ---------------------------------------------------------------------------

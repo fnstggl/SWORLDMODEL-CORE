@@ -11,6 +11,12 @@ what became of every action (started / completed / failed / rejected); what
 became of every message (sent / delivered / noticed / missed); how often
 non-actor processes moved the world; and how often the terminal was checked.
 
+Wake novelty is judged on what the actor actually *noticed* at the wake — never
+on what merely sat delivered-unread in front of it, and never on the decision's
+own consequences — and it is keyed on information *content* (the
+``information_digest`` approach in :mod:`sworldmodel.world`), so byte-identical
+material re-delivered under a fresh event id is not "new".
+
 Nothing here decides anything. The report *measures*; a frozen clock, an
 instant conversation or a causally inert re-invocation is put on the record for
 the realism adversary to reject, never smoothed over.
@@ -25,14 +31,16 @@ from typing import Any
 from .engine import ActorDecisionRecord, RunResult
 from .ids import canonical_json
 from .models import BranchOutcome, Event
+from .replaycore import COMMUNICATION_EVENT_KINDS
 from .world import WorldState
 
 TEMPORAL_REPORT_FILENAME = "temporal_report.json"
 
-# Event kinds that are one participant saying or undertaking something — the
-# communications §11 tracks through sending → delivery → notice. Mirrors the
-# engine's _COMMUNICATION_KINDS.
-_COMM_KINDS = frozenset({"deliver_information", "update_commitment"})
+# The event kinds counted as communications. This is deliberately the SAME set the
+# replay core's ``extract_communications`` uses to build ``communications.jsonl``,
+# so the report's ``messages`` block reconciles row-for-row with that artifact
+# instead of quietly counting a different universe of events.
+_COMM_KINDS = frozenset(COMMUNICATION_EVENT_KINDS)
 
 
 def write_temporal_report(out_dir: Path, result: RunResult) -> None:
@@ -85,7 +93,7 @@ def _branch_report(
         "largest_jump": _largest_jump(timestamps),
         "zero_duration_actions": _zero_duration_actions(events),
         "same_timestamp_communications": _same_timestamp_communications(events, world),
-        "wake_ups": _wake_ups(decisions),
+        "wake_ups": _wake_ups(decisions, events),
         "actions": _actions(events),
         "messages": _messages(events, world),
         "process_updates": _process_updates(events),
@@ -154,33 +162,53 @@ def _same_timestamp_communications(events: list[Event], world: WorldState | None
     return len(instant)
 
 
-def _wake_ups(decisions: list[ActorDecisionRecord]) -> dict[str, Any]:
-    """Wake-ups with and without materially new information (ACT-8 measurement).
+def _content_signature(ev: Event | None, obs_id: str) -> str:
+    """The content identity of one noticed observation.
 
-    A wake carries materially new information when its delivered/noticed
-    observation ids include at least one id no prior wake of the same actor in
-    the same branch had already carried. A repeat wake that adds nothing is
-    counted and *flagged* — measured, never suppressed.
+    The same keying as :meth:`sworldmodel.world.WorldState.information_digest`:
+    kind plus payload, NOT the event id — a cascade's defining property is that it
+    delivers the same sentence under a hundred fresh ids. An id the ledger cannot
+    resolve falls back to the id itself: unresolvable content is never assumed to
+    repeat anything.
     """
 
+    if ev is None:
+        return f"id:{obs_id}"
+    return f"{ev.kind}|{ev.payload!r}"
+
+
+def _wake_ups(decisions: list[ActorDecisionRecord], events: list[Event]) -> dict[str, Any]:
+    """Wake-ups with and without materially new information (ACT-8 measurement).
+
+    A wake carries materially new information when the actor *noticed* something
+    at it whose content no prior wake of the same actor in the same branch had
+    already put before it. Delivered-but-unread material does not count — a wake
+    that happens while a message sits unread is not credited with that message,
+    and the later wake at which the actor actually reads it is. A wake after the
+    actor's first that notices nothing new is counted and *flagged* — measured,
+    never suppressed. The per-wake trail makes every verdict auditable.
+    """
+
+    by_id = {ev.event_id: ev for ev in events}
     seen: dict[str, set[str]] = {}
-    wakes = 0
+    wake_index: dict[str, int] = {}
     with_new = 0
     without_new = 0
     repeated_without_new = 0
     flagged: list[dict[str, Any]] = []
+    trail: list[dict[str, Any]] = []
     for d in decisions:
-        wakes += 1
         prior = seen.setdefault(d.actor_id, set())
-        carried = set(d.delivered_observation_ids) | set(d.noticed_observation_ids)
+        n = wake_index.get(d.actor_id, 0)
+        carried = {_content_signature(by_id.get(i), i) for i in d.noticed_observation_ids}
         novel = carried - prior
         if novel:
             with_new += 1
         else:
             without_new += 1
-            if prior or carried:
-                # A repeat invocation (or one whose entire information set had
-                # already been put before this actor) with nothing materially new.
+            if n > 0:
+                # A repeat invocation at which the actor took in nothing it had
+                # not already been shown — the FD-7 "re-signaled 3×" shape.
                 repeated_without_new += 1
                 flagged.append(
                     {
@@ -190,13 +218,25 @@ def _wake_ups(decisions: list[ActorDecisionRecord]) -> dict[str, Any]:
                         "wake_detail": d.wake_detail,
                     }
                 )
+        trail.append(
+            {
+                "actor_id": d.actor_id,
+                "branch_time": d.branch_time,
+                "wake_reason": d.wake_reason,
+                "materially_new_information": bool(novel),
+                "new_content_count": len(novel),
+                "noticed_event_ids": list(d.noticed_observation_ids),
+            }
+        )
         prior |= carried
+        wake_index[d.actor_id] = n + 1
     return {
-        "total": wakes,
+        "total": len(decisions),
         "with_new_information": with_new,
         "without_new_information": without_new,
         "repeated_without_new_information": repeated_without_new,
         "flagged_repeats": flagged,
+        "trail": trail,
     }
 
 
@@ -213,7 +253,10 @@ def _actions(events: list[Event]) -> dict[str, int]:
 def _messages(events: list[Event], world: WorldState | None) -> dict[str, int]:
     """Sent / delivered / noticed / missed, joined against the branch's own
     delivery records. ``missed`` is delivered-but-never-noticed by the end of the
-    branch — a message that reached someone who never took it in."""
+    branch — a message that reached someone who never took it in. ``sent`` counts
+    exactly the events ``communications.jsonl`` extracts for this branch
+    (``replaycore.COMMUNICATION_EVENT_KINDS``), so the two artifacts reconcile
+    row-for-row."""
 
     comm_ids = {ev.event_id for ev in events if ev.kind in _COMM_KINDS}
     deliveries = (
