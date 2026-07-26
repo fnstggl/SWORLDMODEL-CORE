@@ -296,13 +296,35 @@ def _review_prompt(
             f"EVIDENCE (id | proposition = value [meta]):\n{evidence}",
             f"SEMANTIC PLAN:\n{json.dumps(plan_json, indent=1, default=str)}",
             _REVIEW_CHECKLIST,
+            # Without these standing rules the reviewers fight each other: this one
+            # abstained over a labeled-ignorance uncertainty on a cited anchor — the
+            # exact shape the pre-rollout review is required to honor — so the same
+            # frozen store oscillated between approve-then-destroy and abstain across
+            # runs at temperature zero.
+            """What is already legal in this system — do not abstain over it, and do
+not demand its removal:
+- A future quantity the evidence constrains only qualitatively may be modeled as an
+  uncertainty over a cited present anchor, with alternatives carrying labeled
+  symmetric-ignorance weights. That is the honest shape of not knowing: the runtime
+  reports bounds, not a calibrated point, wherever such weights matter. Where the
+  record quantifies something, the alternative's value must cite it; where it does
+  not, declared ignorance is legal. Prefer REVISE naming what an alternative should
+  be anchored to.
+- An initial state value established by cited pre-cutoff record may already satisfy
+  the terminal (a factual resolution). Attack the citation's sufficiency — does the
+  record establish the outcome as the question means it — never the absence of
+  in-window re-production.
+
+ABSTAIN is only for a question whose outcome has NO cited anchor and NO representable
+producer at all — where every faithful world would have to invent its facts. If a
+faithful-but-bounded world exists, REVISE toward it instead.""",
             """Return JSON:
 {"verdict": "APPROVE" | "REVISE" | "ABSTAIN",
  "reasons": ["<one line per finding>"],
  "corrections": ["<for REVISE: exact semantic corrections, one per line — name the
    object and the change, e.g. 'add entity X because …', 'state Y initial must be
    UNKNOWN because no claim establishes it', 'terminal producer must be Z'>"]}
-ABSTAIN means the evidence cannot support any faithful world for this question.""",
+ABSTAIN means no faithful world exists even after every legal revision above.""",
         ]
     )
 

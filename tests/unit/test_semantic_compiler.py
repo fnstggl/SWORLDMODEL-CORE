@@ -1239,3 +1239,28 @@ def test_the_executable_never_carries_a_naive_timestamp() -> None:
         for key in ("at", "deadline"):
             if node.get(key):
                 assert datetime.fromisoformat(node[key]).tzinfo is not None, (key, node[key])
+
+
+def test_the_plan_reviewer_is_told_the_standing_legitimacy_rules() -> None:
+    """A population run's plan reviewer abstained over a labeled-ignorance uncertainty
+    on a cited anchor — the exact shape the pre-rollout review is required to honor —
+    so the same frozen store oscillated between approve-then-destroy and abstain
+    across temperature-zero runs. The review prompt must carry the standing rules and
+    reserve ABSTAIN for a question with no cited anchor and no representable
+    producer at all."""
+
+    from datetime import datetime
+
+    from sworldmodel.semantic_compile import _review_prompt
+
+    prompt = _review_prompt(
+        "q?",
+        datetime.fromisoformat("2026-07-25T00:00:00+00:00"),
+        datetime.fromisoformat("2026-10-05T00:00:00+00:00"),
+        "c-1 | anchor = 480126",
+        {"resolution": {}, "terminal": {}},
+    )
+    assert "What is already legal in this system" in prompt
+    assert "symmetric-ignorance" in prompt
+    assert "NO cited anchor and NO representable" in prompt
+    assert "REVISE toward it instead" in prompt
