@@ -167,7 +167,9 @@ def main() -> int:
         f"mass: YES {result.resolved_yes_mass:.3f} / NO {result.resolved_no_mass:.3f} / "
         f"unresolved {result.unresolved_mass:.3f}"
     )
-    print(f"branches: {len(result.branch_outcomes)}  wall: {wall:.0f}s  calls: {gateway.call_count}")
+    print(
+        f"branches: {len(result.branch_outcomes)}  wall: {wall:.0f}s  calls: {gateway.call_count}"
+    )
     print(f"tokens: {gateway.total_tokens_in}/{gateway.total_tokens_out}")
     for b in result.branch_outcomes:
         state = b.outcome if b.resolved else f"UNRESOLVED({b.unresolved_reason})"

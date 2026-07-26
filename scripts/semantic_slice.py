@@ -99,24 +99,36 @@ def main() -> int:
                 gateway, args.question, as_of, horizon, view
             )
         else:
-            compilation, _resp = semantic_compile_live(
-                gateway, args.question, as_of, horizon, view
-            )
+            compilation, _resp = semantic_compile_live(gateway, args.question, as_of, horizon, view)
     except (WorldIntegrityError, SWorldModelError) as exc:
         stage = str(getattr(exc, "details", {}).get("failure") or "unknown")
         seconds = time.monotonic() - t0
         print(f"[REFUSED] {args.mode} path stopped: {stage}")
         print(f"          {exc}")
         (out / "refusal.json").write_text(
-            json.dumps({"failure": stage, "message": str(exc), "details": {
-                k: v for k, v in getattr(exc, "details", {}).items()
-                if isinstance(v, (str, int, bool, list))
-            }}, indent=1, default=str)
+            json.dumps(
+                {
+                    "failure": stage,
+                    "message": str(exc),
+                    "details": {
+                        k: v
+                        for k, v in getattr(exc, "details", {}).items()
+                        if isinstance(v, (str, int, bool, list))
+                    },
+                },
+                indent=1,
+                default=str,
+            )
         )
         (out / "metrics.json").write_text(
             json.dumps(
-                _metrics(gateway, mode=args.mode, outcome="refused_compile",
-                         failure=stage, seconds=seconds),
+                _metrics(
+                    gateway,
+                    mode=args.mode,
+                    outcome="refused_compile",
+                    failure=stage,
+                    seconds=seconds,
+                ),
                 indent=1,
             )
         )
@@ -128,14 +140,14 @@ def main() -> int:
     print(f"[plan]    ok in {plan_seconds:.1f}s — review verdict: {review.get('verdict')}")
     for r in (review.get("reasons") or [])[:6]:
         print(f"          · {r}")
-    (out / "semantic_plan.json").write_text(
-        json.dumps(semantic.get("plan"), indent=1, default=str)
-    )
+    (out / "semantic_plan.json").write_text(json.dumps(semantic.get("plan"), indent=1, default=str))
     (out / "semantic_map.json").write_text(
         json.dumps(semantic.get("mapping"), indent=1, default=str)
     )
     (out / "lowered_compilation.json").write_text(
-        json.dumps({k: v for k, v in compilation.items() if k != "_semantic"}, indent=1, default=str)
+        json.dumps(
+            {k: v for k, v in compilation.items() if k != "_semantic"}, indent=1, default=str
+        )
     )
 
     spec_dict = compilation["world_spec"]
@@ -186,13 +198,19 @@ def main() -> int:
         print(f"[GATES]   refused: {details.get('failure') or type(exc).__name__}")
         print(f"          {exc}")
         (out / "gate_refusal.json").write_text(
-            json.dumps({"failure": details.get("failure"), "message": str(exc)}, indent=1, default=str)
+            json.dumps(
+                {"failure": details.get("failure"), "message": str(exc)}, indent=1, default=str
+            )
         )
         (out / "metrics.json").write_text(
             json.dumps(
-                _metrics(gateway, mode=args.mode, outcome="refused_gates",
-                         failure=str(details.get("failure") or type(exc).__name__),
-                         seconds=time.monotonic() - t0),
+                _metrics(
+                    gateway,
+                    mode=args.mode,
+                    outcome="refused_gates",
+                    failure=str(details.get("failure") or type(exc).__name__),
+                    seconds=time.monotonic() - t0,
+                ),
                 indent=1,
             )
         )
@@ -203,8 +221,13 @@ def main() -> int:
     )
     (out / "metrics.json").write_text(
         json.dumps(
-            _metrics(gateway, mode=args.mode, outcome="compiled",
-                     failure="", seconds=time.monotonic() - t0),
+            _metrics(
+                gateway,
+                mode=args.mode,
+                outcome="compiled",
+                failure="",
+                seconds=time.monotonic() - t0,
+            ),
             indent=1,
         )
     )
