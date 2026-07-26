@@ -30,17 +30,66 @@ _PROVENANCE_STRENGTH = {
 
 
 @dataclass(frozen=True)
+class ScenarioRelease:
+    """One moment at which *part* of a branch's hypothesis becomes public.
+
+    A branch that crosses several uncertainties is not one announcement. Each
+    uncertainty's value becomes public when *that* uncertainty's evidence says it does,
+    and the fields it carries are only the fields that release actually reveals.
+
+    ``at is None`` means the evidence never established a timing: the value is a
+    standing condition of the branch from the start of the window, never a dated
+    release at an invented moment.
+    """
+
+    at: datetime | None
+    field_levels: tuple[tuple[str, Any], ...]  # world-field name -> level revealed here
+    conditions: tuple[tuple[str, str], ...]  # (variable, outcome_value) established here
+
+
+@dataclass(frozen=True)
 class Scenario:
+    """One joint hypothesis about the uncertain future, with its release calendar.
+
+    There is deliberately **no** single ``release_at`` on a branch. Collapsing a
+    branch's releases to one moment (the earliest, historically) published every other
+    uncertain value at that borrowed date: two variables dated nineteen days apart both
+    became public on the earlier date, and a variable whose timing the evidence never
+    established was dropped at whatever date its neighbour happened to have. Timing
+    belongs to the uncertainty that has one, so it lives per release in ``releases``.
+    """
+
     scenario_id: str
     weight: float
     provenance: WeightProvenance
     provenance_detail: str
     field_levels: tuple[tuple[str, Any], ...]  # world-field name -> level under this branch
     conditions: tuple[tuple[str, str], ...]  # (variable, outcome_value)
-    # When this branch's uncertain value actually becomes public, if the evidence says.
-    # ``None`` means it is a standing condition of the branch rather than a dated
-    # release: the runtime must not invent a date for it.
-    release_at: datetime | None = None
+    # Every moment at which some part of this branch's hypothesis becomes public,
+    # standing conditions first and then in chronological order.
+    releases: tuple[ScenarioRelease, ...] = ()
+
+    def dated_releases(self, as_of: datetime) -> tuple[ScenarioRelease, ...]:
+        """The releases that must still *fire* inside the run, at their own times.
+
+        A release whose moment lies at or before the cutoff is already public: the
+        branch is born knowing it. Only what is genuinely ahead of the cutoff is
+        scheduled, so the branch state honestly lacks it until then (TMP-4/FD-7).
+        """
+
+        return tuple(
+            r for r in self.releases if r.field_levels and r.at is not None and r.at > as_of
+        )
+
+    def standing_levels(self, as_of: datetime) -> tuple[tuple[str, Any], ...]:
+        """The field levels this branch is born knowing: the ones whose timing the
+        evidence never established, plus the ones already public at the cutoff."""
+
+        levels: dict[str, Any] = {}
+        for rel in self.releases:
+            if rel.at is None or rel.at <= as_of:
+                levels.update(dict(rel.field_levels))
+        return tuple(sorted(levels.items()))
 
 
 @dataclass(frozen=True)
@@ -73,6 +122,13 @@ def weights_grounded(scenario: Scenario) -> bool:
 
 def _weakest(provs: list[WeightProvenance]) -> WeightProvenance:
     return min(provs, key=lambda p: _PROVENANCE_STRENGTH[p])
+
+
+def _release_order(at: datetime | None) -> tuple[int, str]:
+    """Standing conditions (no established timing) first, then chronological. Compared
+    on the ISO string so a naive and an aware stamp never raise mid-sort."""
+
+    return (0, "") if at is None else (1, at.isoformat())
 
 
 def _refuse_unmodeled_dependence(specs: tuple[UncertaintySpec, ...]) -> None:
@@ -144,27 +200,44 @@ def enumerate_scenarios(
         weight = 1.0
         provs: list[WeightProvenance] = []
         details: list[str] = []
-        # Only the genuinely uncertain values travel with the branch. The rest of the
-        # world is already verified and needs no announcement.
-        levels: dict[str, Any] = {}
         conditions: list[tuple[str, str]] = []
+        # Only the genuinely uncertain values travel with the branch, and each travels
+        # with ITS OWN moment. A release date belongs to the uncertainty that has one:
+        # borrowing the earliest across all of them gave a branch a date for a value
+        # whose timing the evidence never established, and published every other value
+        # on that borrowed date too — nineteen simulated days in which actors decided
+        # on information that did not exist yet (FD-7/TMP-4). Grouping by moment, never
+        # merging across moments, is the whole fix.
+        by_moment: dict[datetime | None, dict[str, Any]] = {}
+        conds_by_moment: dict[datetime | None, list[tuple[str, str]]] = {}
         for name, outcome, spec in zip(var_names, combo, specs, strict=True):
             var_total = sum(o.weight.value for o in spec.outcomes)
             weight *= outcome.weight.value / var_total
             provs.append(outcome.weight.provenance)
             details.append(f"{name}={outcome.value}({outcome.weight.provenance.value})")
-            for fld, lvl in outcome.field_effects:
-                levels[fld] = lvl
             conditions.append((name, outcome.value))
+            if not outcome.field_effects:
+                # An outcome that changes no world field announces nothing; it is a
+                # condition of the branch, not a release.
+                continue
+            slot = by_moment.setdefault(spec.release_at, {})
+            for fld, lvl in outcome.field_effects:
+                slot[fld] = lvl
+            conds_by_moment.setdefault(spec.release_at, []).append((name, outcome.value))
         sid = "sc_" + "_".join(f"{n}:{v}" for n, v in conditions)
-        # A release date belongs to the uncertainty that has one. Borrowing the
-        # earliest across all of them would give a branch a date for a value whose
-        # timing the evidence never established.
-        releases = [
-            spec.release_at
-            for spec, outcome in zip(specs, combo, strict=True)
-            if spec.release_at is not None and outcome.field_effects
-        ]
+        releases = tuple(
+            ScenarioRelease(
+                at=moment,
+                field_levels=tuple(sorted(by_moment[moment].items())),
+                conditions=tuple(sorted(conds_by_moment[moment])),
+            )
+            for moment in sorted(by_moment, key=_release_order)
+        )
+        # The branch's end-state levels, folded in the order the world will learn them,
+        # so two uncertainties writing one field agree with what the trajectory does.
+        levels: dict[str, Any] = {}
+        for rel in releases:
+            levels.update(dict(rel.field_levels))
         raw.append(
             Scenario(
                 scenario_id=sid,
@@ -173,7 +246,7 @@ def enumerate_scenarios(
                 provenance_detail="; ".join(details),
                 field_levels=tuple(sorted(levels.items())),
                 conditions=tuple(conditions),
-                release_at=min(releases) if releases else None,
+                releases=releases,
             )
         )
 

@@ -101,6 +101,63 @@ _INTERRUPTING = frozenset(
     }
 )
 
+# What KIND of cause brought the actor back. The distinction is not cosmetic: it is
+# what makes the ACT-8 "repeated without new information" measurement readable.
+#
+# A CALENDAR-driven wake fires because a moment arrived. Arriving at a deadline or a
+# scheduled opportunity with nothing new to read is normal life — a person turning up
+# to a meeting has not learned anything on the way. Volume matters; each instance does
+# not.
+#
+# An INFORMATION-driven wake fires because the world claims something reached this
+# actor. One of those carrying nothing materially new is a defect every time: the
+# runtime asserted an arrival that the actor's own noticed set does not contain.
+#
+# Reporting both under one headline made ACT-8 flag correct behaviour about half the
+# time on a live run, which is how a reader learns to ignore it — and how FD-7 survived
+# its first fix.
+CALENDAR_WAKE_REASONS = frozenset(
+    {
+        WAKE_OPPORTUNITY,
+        WAKE_COMMITMENT,
+        WAKE_PLAN_STEP,
+        WAKE_DEADLINE,
+        WAKE_REVISIT,
+        WAKE_NEED_FAILED,
+    }
+)
+INFORMATION_WAKE_REASONS = frozenset(
+    {
+        WAKE_DIRECTED,
+        WAKE_COMMUNICATION,
+        WAKE_RULE,
+        WAKE_NEED_MET,
+        WAKE_OWN_ACTION,
+    }
+)
+
+WAKE_CAUSE_CALENDAR = "calendar_driven"
+WAKE_CAUSE_INFORMATION = "information_driven"
+WAKE_CAUSE_UNCLASSIFIED = "unclassified"
+
+
+def wake_cause_class(wake_reason: str) -> str:
+    """Classify one recorded ``wake_reason`` as calendar- or information-driven.
+
+    Several causes landing on one actor at one instant are merged into a single wake
+    whose reason is the causes joined by ``+`` (see :func:`_merge_decision_entries`).
+    Such a wake counts as information-driven if ANY of its causes was: the world stated
+    that something reached this actor, and that statement is the one worth checking
+    against what the actor actually noticed.
+    """
+
+    parts = [p for p in wake_reason.split("+") if p]
+    if any(p in INFORMATION_WAKE_REASONS for p in parts):
+        return WAKE_CAUSE_INFORMATION
+    if any(p in CALENDAR_WAKE_REASONS for p in parts):
+        return WAKE_CAUSE_CALENDAR
+    return WAKE_CAUSE_UNCLASSIFIED
+
 
 @dataclass(frozen=True)
 class RunBudget:
@@ -233,18 +290,18 @@ def run(
             # only execute inside ``_event_loop``), and (b) established this branch's
             # hypothesis about its uncertain values: a standing condition (no known
             # release date, or one already public at the cutoff) is applied to world
-            # state right there, while a value whose public release lies in the future
-            # is only *scheduled*, so the branch state honestly lacks it until its
-            # release fires inside the loop (TMP-4). This evaluation must still answer
-            # "what does the terminal say under this branch's conditions if nothing
-            # further happens before the horizon?", so a deferred release is overlaid
-            # onto a throwaway copy for this one evaluation — the world the loop runs
-            # is untouched and still learns the value only at its release time. The
-            # copy's clock is moved to the horizon so the evaluation answers the same
-            # question ``_finalize`` will answer instead of tripping time-window
-            # guards at ``as_of``.
+            # state right there, while every value whose public release lies in the
+            # future is only *scheduled*, each at its own moment, so the branch state
+            # honestly lacks it until its release fires inside the loop (TMP-4). This
+            # evaluation must still answer "what does the terminal say under this
+            # branch's conditions if nothing further happens before the horizon?", so
+            # the deferred releases are overlaid onto a throwaway copy for this one
+            # evaluation — the world the loop runs is untouched and still learns each
+            # value only at its own release time. The copy's clock is moved to the
+            # horizon so the evaluation answers the same question ``_finalize`` will
+            # answer instead of tripping time-window guards at ``as_of``.
             pre_world = world
-            if _deferred_release_at(scenario, world.contract.as_of) is not None:
+            if scenario.dated_releases(world.contract.as_of):
                 pre_world = replace(
                     world,
                     fields=tuple(
@@ -396,71 +453,61 @@ def _seed_branch(
 
     world = world.with_schedule(world.schedule.push(*entries))
 
-    # This branch's hypothesis about an uncertain future value. If the compiler knows
-    # when that value becomes public, it is released THEN — as a scheduled entry the
-    # event loop fires at its real time — so the branch state before the release
-    # honestly lacks the value, the seed never drags the branch clock to the release
-    # date, and everything compiled in between still happens first (TMP-4/FD-7: the
-    # BoE branch collapsed every dated release to t0, deciding the outcome at the
-    # first invocation). A value with no known release date — or one already public
-    # at the cutoff — is a standing condition of the branch from the start. It is
-    # never dropped at an invented midpoint of the forecast window just to give the
-    # world something to react to.
-    if scenario.field_levels:
-        release_at = _deferred_release_at(scenario, as_of)
-        if release_at is not None:
-            world = world.with_schedule(
-                world.schedule.push(
-                    make_entry(
-                        at=release_at,
-                        # The dedicated schedule kind: when the compiled world models
-                        # the release event itself — as an occurrence at the same
-                        # instant OR as a deferred at-stamped placeholder — this
-                        # branch's hypothesis states what that release *revealed*, so
-                        # it must land strictly after everything else scheduled at
-                        # its instant. The schedule's ordering class guarantees that
-                        # structurally; a plain deferred entry used to tie with the
-                        # placeholder and the winner fell to entry-id hash order.
-                        kind=KIND_SCENARIO_RELEASE,
-                        payload={
-                            "op": "release_data",
-                            "params": {"fields": dict(scenario.field_levels)},
-                        },
-                        origin=ORIGIN_EXTERNAL,
-                        origin_detail=f"scenario_release:{scenario.scenario_id}",
-                    )
+    # This branch's hypothesis about its uncertain future values — ONE SCHEDULED ENTRY
+    # PER RELEASE MOMENT, never one merged announcement for the whole branch. Where the
+    # compiler knows when a value becomes public, that value is released THEN, as an
+    # entry the event loop fires at its real time, so the branch state before it
+    # honestly lacks the value and everything compiled in between still happens first
+    # (TMP-4/FD-7: the BoE branch collapsed every dated release to t0 and decided the
+    # outcome at the first invocation). Merging a branch's releases into one moment
+    # reproduced that defect on the merged side: two uncertainties dated nineteen days
+    # apart both fired on the earlier date, and a value whose timing the evidence never
+    # established was published on its neighbour's date. A value with no known release
+    # date — or one already public at the cutoff — is a standing condition of the
+    # branch from the start. It is never dropped at an invented midpoint of the
+    # forecast window just to give the world something to react to.
+    standing = scenario.standing_levels(as_of)
+    if standing:
+        ev = effects.raw_event(
+            world,
+            kind="release_data",
+            actor_id=None,
+            payload={
+                "fields": dict(standing),
+                "epistemic_type": "hypothesis",
+                "branch_conditions": dict(scenario.conditions),
+            },
+            visibility=Visibility.PUBLIC,
+        )
+        world = world.apply([ev])
+        applied = world.event_history[-1]
+        ledger.append(applied)
+        world = _propagate(world, spec, [applied])
+    for rel in scenario.dated_releases(as_of):
+        assert rel.at is not None  # dated_releases filters on it
+        world = world.with_schedule(
+            world.schedule.push(
+                make_entry(
+                    at=rel.at,
+                    # The dedicated schedule kind: when the compiled world models the
+                    # release event itself — as an occurrence at the same instant OR as
+                    # a deferred at-stamped placeholder — this branch's hypothesis
+                    # states what that release *revealed*, so it must land strictly
+                    # after everything else scheduled at its instant. The schedule's
+                    # ordering class guarantees that structurally; a plain deferred
+                    # entry used to tie with the placeholder and the winner fell to
+                    # entry-id hash order.
+                    kind=KIND_SCENARIO_RELEASE,
+                    payload={
+                        "fields": dict(rel.field_levels),
+                        "branch_conditions": dict(rel.conditions),
+                    },
+                    origin=ORIGIN_EXTERNAL,
+                    origin_detail=f"scenario_release:{scenario.scenario_id}@{rel.at.isoformat()}",
                 )
             )
-        else:
-            at = scenario.release_at or as_of
-            ev = effects.raw_event(
-                world.with_time(max(world.time, at)),
-                kind="release_data",
-                actor_id=None,
-                payload={
-                    "fields": dict(scenario.field_levels),
-                    "epistemic_type": "hypothesis",
-                    "branch_conditions": dict(scenario.conditions),
-                },
-                visibility=Visibility.PUBLIC,
-            )
-            world = world.apply([ev])
-            applied = world.event_history[-1]
-            ledger.append(applied)
-            world = _propagate(world, spec, [applied])
+        )
     return world
-
-
-def _deferred_release_at(scenario: Scenario, as_of: datetime) -> datetime | None:
-    """When this branch's uncertain values become public, if that moment still lies
-    ahead of the cutoff — i.e. the release must *fire* during the run, at its own
-    time, rather than stand as a condition the branch was born knowing."""
-
-    if not scenario.field_levels:
-        return None
-    if scenario.release_at is None or scenario.release_at <= as_of:
-        return None
-    return scenario.release_at
 
 
 def _entry_nodes(spec: WorldSpec) -> tuple[ProcessNode, ...]:
@@ -693,10 +740,10 @@ def _dispatch(
         return _fire_process_node(world, spec, entry, effects, ledger)
     if kind == KIND_EXTERNAL:
         return _fire_external(world, spec, entry, effects, ledger)
-    if kind in (KIND_DEFERRED_EFFECT, KIND_SCENARIO_RELEASE):
-        # A scenario release is applied exactly like a deferred effect once its
-        # moment (and its dedicated ordering slot) arrives.
+    if kind == KIND_DEFERRED_EFFECT:
         return _fire_deferred(world, spec, entry, effects, ledger)
+    if kind == KIND_SCENARIO_RELEASE:
+        return _fire_scenario_release(world, spec, entry, effects, ledger)
     if kind == KIND_ACTION_COMPLETION:
         return _complete_action(world, spec, entry, action_exec, ledger)
     if kind == KIND_NOTICE:
@@ -885,6 +932,50 @@ def _fire_deferred(
     for ev in produced:
         ledger.append(ev)
     return _propagate(world, spec, produced, microstep=entry.microstep), produced
+
+
+def _fire_scenario_release(
+    world: WorldState,
+    spec: WorldSpec,
+    entry: ScheduledEntry,
+    effects: EffectExecutor,
+    ledger: list[Event],
+) -> tuple[WorldState, list[Event]]:
+    """Publish one part of this branch's hypothesis, at its own release moment.
+
+    Deliberately not routed through ``_fire_deferred``: a scenario release is branch
+    *construction* arriving on time, not a compiled process moving the world, and the
+    event it writes says so. Carrying the same ``branch_conditions`` /
+    ``epistemic_type`` stamp the standing seed carries is what lets every downstream
+    reader — the §9 temporal report, the replay core's scenario-condition and
+    branch-initial-state reconstruction — tell a branch hypothesis from a process
+    update. Without it a run reported one phantom "process update" per branch, and the
+    forensic replay could not name the conditions of a branch whose hypothesis was
+    dated. ``deferred_release`` distinguishes the two: this value was NOT part of the
+    branch's initial state; the branch learned it here.
+    """
+
+    p = entry.payload_dict
+    fields = dict(p.get("fields") or {})
+    if not fields:
+        return world, []
+    ev = effects.raw_event(
+        world,
+        kind="release_data",
+        actor_id=None,
+        payload={
+            "fields": fields,
+            "epistemic_type": "hypothesis",
+            "branch_conditions": dict(p.get("branch_conditions") or {}),
+            "deferred_release": True,
+        },
+        visibility=Visibility.PUBLIC,
+    )
+    world = world.apply([ev])
+    applied = world.event_history[-1]
+    ledger.append(applied)
+    world = _propagate(world, spec, [applied], microstep=entry.microstep)
+    return world, [applied]
 
 
 def _fire_external(
@@ -1179,6 +1270,59 @@ def _no_feasible_action_record(
     )
 
 
+# An intention the environment accepted and put into the world, as opposed to a wait,
+# a refusal or a failure. Only these mean the actor has actually taken the opportunity.
+_ACTED_STATUSES = frozenset({"started", "executed"})
+
+
+def _cancel_answered_deadline(
+    world: WorldState,
+    entry: ScheduledEntry,
+    reason: str,
+    status: str,
+    before: ActorState,
+    after: ActorState,
+) -> WorldState:
+    """Drop a node's deadline wake for a participant that already exercised it.
+
+    Firing a process node queues two things per participant: the *opportunity* to act
+    now, and a wake when the node's deadline arrives. A deadline exists to catch the
+    participant who has not yet done the thing. Once an actor has done it — its
+    intention was accepted and is in the world — the deadline wake asks the same actor
+    the same question about the same node on the same evidence, and a live run's audit
+    duly flagged exactly that: a second ``deadline_reached`` invocation the same day,
+    after the actor had already acted, with no state change between the two.
+
+    Deliberately narrow. An actor that *declined* the opportunity keeps its deadline: a
+    closing window is real news to someone who has not acted, and "it is now or never"
+    is a cause to reconsider, not a repeat. An actor that asked to be brought back keeps
+    it too — its own revisit condition is honoured over this cancellation. And nothing
+    information-driven is ever cancelled here: a message, a directed answer or a
+    compiled wake rule reaches it regardless. Only the redundant calendar copy of an
+    opportunity already taken is removed.
+    """
+
+    if status not in _ACTED_STATUSES:
+        return world
+    if WAKE_OPPORTUNITY not in reason.split("+"):
+        return world
+    node_id = str(entry.payload_dict.get("node_id", ""))
+    if not node_id:
+        return world
+    if after.revisit_conditions != before.revisit_conditions:
+        return world
+    aid = after.actor_id
+    return world.with_schedule(
+        world.schedule.drop(
+            lambda e: (
+                e.kind == KIND_DEADLINE
+                and e.actor_id == aid
+                and str(e.payload_dict.get("node_id", "")) == node_id
+            )
+        )
+    )
+
+
 def _invoke_actor(
     world: WorldState,
     spec: WorldSpec,
@@ -1285,6 +1429,9 @@ def _invoke_actor(
         )
     if follow:
         world = world.with_schedule(world.schedule.push(*follow))
+    world = _cancel_answered_deadline(
+        world, entry, reason, outcome.status, actor, world.actors[aid]
+    )
 
     responses = result.responses + list(outcome.gateway_responses)
     gw = [r for r in responses if hasattr(r, "prompt_hash")]
@@ -1405,7 +1552,15 @@ def _propagate(
 
 # Event kinds that are a *person saying or undertaking something*, as opposed to the
 # world changing. Only these make another participant's act inherently worth noticing.
-_COMMUNICATION_KINDS = frozenset({"deliver_information", "update_commitment"})
+#
+# This is the runtime's own definition of a communication, and it is the one the §9
+# temporal report counts, because this module is what decides it: these kinds are what
+# make ``_relevance`` wake a recipient, and the delivery records any message counter
+# joins against are written here. Counting a different set produced a report that
+# disagreed with the mechanism it was describing — most visibly the terminal's own
+# ``create_event`` result line, which is not addressed to anyone, is never propagated,
+# and inflated "messages sent" by exactly one per branch on every run.
+COMMUNICATION_KINDS = frozenset({"deliver_information", "update_commitment"})
 
 # Event kinds that carry observable content. Bookkeeping kinds (an action starting, an
 # attempt being refused) are private to the acting actor and are handled separately.
@@ -1471,7 +1626,7 @@ def _relevance(
     # everyone — which is not true of a data release or a record being filed. Those stay
     # ambient unless a compiled wake rule says otherwise.
     for ev in events:
-        if ev.actor_id and ev.actor_id in world.actors and ev.kind in _COMMUNICATION_KINDS:
+        if ev.actor_id and ev.actor_id in world.actors and ev.kind in COMMUNICATION_KINDS:
             return (
                 WAKE_COMMUNICATION,
                 f"{ev.actor_id} communicated: {str(ev.payload_dict.get('text', ''))[:120]}",

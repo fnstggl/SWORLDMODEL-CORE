@@ -75,6 +75,20 @@ personally inspects real-run artifacts before closing anything.
   `forecast-integrity` after the run directory is sealed. Honest caveat, recorded:
   model weights know famous past events; the mechanical seal is cutoff-enforced
   stores, universality invariants (no case-specific code), and preregistered scoring.
+- **D10 A closing deadline is real news; the measurement adapts, not the behavior.**
+  CTO ruling on FD-18(1). A node's deadline entry is cancelled only for a participant
+  that already EXERCISED the opportunity (its intention was accepted into the world),
+  never merely for one that answered and declined. Waking an actor because its window
+  is closing is legitimate causal information — "now or never" is a real reason to
+  reconsider — and three standing invariants (test_scheduling: a deadline wakes the
+  participants, plan identity survives revision; test_no_coercion: a failed completion
+  takes no effect) encode that contract deliberately. Those invariants are NOT
+  retargeted. The honest fix for the noise the adversary measured is FD-18(2): the
+  repeat counter splits calendar-driven wakes from information-driven ones, so
+  "the clock moved" is never reported as "someone re-signaled and taught nothing".
+  Rule of thumb this instantiates: when a measurement calls correct behavior a defect,
+  fix the measurement — never bend the world to satisfy it.
+
 - **D9 Reclassified prior results.** Tesla 50% = invalid forecast
   (BRANCH_WEIGHTS_DOMINATED, one-step world). BoE 25% = valid causal pathway,
   invalid calibrated number. OPEC+ 100% = factual lookup with an unadjudicated

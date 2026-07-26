@@ -95,6 +95,18 @@ timestamp. Bounded exchanges drain and pass; a self-sustaining one is stopped an
 reported unresolved, which is correct — but the underlying cause is that the compiler did
 not give the messages realistic delays, and nothing currently pushes it to.
 
+**The ACT-8 wake-novelty content key is exact, not canonical.**
+`temporal_report._content_signature` keys an observation on `kind` plus `repr(payload)`,
+which is what stops a cascade re-sending one sentence under a hundred fresh event ids
+from reading as a hundred new facts. It is not a semantic or numeric canonicalization:
+two payloads differing only in nested-dict insertion order, `1` versus `1.0`, `0.30`
+versus `0.3`, or `please reply` versus `Please reply.` all read as *different* content.
+Every one of those errs towards crediting a wake with new information, i.e. towards
+*under*-flagging repeats — the direction that flatters the runtime — so ACT-8's
+`repeated_without_new_information` is a lower bound, never an inflated one. The same list
+is emitted in every `temporal_report.json` under `known_limitations`, so the number and
+its limits travel together.
+
 ## Retrieval (this run)
 
 **Jina Reader and Search require a funded key.** The key present returns HTTP 402

@@ -29,10 +29,12 @@ from sworldmodel.compiled import CompiledWorld
 from sworldmodel.engine import (
     WAKE_DIRECTED,
     WAKE_OWN_ACTION,
+    WAKE_RULE,
     RunResult,
     run,
 )
 from sworldmodel.models import Event, ResolutionContract, Visibility
+from sworldmodel.temporal_report import compute_temporal_report
 from sworldmodel.world_compiler import compile_world
 
 AS_OF = datetime.fromisoformat(AS_OF_S)
@@ -505,3 +507,427 @@ def test_act7_rejected_action_is_recorded_and_reconsidered_at_the_next_wake() ->
     assert reply["value"] == "no"
     (outcome,) = result.branch_outcomes
     assert outcome.resolved and outcome.outcome == "NO"
+
+
+# ---------------------------------------------------------------------------
+# Staged-release harness: two actors, real message traffic, and two uncertainties
+# whose evidence dates them nineteen days apart (ACT-5/6, TMP-4, COM-1)
+# ---------------------------------------------------------------------------
+
+EARLY_RELEASE = "2026-06-01T09:00:00+00:00"
+LATE_RELEASE = "2026-06-20T09:00:00+00:00"
+
+
+def staged_release_exchange_world() -> dict[str, Any]:
+    """A world the live geopolitical run could not be: two people who reach each other
+    only by sending things, and TWO uncertain published figures with DIFFERENT release
+    dates.
+
+    The live Phase-2 run had one actor, no message traffic at all and a single
+    uncertainty, so it could not tell a fixed release calendar from a merged one, nor a
+    working communication counter from a broken one — every branch looked the same
+    whichever way the runtime behaved. Here the analyst can only learn the early figure
+    when it is published, can only tell the decider by sending a note that takes real
+    time to arrive and be read, and the decider's own figure is not published until
+    nineteen days later. A runtime that merges the two releases, or that publishes an
+    undated value at a neighbour's date, produces a visibly different world.
+    """
+
+    def entity(eid: str, name: str, role: str, authority: list[str]) -> dict[str, Any]:
+        return {
+            "entity_id": eid,
+            "name": name,
+            "kind": "person",
+            "is_actor": True,
+            "role": role,
+            "authority": authority,
+            "representation_scale": "individual",
+            "evidence_claim_ids": [f"c_{eid}"],
+        }
+
+    return {
+        "reality": {
+            "as_of": AS_OF_S,
+            "horizon": HORIZON_S,
+            "subject_entity": "the determination",
+            "resolution_units": "a recorded determination",
+            "target_outcome": "the decider records go",
+            "expected_participants": 2,
+        },
+        "claims": [
+            _claim("c_analyst", "the analyst's role and mandate are documented"),
+            _claim("c_decider", "the decider's role and mandate are documented"),
+            _claim("c_early", f"the early figure is published on {EARLY_RELEASE}"),
+            _claim("c_late", f"the confirming figure is published on {LATE_RELEASE}"),
+        ],
+        "world_spec": {
+            "title": "a staged two-figure determination",
+            "subject_entity": "the determination",
+            "resolution_units": "a recorded determination",
+            "entities": [
+                entity("analyst", "The Analyst", "analyst", ["report"]),
+                entity("decider", "The Decider", "decider", ["determine"]),
+            ],
+            "actors": [
+                {
+                    "entity_id": "analyst",
+                    "reasoning": "reports a published figure to the decider once it exists",
+                    "memory_seeds": [
+                        {
+                            "content": "I pass published figures on as soon as they exist.",
+                            "kind": "episodic",
+                            "importance": 0.8,
+                            "evidence_claim_ids": ["c_analyst"],
+                        }
+                    ],
+                },
+                {
+                    "entity_id": "decider",
+                    "reasoning": "determines once the confirming figure is out",
+                    "memory_seeds": [
+                        {
+                            "content": "I do not determine before the confirming figure exists.",
+                            "kind": "episodic",
+                            "importance": 0.8,
+                            "evidence_claim_ids": ["c_decider"],
+                        }
+                    ],
+                },
+            ],
+            "fields": [],
+            "actions": [
+                {
+                    "action_id": "report_reading",
+                    "meaning": "send the decider what the early figure turned out to be",
+                    "eligible_actors": ["analyst"],
+                    "required_authority": ["report"],
+                    "parameters": [{"name": "text", "type": "string", "required": True}],
+                    "duration_seconds": 1800,
+                    "delivery_delay_seconds": 3600,
+                    "notice_delay_seconds": 1800,
+                    "effects": [
+                        {"op": "deliver_information", "to": ["decider"], "text": "$param.text"}
+                    ],
+                    "evidence_claim_ids": ["c_early"],
+                },
+                {
+                    "action_id": "record_determination",
+                    "meaning": "record the determination",
+                    "eligible_actors": ["decider"],
+                    "required_authority": ["determine"],
+                    "parameters": [
+                        {
+                            "name": "call",
+                            "type": "option",
+                            "required": True,
+                            "choices": ["go", "hold"],
+                        }
+                    ],
+                    "duration_seconds": 900,
+                    "effects": [
+                        {
+                            "op": "append_record",
+                            "collection": "determinations",
+                            "key": "$actor",
+                            "value": "$param.call",
+                        }
+                    ],
+                    "evidence_claim_ids": ["c_late"],
+                },
+            ],
+            "process": {
+                "nodes": [
+                    {
+                        "node_id": "determination",
+                        "stage": "determination",
+                        "at": "2026-06-21T09:00:00+00:00",
+                        "description": "the decider makes the call",
+                        "participants": ["decider"],
+                        "action_ids": ["record_determination"],
+                    }
+                ]
+            },
+            "wake_rules": [
+                {
+                    "rule_id": "early_figure_reaches_the_analyst",
+                    "wakes": ["analyst"],
+                    "reason": "the early figure has been published",
+                    "on_field_change": "early_signal",
+                },
+                {
+                    "rule_id": "late_figure_reaches_the_decider",
+                    "wakes": ["decider"],
+                    "reason": "the confirming figure has been published",
+                    "on_field_change": "late_signal",
+                },
+            ],
+            "terminal": {
+                "yes_when": {
+                    "op": "greater_or_equal",
+                    "args": [
+                        {
+                            "op": "count",
+                            "args": [
+                                "determinations",
+                                {"op": "equals", "args": [{"op": "item", "args": ["value"]}, "go"]},
+                            ],
+                        },
+                        1,
+                    ],
+                },
+                "unresolved_when": {
+                    "op": "less_than",
+                    "args": [{"op": "count", "args": ["determinations"]}, 1],
+                },
+                "description": "YES when the decider records go",
+            },
+        },
+        "uncertainties": [
+            {
+                "variable": "early_signal",
+                "why_unknown": "the early figure is published after the cutoff",
+                "reversal_capable": True,
+                "release_at": EARLY_RELEASE,
+                "evidence_claim_ids": ["c_early"],
+                "outcomes": [
+                    {
+                        "value": "high",
+                        "weight": 0.5,
+                        "provenance": "symmetric_ignorance_assumption",
+                        "field_effects": [["early_signal", 9.0]],
+                    },
+                    {
+                        "value": "low",
+                        "weight": 0.5,
+                        "provenance": "symmetric_ignorance_assumption",
+                        "field_effects": [["early_signal", 1.0]],
+                    },
+                ],
+            },
+            {
+                "variable": "late_signal",
+                "why_unknown": "the confirming figure is published nineteen days later",
+                "reversal_capable": True,
+                "release_at": LATE_RELEASE,
+                "evidence_claim_ids": ["c_late"],
+                "outcomes": [
+                    {
+                        "value": "high",
+                        "weight": 0.5,
+                        "provenance": "symmetric_ignorance_assumption",
+                        "field_effects": [["late_signal", 9.0]],
+                    },
+                    {
+                        "value": "low",
+                        "weight": 0.5,
+                        "provenance": "symmetric_ignorance_assumption",
+                        "field_effects": [["late_signal", 1.0]],
+                    },
+                ],
+            },
+        ],
+    }
+
+
+def staged_release_decisions(ctx: dict[str, Any]) -> dict[str, Any]:
+    """The scripted script for :func:`staged_release_exchange_world`.
+
+    Each actor answers only from what it can actually see: the analyst reports the
+    early figure once it is in its own observed fields, and the decider calls it only
+    once the confirming figure is in its. Nothing here inspects the branch id — an
+    actor that can see the future would betray itself by acting early.
+    """
+
+    fields = ctx.get("observed_fields") or {}
+    trigger = str(ctx["why_you_are_deciding_now"]["trigger"])
+    if ctx["actor_id"] == "analyst":
+        # Reports at the wake the publication itself caused — nothing test-side keeps
+        # track of whether it has already reported, because branches run concurrently
+        # and shared state would let one branch answer for another.
+        if WAKE_RULE in trigger and "early_signal" in fields:
+            return act(
+                "report_reading",
+                {"text": f"the early figure is {fields['early_signal']}"},
+                reasoning="the early figure is out; it must be passed on",
+            )
+        return wait_decision("nothing to report")
+    if ctx["stage"] == "determination" and "late_signal" in fields:
+        call = "go" if float(fields["late_signal"]) > 5 else "hold"
+        return act("record_determination", {"call": call}, reasoning="both figures are in")
+    return wait_decision("not both figures are in")
+
+
+def test_staged_release_harness_runs_the_whole_production_path() -> None:
+    """The harness the live Phase-2 run could not be: two actors, real message
+    traffic, two uncertainties dated nineteen days apart — one real compilation, one
+    real run, all four branches.
+
+    It is here because the live geopolitical run could not discriminate a fix from
+    the bug it was meant to prove: one actor, zero messages and a single uncertainty
+    produce the same artifacts whether releases are merged or separate and whether the
+    message counters work or not. This world's branches differ in what each actor
+    could see, when, and what it sent as a result.
+    """
+
+    gw = _gateway(staged_release_decisions)
+    result = run(_compile(staged_release_exchange_world(), gw), gw, seed=0)
+    early = datetime.fromisoformat(EARLY_RELEASE)
+    late = datetime.fromisoformat(LATE_RELEASE)
+
+    assert set(result.final_worlds) == {
+        "sc_early_signal:high_late_signal:high",
+        "sc_early_signal:high_late_signal:low",
+        "sc_early_signal:low_late_signal:high",
+        "sc_early_signal:low_late_signal:low",
+    }
+
+    for branch_id, world in result.final_worlds.items():
+        # TMP-4: each figure became public at its OWN date, carrying only itself.
+        hyps = [
+            (e.time, dict(e.payload_dict.get("fields") or {}))
+            for e in world.event_history
+            if e.kind == "release_data"
+        ]
+        assert [t for t, _ in hyps] == [early, late], f"{branch_id}: {hyps}"
+        assert set(hyps[0][1]) == {"early_signal"} and set(hyps[1][1]) == {"late_signal"}
+
+        # ACT-5/ACT-6/COM-1: the analyst learned the early figure, sent it, and the
+        # decider received it — send, delivery and notice at three different times.
+        (note,) = [e for e in world.event_history if e.kind == "deliver_information"]
+        assert note.actor_id == "analyst"
+        assert str(hyps[0][1]["early_signal"]) in str(note.payload_dict.get("text", ""))
+        (delivery,) = [d for d in world.deliveries if d.event_id == note.event_id]
+        assert delivery.actor_id == "decider"
+        assert note.time < delivery.available_at < delivery.noticed_at
+
+        # The determination used the LATE figure, so it could not have been made
+        # before that figure existed.
+        (determination,) = world.get_records("determinations")
+        assert determination["time"] > late
+        want = "go" if hyps[1][1]["late_signal"] > 5 else "hold"
+        assert determination["value"] == want, f"{branch_id}: decided on the wrong figure"
+
+    # No actor saw the later figure before it was published — checked on what each
+    # decision was actually shown.
+    for d in result.actor_decisions:
+        if datetime.fromisoformat(d.branch_time) < late:
+            assert "late_signal" not in d.decision_context.get("observed_fields", {}), (
+                f"{d.branch_id}/{d.actor_id}@{d.branch_time} read an unpublished figure"
+            )
+
+    # The branches genuinely disagree — the run is not four copies of one trajectory.
+    outcomes = {b.branch_id: b.outcome for b in result.branch_outcomes}
+    assert set(outcomes.values()) == {"YES", "NO"}
+
+    report = compute_temporal_report(result)
+    for branch in report["branches"].values():
+        # Two hypothesis releases per branch, and NOT a single process update: this
+        # world's processes move nothing on their own.
+        assert branch["scenario_releases"] == 2
+        assert branch["process_updates"] == 0
+        # One message, one recipient, delivered and read: sent and delivered agree
+        # because they are now the same unit.
+        assert branch["messages"] == {
+            "send_events": 1,
+            "sent": 1,
+            "delivered": 1,
+            "undelivered": 0,
+            "noticed": 1,
+            "missed": 0,
+        }
+        # Real delays were compiled, so nothing was noticed the instant it was sent.
+        assert branch["same_timestamp_communications"] == 0
+
+
+def test_a_deadline_does_not_re_ask_a_participant_who_already_acted() -> None:
+    """FD-18: a node queues both an opportunity and a deadline wake per participant.
+    An actor that took the opportunity has done the thing the deadline exists to
+    catch; waking it again about the same node, the same day, with nothing changed in
+    between is the duplicate the live run's audit flagged. An actor that DECLINED the
+    opportunity still gets its deadline — a closing window is real news to someone who
+    has not acted."""
+
+    data = single_response_world(reply_deadline="2026-05-20T18:00:00+00:00")
+
+    def act_at_once(ctx: dict[str, Any]) -> dict[str, Any]:
+        if ctx["current_action"] is None and ctx["last_decision_time"] is None:
+            return act("send_reply", {"answer": "yes"})
+        return wait_decision("already replied")
+
+    gw = _gateway(act_at_once)
+    acted_run = run(_compile(data, gw), gw, seed=0)
+    wakes = [(d.branch_time, d.wake_reason) for d in acted_run.actor_decisions]
+    assert any(d.validation_status == "started" for d in acted_run.actor_decisions), (
+        "probe shape lost: the actor never took the opportunity"
+    )
+    assert not any("deadline_reached" in reason for _, reason in wakes), (
+        f"the actor was re-asked at the deadline after already acting: {wakes}"
+    )
+
+    # The same world, same deadline — but the actor waits. The deadline still reaches
+    # it, and the report attributes the repeat to the calendar, not to a phantom
+    # arrival of information.
+    gw2 = _gateway(lambda ctx: wait_decision("not yet"))
+    waited_run = run(_compile(data, gw2), gw2, seed=0)
+    waited = [(d.branch_time, d.wake_reason) for d in waited_run.actor_decisions]
+    assert any("deadline_reached" in reason for _, reason in waited), (
+        f"a participant that had NOT acted was never woken at the deadline: {waited}"
+    )
+    flagged = compute_temporal_report(waited_run)["branches"]["baseline"]["wake_ups"]
+    assert flagged["repeated_without_new_information_by_cause"]["information_driven"] == 0
+    assert flagged["repeated_without_new_information_by_cause"]["calendar_driven"] >= 1
+
+
+def test_the_act8_headline_separates_calendar_repeats_from_phantom_arrivals() -> None:
+    """FD-18(2): ACT-8's headline number splits by wake cause.
+
+    An information-driven repeat is a defect every time — the world said something
+    reached this actor and the actor's own noticed set is empty of it. A calendar-driven
+    repeat is a deadline or an opportunity arriving with nothing new, which is ordinary
+    life. Reported under one number, a live run's "8 of 12 wakes repeated without new
+    information" was about half false alarms, and a number that is half false alarms is
+    a number readers stop reading.
+    """
+
+    data = two_actor_exchange_world()
+    # A calendar wake for the reviewer long after everything has been said and read.
+    data["world_spec"]["process"]["nodes"].append(
+        {
+            "node_id": "reviewer_diary",
+            "stage": "correspondence",
+            "at": "2026-06-15T09:00:00+00:00",
+            "description": "the reviewer looks at their calendar",
+            "participants": ["reviewer"],
+            "action_ids": ["send_answer"],
+        }
+    )
+
+    def decide(ctx: dict[str, Any]) -> dict[str, Any]:
+        if ctx["actor_id"] == "proposer":
+            if ctx["current_action"] is None and not ctx["observations"]:
+                return act("send_request", {"text": "please confirm the figure by Friday"})
+            return wait_decision("waiting")
+        if any("please confirm" in o["summary"] for o in ctx["observations"]):
+            return act("send_answer", {"answer": "yes"})
+        return wait_decision("nothing has reached me")
+
+    gw = _gateway(decide)
+    result = run(_compile(data, gw), gw, seed=0)
+    wake_ups = compute_temporal_report(result)["branches"]["baseline"]["wake_ups"]
+
+    diary = [
+        f
+        for f in wake_ups["flagged_repeats"]
+        if f["actor_id"] == "reviewer" and f["branch_time"].startswith("2026-06-15")
+    ]
+    assert diary, "probe shape lost: the late diary wake was not a flagged repeat"
+    assert diary[0]["cause_class"] == "calendar_driven"
+    by_cause = wake_ups["repeated_without_new_information_by_cause"]
+    assert sum(by_cause.values()) == wake_ups["repeated_without_new_information"], (
+        f"the split does not account for every flagged repeat: {by_cause}"
+    )
+    assert by_cause["calendar_driven"] >= 1
+    assert by_cause["unclassified"] == 0, (
+        f"a wake cause the split does not know about: "
+        f"{[f['wake_reason'] for f in wake_ups['flagged_repeats']]}"
+    )

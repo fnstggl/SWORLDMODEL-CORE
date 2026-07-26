@@ -32,6 +32,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any
 
+from .errors import WorldIntegrityError
 from .ids import content_id
 
 # Why an entry exists. Provenance is recorded on every entry and surfaced in the trace.
@@ -149,6 +150,41 @@ def make_entry(
     )
 
 
+def _refuse_ambiguous_release_instant(entries: tuple[ScheduledEntry, ...]) -> None:
+    """Refuse two scenario releases queued at one instant.
+
+    The ordering class puts the scenario release last within its instant, which settles
+    hypothesis-vs-compiled-placeholder collisions structurally. It does NOT order two
+    hypothesis releases against *each other*: they share ``(at, class, microstep,
+    kind)`` and fall through to entry-id hash order, so which of two announcements
+    wrote the last value would be decided by a content hash — the exact defect the
+    ordering class was introduced to remove, one refactor away from returning.
+
+    The branch builder groups a scenario's releases by moment precisely so this cannot
+    arise (:meth:`sworldmodel.uncertainty.Scenario.dated_releases`). If it ever does,
+    the run stops here rather than publishing a hash-decided world.
+    """
+
+    seen: dict[datetime, ScheduledEntry] = {}
+    for e in entries:
+        if e.kind != KIND_SCENARIO_RELEASE:
+            continue
+        other = seen.get(e.at)
+        if other is not None:
+            raise WorldIntegrityError(
+                "two scenario releases are queued at the same instant "
+                f"({e.at.isoformat()}); which one writes the branch's final value "
+                "would be decided by entry-id hash order, not by the world. Group a "
+                "branch's releases by release moment before scheduling them.",
+                details={
+                    "at": e.at.isoformat(),
+                    "first": other.origin_detail,
+                    "second": e.origin_detail,
+                },
+            )
+        seen[e.at] = e
+
+
 @dataclass(frozen=True)
 class Schedule:
     """An immutable, deterministically ordered set of pending entries.
@@ -173,6 +209,8 @@ class Schedule:
         if not added:
             return self
         merged = tuple(sorted(self.entries + tuple(added), key=lambda e: e.sort_key()))
+        if any(e.kind == KIND_SCENARIO_RELEASE for e in added):
+            _refuse_ambiguous_release_instant(merged)
         return replace(self, entries=merged)
 
     def drop(self, predicate: Any) -> Schedule:

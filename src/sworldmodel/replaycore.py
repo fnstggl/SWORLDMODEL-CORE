@@ -348,12 +348,20 @@ def branch_initial_state(
     branch's own scenario ``release_data`` event (the one carrying
     ``branch_conditions``). A declared field neither initialized nor conditioned reads
     ``None`` — it is present, honestly unset, never invented.
+
+    A branch hypothesis whose release is *dated* is stamped ``deferred_release`` and is
+    excluded: the branch did not start out knowing that value, it learned it when the
+    release fired, and folding it in here would restate the initial state as if the
+    future had already happened. Records written before that stamp existed carry no
+    such key and are read exactly as before.
     """
 
     state: dict[str, Any] = dict(world_initials or {})
     for e in events:
         payload = event_payload(e)
         if event_kind(e) == "release_data" and "branch_conditions" in payload:
+            if payload.get("deferred_release"):
+                continue
             released = payload.get("fields") or {}
             if isinstance(released, Mapping):
                 for k, v in released.items():

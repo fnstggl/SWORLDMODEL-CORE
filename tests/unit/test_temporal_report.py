@@ -13,17 +13,25 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from _fakes import ProgrammableGateway, act, build_bundle, wait_decision
 from _worlds import AS_OF as AS_OF_S
 from _worlds import HORIZON as HORIZON_S
 from _worlds import scheduled_multiparty_world, single_response_world
-from sworldmodel import replaycore
 from sworldmodel.compiled import CompiledWorld
 from sworldmodel.engine import WAKE_OWN_ACTION, RunResult, run
+from sworldmodel.errors import WorldIntegrityError
 from sworldmodel.ids import canonical_json
 from sworldmodel.models import ResolutionContract
 from sworldmodel.outcomes import aggregate
 from sworldmodel.rundir import PIPELINE_ARTIFACTS, prepare_run_dir
+from sworldmodel.schedule import (
+    KIND_SCENARIO_RELEASE,
+    ORIGIN_EXTERNAL,
+    Schedule,
+    make_entry,
+)
 from sworldmodel.temporal_report import (
     TEMPORAL_REPORT_FILENAME,
     compute_temporal_report,
@@ -134,21 +142,40 @@ def test_every_section9_counter_on_a_known_run() -> None:
     (flag,) = b["wake_ups"]["flagged_repeats"]
     assert flag["actor_id"] == "recipient"
     assert flag["branch_time"] == "2026-06-05T08:00:00+00:00"
+    # ...and the repeat is attributed to the cause that produced it: the actor's own
+    # revisit condition and the node deadline are both moments arriving, not the world
+    # claiming something reached it.
+    assert flag["cause_class"] == "calendar_driven"
+    assert b["wake_ups"]["repeated_without_new_information_by_cause"] == {
+        "calendar_driven": 1,
+        "information_driven": 0,
+        "unclassified": 0,
+    }
 
     # The novelty trail makes both verdicts auditable, wake by wake.
     trail = b["wake_ups"]["trail"]
     assert [t["materially_new_information"] for t in trail] == [True, False]
+    assert [t["cause_class"] for t in trail] == ["information_driven", "calendar_driven"]
 
-    # Every action accounted for; every message accounted for. ``sent`` counts the
-    # exact kinds communications.jsonl extracts (deliver_information + create_event
-    # here: the request and the terminal's result_recorded line), so the two
-    # artifacts reconcile row-for-row.
+    # Every action accounted for; every message accounted for, in ONE unit. The single
+    # request was addressed to one recipient, so one send event is one (message,
+    # recipient) pair, which is what delivered/noticed/missed have always counted. The
+    # terminal's own result_recorded line is not a message and does not appear here.
     assert b["actions"] == {"started": 1, "completed": 1, "failed": 0, "rejected": 0}
-    assert b["messages"] == {"sent": 2, "delivered": 1, "noticed": 1, "missed": 0}
+    assert b["messages"] == {
+        "send_events": 1,
+        "sent": 1,
+        "delivered": 1,
+        "undelivered": 0,
+        "noticed": 1,
+        "missed": 0,
+    }
 
-    # The request's arrival is the one non-actor process update; the terminal was
-    # checked once before anything ran and recorded once at the end.
+    # The request's arrival is the one non-actor process update; this branch has no
+    # uncertainty, so nothing of its own was released; the terminal was checked once
+    # before anything ran and recorded once at the end.
     assert b["process_updates"] == 1
+    assert b["scenario_releases"] == 0
     assert b["terminal_checks"] == {"pre_simulation": 1, "final_recorded": 1}
 
     # Run totals are the branch totals for a one-branch run.
@@ -157,8 +184,15 @@ def test_every_section9_counter_on_a_known_run() -> None:
     assert r["distinct_timestamps"] == 4
     assert r["largest_jump_seconds"] == 1783799.0
     assert r["wake_ups"]["repeated_without_new_information"] == 1
+    assert r["wake_ups"]["repeated_without_new_information_by_cause"] == {
+        "calendar_driven": 1,
+        "information_driven": 0,
+        "unclassified": 0,
+    }
     assert r["actions"] == b["actions"]
     assert r["messages"] == b["messages"]
+    # The content key ACT-8 rests on ships its own limits with every report.
+    assert report["known_limitations"]["wake_novelty_content_key"]
 
 
 def test_zero_duration_actions_are_counted() -> None:
@@ -277,14 +311,32 @@ def test_the_report_is_computed_per_branch_and_totalled() -> None:
     assert set(report["branches"]) == {"sc_external_signal:high", "sc_external_signal:low"}
     high = report["branches"]["sc_external_signal:high"]
     low = report["branches"]["sc_external_signal:low"]
-    # Only the high branch had a note circulated. A circulated note is two
-    # communications.jsonl rows (its deliver_information and its note_circulated
-    # create_event), and the report counts exactly those kinds.
-    assert high["messages"]["sent"] == low["messages"]["sent"] + 2
+    # Only the high branch had a note circulated: one send event, reaching the four
+    # other members — four (message, recipient) pairs, the same unit `delivered`
+    # counts. The note's accompanying note_circulated record is not a message.
+    assert low["messages"] == {
+        "send_events": 0,
+        "sent": 0,
+        "delivered": 0,
+        "undelivered": 0,
+        "noticed": 0,
+        "missed": 0,
+    }
+    assert high["messages"]["send_events"] == 1
+    assert high["messages"]["sent"] == 4
+    assert high["messages"]["delivered"] == high["messages"]["sent"]
     assert high["wake_ups"]["total"] > low["wake_ups"]["total"]
+    # Each branch released its own hypothesis once, at the release date — counted as
+    # branch construction, never as a process update. The one process update per
+    # branch is the compiled external occurrence.
+    for branch in (high, low):
+        assert branch["scenario_releases"] == 1
+        assert branch["process_updates"] == 1
     run_block = report["run"]
     assert run_block["branch_count"] == 2
     assert run_block["messages"]["sent"] == high["messages"]["sent"] + low["messages"]["sent"]
+    assert run_block["scenario_releases"] == 2
+    assert run_block["process_updates"] == 2
     assert run_block["wake_ups"]["total"] == high["wake_ups"]["total"] + low["wake_ups"]["total"]
 
 
@@ -428,18 +480,47 @@ def test_the_reconsideration_after_a_rejection_counts_as_materially_new() -> Non
     )
 
 
-def test_message_counts_reconcile_with_communications_jsonl_rows() -> None:
-    """M1: ``messages.sent`` equals, branch for branch, the number of rows the
-    communications.jsonl writer (``replaycore.extract_communications``) derives
-    from the same run record — one kind set, two consumers."""
+def test_the_terminal_result_line_is_never_counted_as_a_message() -> None:
+    """M1(a): the block counts the ENGINE's communications, so a run in which nobody
+    said anything reports zero messages sent.
+
+    ``_finalize`` writes one ``create_event`` ``result_recorded`` line per branch as
+    the terminal's own record. It is addressed to nobody and is never propagated, so
+    it produces no delivery — but while the report counted ``create_event`` as a
+    communication it was counted as a message *sent*, inflating the counter by exactly
+    the branch count on every run. A live four-branch run reported 4 messages sent
+    having sent none, which is the number a reader would use to judge COM-1.
+    """
 
     data = scheduled_multiparty_world()
+    data["uncertainties"] = [
+        {
+            "variable": "external_signal",
+            "why_unknown": "the measurement is not yet published",
+            "reversal_capable": True,
+            "release_at": "2026-06-09T12:00:00+00:00",
+            "outcomes": [
+                {
+                    "value": "high",
+                    "weight": 0.5,
+                    "provenance": "symmetric_ignorance_assumption",
+                    "field_effects": [["external_signal", 9.0]],
+                },
+                {
+                    "value": "low",
+                    "weight": 0.5,
+                    "provenance": "symmetric_ignorance_assumption",
+                    "field_effects": [["external_signal", 1.0]],
+                },
+            ],
+        }
+    ]
 
+    # Nobody circulates anything: positions are recorded, which is a record, not a
+    # message. The only create_event in the run is the terminal's own line.
     def decide(ctx: dict[str, Any]) -> dict[str, Any]:
         if ctx["stage"] == "session":
             return act("record_position", {"position": "hold"})
-        if ctx["actor_id"] == "member_0":
-            return act("circulate_note", {"text": "a note for the others"})
         return wait_decision()
 
     gw = _gateway(decide)
@@ -447,16 +528,118 @@ def test_message_counts_reconcile_with_communications_jsonl_rows() -> None:
     result = run(compiled, gw, seed=0)
     report = compute_temporal_report(result)
 
-    rows = replaycore.extract_communications(result.event_ledger, result.actor_decisions)
-    rows_per_branch: dict[str, int] = {}
-    for row in rows:
-        bid = str(row["branch_id"])
-        rows_per_branch[bid] = rows_per_branch.get(bid, 0) + 1
-    assert rows_per_branch, "no communications extracted at all"
-    for bid, branch_report in report["branches"].items():
-        assert branch_report["messages"]["sent"] == rows_per_branch.get(bid, 0), (
-            f"{bid}: temporal report and communications.jsonl disagree"
-        )
+    terminal_lines = [
+        e
+        for e in result.event_ledger
+        if e.kind == "create_event"
+        and str(e.payload_dict.get("event_type", "")) == "result_recorded"
+    ]
+    assert len(terminal_lines) == report["run"]["branch_count"] == 2, (
+        "probe shape lost: the run must emit one terminal line per branch"
+    )
+    assert report["run"]["terminal_checks"]["final_recorded"] == len(terminal_lines)
+    assert report["run"]["messages"] == {
+        "send_events": 0,
+        "sent": 0,
+        "delivered": 0,
+        "undelivered": 0,
+        "noticed": 0,
+        "missed": 0,
+    }, "the terminal's own result line was counted as a message somebody sent"
+
+
+def test_a_missed_commitment_is_counted_as_a_missed_message() -> None:
+    """M1(b): ``update_commitment`` is a communication to the engine — it wakes a
+    recipient and it generates delivery records — so it must be one to the report.
+
+    Dropping it made a genuinely missed commitment vanish: here the reviewer commits
+    to something, the commitment reaches the proposer, and the proposer never reads it
+    before the horizon. That is exactly what ``missed`` exists to show, and while the
+    block counted a different kind set it showed zero.
+    """
+
+    import test_actor_lifecycles as act_lc
+
+    data = act_lc.two_actor_exchange_world()
+    answer = data["world_spec"]["actions"][1]
+    assert answer["action_id"] == "send_answer"
+    # The reviewer's answer is an undertaking recorded, not a note sent: the only
+    # message it produces is the commitment itself, so `missed` isolates it.
+    answer["effects"] = [
+        {
+            "op": "update_commitment",
+            "to": ["proposer"],
+            "text": "I will stand behind the figure I answered",
+            "tag": "answer",
+        },
+        {
+            "op": "append_record",
+            "collection": "answers",
+            "key": "$actor",
+            "value": "$param.answer",
+        },
+    ]
+    # ...and it is never read: the notice falls beyond the question's horizon.
+    answer["notice_delay_seconds"] = 86400 * 60
+
+    def decide(ctx: dict[str, Any]) -> dict[str, Any]:
+        if ctx["actor_id"] == "proposer":
+            if ctx["current_action"] is None and not ctx["observations"]:
+                return act("send_request", {"text": "please confirm the figure by Friday"})
+            return wait_decision("waiting")
+        if any("please confirm" in o["summary"] for o in ctx["observations"]):
+            return act("send_answer", {"answer": "yes"})
+        return wait_decision("nothing has reached me")
+
+    gw = _gateway(decide)
+    _, compiled = _compile_pair(data, gw)
+    result = run(compiled, gw, seed=0)
+    world = result.final_worlds["baseline"]
+
+    (commitment,) = [e for e in result.event_ledger if e.kind == "update_commitment"]
+    deliveries = [d for d in world.deliveries if d.event_id == commitment.event_id]
+    assert deliveries, "probe shape lost: the commitment reached nobody"
+    assert all(d.noticed_at is None for d in deliveries), (
+        "probe shape lost: the commitment was read after all"
+    )
+
+    m = compute_temporal_report(result)["branches"]["baseline"]["messages"]
+    assert m["missed"] == len(deliveries) == 1, (
+        f"a delivered-but-never-read commitment is absent from `missed`: {m}"
+    )
+    assert m["send_events"] == 2, f"the commitment is not counted as a message at all: {m}"
+
+
+def test_sent_and_delivered_are_counted_in_the_same_unit() -> None:
+    """M1(c): every counter in the block is per (message, recipient).
+
+    ``sent`` used to count events while delivered/noticed/missed counted delivery
+    records, so a world in which one note reaches four people reported more delivered
+    than sent — "16 of 5 messages delivered" on the adversary's probe. The arithmetic
+    now closes: sent = delivered + undelivered, delivered = noticed + missed, and the
+    message count itself is kept under its own name.
+    """
+
+    data = scheduled_multiparty_world()
+
+    def decide(ctx: dict[str, Any]) -> dict[str, Any]:
+        if ctx["stage"] == "session":
+            return act("record_position", {"position": "hold"})
+        if ctx["actor_id"] in ("member_0", "member_1"):
+            return act("circulate_note", {"text": f"a note from {ctx['actor_id']}"})
+        return wait_decision()
+
+    gw = _gateway(decide)
+    _, compiled = _compile_pair(data, gw)
+    m = compute_temporal_report(run(compiled, gw, seed=0))["branches"]["baseline"]["messages"]
+
+    assert m["send_events"] >= 2, f"probe shape lost: too few messages sent: {m}"
+    assert m["delivered"] > m["send_events"], (
+        "probe shape lost: this world must reach more recipients than it sends "
+        f"messages, or it cannot detect a unit mismatch: {m}"
+    )
+    assert m["sent"] == m["delivered"] + m["undelivered"], f"sent is not per-recipient: {m}"
+    assert m["delivered"] == m["noticed"] + m["missed"], f"deliveries do not close: {m}"
 
 
 # ---------------------------------------------------------------------------
@@ -539,6 +722,180 @@ def test_a_future_release_is_not_applied_at_seed_time() -> None:
         assert observed.get("external_signal") == 3.5, (
             f"{d.branch_id}/{d.actor_id} saw the future: {observed}"
         )
+
+
+def _two_dated_uncertainties(early: str | None, late: str) -> list[dict[str, Any]]:
+    """Two uncertainties over two different fields, released at two different moments
+    (``early=None`` means the evidence never established a timing for the first)."""
+
+    def variable(name: str, release_at: str | None, high: float, low: float) -> dict[str, Any]:
+        return {
+            "variable": name,
+            "why_unknown": f"{name} is published after the cutoff",
+            "reversal_capable": True,
+            "release_at": release_at,
+            "outcomes": [
+                {
+                    "value": "high",
+                    "weight": 0.5,
+                    "provenance": "symmetric_ignorance_assumption",
+                    "field_effects": [[name, high]],
+                },
+                {
+                    "value": "low",
+                    "weight": 0.5,
+                    "provenance": "symmetric_ignorance_assumption",
+                    "field_effects": [[name, low]],
+                },
+            ],
+        }
+
+    return [variable("early_signal", early, 9.0, 1.0), variable("late_signal", late, 8.0, 2.0)]
+
+
+def test_each_uncertainty_becomes_public_at_its_own_release_date() -> None:
+    """TMP-4/FD-7 (probe_release_merge): a branch is not one announcement.
+
+    Two uncertainties dated nineteen days apart. Collapsing a branch's releases to one
+    moment — historically ``release_at=min(releases)``, one merged
+    ``KIND_SCENARIO_RELEASE`` per branch — published the later value on the earlier
+    date, giving every actor nineteen simulated days in which to decide on information
+    that did not exist yet. Each release must fire at its own moment, carrying only
+    the fields that release reveals.
+    """
+
+    early = datetime.fromisoformat("2026-06-01T09:00:00+00:00")
+    late = datetime.fromisoformat("2026-06-20T09:00:00+00:00")
+    data = scheduled_multiparty_world()
+    data["uncertainties"] = _two_dated_uncertainties(early.isoformat(), late.isoformat())
+
+    def decide(ctx: dict[str, Any]) -> dict[str, Any]:
+        if ctx["stage"] == "session":
+            return act("record_position", {"position": "hold"})
+        return wait_decision()
+
+    gw = _gateway(decide)
+    _, compiled = _compile_pair(data, gw)
+    result = run(compiled, gw, seed=0)
+    assert len(result.final_worlds) == 4, "the two uncertainties did not cross into 4 branches"
+
+    for branch_id, world in result.final_worlds.items():
+        want_early = 9.0 if "early_signal:high" in branch_id else 1.0
+        want_late = 8.0 if "late_signal:high" in branch_id else 2.0
+        hypotheses = [
+            (e.time, dict(e.payload_dict.get("fields") or {}))
+            for e in world.event_history
+            if e.kind == "release_data" and "branch_conditions" in e.payload_dict
+        ]
+        assert [t for t, _ in hypotheses] == [early, late], (
+            f"{branch_id}: the branch's releases did not fire at their own dates: "
+            f"{[t.isoformat() for t, _ in hypotheses]}"
+        )
+        # Each release carries ONLY what it reveals — the later field is absent from
+        # the earlier announcement, which is what makes the run honest rather than
+        # merely differently timed.
+        assert hypotheses[0][1] == {"early_signal": want_early}
+        assert hypotheses[1][1] == {"late_signal": want_late}
+        assert world.get_field("early_signal") == want_early
+        assert world.get_field("late_signal") == want_late
+
+    # Nobody could read the later figure before it existed — checked on what the
+    # actors were actually shown, not on world state.
+    for d in result.actor_decisions:
+        if datetime.fromisoformat(d.branch_time) < late:
+            observed = d.decision_context.get("observed_fields", {})
+            assert "late_signal" not in observed, (
+                f"{d.branch_id}/{d.actor_id}@{d.branch_time} saw a figure published "
+                f"on {late.isoformat()}: {observed}"
+            )
+
+    # And the §9 report attributes them to branch construction, not to the world's
+    # processes: two releases per branch, neither counted as a process update.
+    report = compute_temporal_report(result)
+    for branch in report["branches"].values():
+        assert branch["scenario_releases"] == 2
+    assert report["run"]["scenario_releases"] == 8
+
+
+def test_an_undated_uncertainty_is_never_released_on_its_neighbours_date() -> None:
+    """TMP-4/FD-7, the other half: a value whose timing the evidence never established
+    is a standing condition of the branch from t0.
+
+    Merging the branch's releases gave such a value the *other* variable's date — the
+    exact "dropped at an invented midpoint" the runtime's own docstring forbids. It is
+    known from the start, and the dated one still waits for its date.
+    """
+
+    late = datetime.fromisoformat("2026-06-20T09:00:00+00:00")
+    data = scheduled_multiparty_world()
+    data["uncertainties"] = _two_dated_uncertainties(None, late.isoformat())
+
+    def decide(ctx: dict[str, Any]) -> dict[str, Any]:
+        if ctx["stage"] == "session":
+            return act("record_position", {"position": "hold"})
+        return wait_decision()
+
+    gw = _gateway(decide)
+    _, compiled = _compile_pair(data, gw)
+    result = run(compiled, gw, seed=0)
+
+    for branch_id, world in result.final_worlds.items():
+        want_early = 9.0 if "early_signal:high" in branch_id else 1.0
+        hypotheses = [
+            (e.time, dict(e.payload_dict.get("fields") or {}))
+            for e in world.event_history
+            if e.kind == "release_data" and "branch_conditions" in e.payload_dict
+        ]
+        assert len(hypotheses) == 2, f"{branch_id}: expected a standing seed and one release"
+        assert hypotheses[0] == (AS_OF, {"early_signal": want_early}), (
+            f"{branch_id}: the undated value did not stand from the cutoff: {hypotheses[0]}"
+        )
+        assert hypotheses[1][0] == late
+        assert set(hypotheses[1][1]) == {"late_signal"}
+
+    # The undated value is known at the first decision; the dated one is not.
+    first = min(datetime.fromisoformat(d.branch_time) for d in result.actor_decisions)
+    for d in result.actor_decisions:
+        observed = d.decision_context.get("observed_fields", {})
+        if datetime.fromisoformat(d.branch_time) == first:
+            assert "early_signal" in observed, (
+                f"a standing branch condition was withheld from the actors: {observed}"
+            )
+        if datetime.fromisoformat(d.branch_time) < late:
+            assert "late_signal" not in observed
+
+
+def test_two_scenario_releases_at_one_instant_are_refused_not_hash_ordered() -> None:
+    """Residual guard: the ordering class puts the scenario release last within its
+    instant, but it does not order two scenario releases against EACH OTHER — they
+    share (at, class, microstep, kind) and fall through to entry-id hash order. The
+    branch builder groups a scenario's releases by moment so this cannot arise; the
+    schedule refuses it outright rather than leaving the invariant one refactor from
+    silently returning."""
+
+    at = datetime.fromisoformat("2026-06-09T12:00:00+00:00")
+    first = make_entry(
+        at=at,
+        kind=KIND_SCENARIO_RELEASE,
+        payload={"fields": {"a": 1.0}},
+        origin=ORIGIN_EXTERNAL,
+        origin_detail="scenario_release:sc_a",
+    )
+    second = make_entry(
+        at=at,
+        kind=KIND_SCENARIO_RELEASE,
+        payload={"fields": {"b": 2.0}},
+        origin=ORIGIN_EXTERNAL,
+        origin_detail="scenario_release:sc_b",
+    )
+    # The same entry pushed twice is a duplicate and is simply ignored.
+    assert len(Schedule().push(first).push(first)) == 1
+    with pytest.raises(WorldIntegrityError) as exc:
+        Schedule().push(first).push(second)
+    assert "same instant" in str(exc.value)
+    # ...and in one push, too — the check does not depend on the order of arrival.
+    with pytest.raises(WorldIntegrityError):
+        Schedule().push(first, second)
 
 
 def test_a_same_instant_deferred_placeholder_never_overwrites_the_hypothesis() -> None:
