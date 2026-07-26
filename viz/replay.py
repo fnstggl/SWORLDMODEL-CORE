@@ -44,9 +44,14 @@ def _resolve_trace(trace_dir: str | Path) -> Path:
     """A case directory or its run_trace subdirectory both work as input."""
 
     p = Path(trace_dir)
-    if (p / "run_trace" / "forecast.json").exists() or (p / "run_trace" / "diagnosis.json").exists():
+    if (p / "run_trace" / "forecast.json").exists() or (
+        p / "run_trace" / "diagnosis.json"
+    ).exists():
         return p / "run_trace"
     return p
+
+
+TRACE_MARKERS = ("diagnosis.json", "forecast.json")
 
 
 def build_replay(trace_dir: str | Path) -> dict[str, Any]:
@@ -56,6 +61,7 @@ def build_replay(trace_dir: str | Path) -> dict[str, Any]:
     forecast = _load(d / "forecast.json") or {}
     manifest = _load(d / "world_manifest.json") or {}
     diagnosis = _load(d / "diagnosis.json") or {}
+    compiled = _load(d / "compiled_world.json") or {}
     grounding = _load(d / "actor_grounding.json") or {}
     decisions = _load_lines(d / "actor_decisions.jsonl")
     events = _load_lines(d / "event_ledger.jsonl")
@@ -65,7 +71,7 @@ def build_replay(trace_dir: str | Path) -> dict[str, Any]:
 
     return {
         "meta": _meta(d, forecast, diagnosis, audit, trajectory),
-        "world": _world(manifest, diagnosis, grounding),
+        "world": _world(manifest, diagnosis, compiled, grounding),
         "branches": _branches(forecast, decisions, events),
         "llm_summary": _llm_summary(llm, audit),
         "refusal": _refusal(diagnosis) if not forecast else None,
@@ -111,9 +117,14 @@ def _meta(
 
 
 def _world(
-    manifest: dict[str, Any], diagnosis: dict[str, Any], grounding: dict[str, Any]
+    manifest: dict[str, Any],
+    diagnosis: dict[str, Any],
+    compiled: dict[str, Any],
+    grounding: dict[str, Any],
 ) -> dict[str, Any]:
-    comp = diagnosis.get("world_compilation") or {}
+    # Newer runs persist the executable world as compiled_world.json (same shape as the
+    # diagnosis's world_compilation block); older runs carry it inside diagnosis.json.
+    comp = diagnosis.get("world_compilation") or compiled or {}
     entities = comp.get("entities") or []
     actor_ids = set((comp.get("causal_producers") or {}).get("actors") or [])
     ground_map = grounding if isinstance(grounding, dict) else {}
@@ -137,6 +148,28 @@ def _world(
             node["grounding"] = g.get("rendered") or g.get("grounding") or _grounding_text(g)
         (actors if node["is_actor"] else others).append(node)
 
+    # A trace with no persisted compilation block (some runs write neither diagnosis nor
+    # compiled_world.json) still records its actors in actor_grounding.json — show those
+    # real records rather than an empty roster.
+    if not actors and not others:
+        for aid, g in ground_map.items():
+            if not isinstance(g, dict):
+                continue
+            actors.append(
+                {
+                    "id": aid,
+                    "name": g.get("canonical_identity") or aid,
+                    "kind": "actor",
+                    "role": g.get("role"),
+                    "authority": g.get("authority") or [],
+                    "scale": None,
+                    "represents_count": None,
+                    "is_actor": True,
+                    "cited_claims": g.get("claim_ids") or [],
+                    "grounding": _grounding_summary(g),
+                }
+            )
+
     return {
         "title": comp.get("title") or manifest.get("title"),
         "rationale": comp.get("structure_rationale"),
@@ -159,6 +192,20 @@ def _world(
         "uncertainties": _uncertainties(manifest),
         "fields": comp.get("fields") or [],
     }
+
+
+def _grounding_summary(g: dict[str, Any]) -> str:
+    """A short honest summary from a run-format actor_grounding.json entry."""
+
+    inner = g.get("grounding") if isinstance(g.get("grounding"), dict) else {}
+    parts = []
+    if inner.get("grounding_level_name"):
+        parts.append(f"grounding level: {inner['grounding_level_name']}")
+    if inner.get("reason"):
+        parts.append(str(inner["reason"]))
+    for m in g.get("missing_information") or []:
+        parts.append(f"missing: {m}")
+    return "\n".join(parts)
 
 
 def _grounding_text(g: dict[str, Any]) -> str:
@@ -193,9 +240,7 @@ def _uncertainties(manifest: dict[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
-def _structure_prefixes(
-    forecast: dict[str, Any], decisions: list[dict[str, Any]]
-) -> set[str]:
+def _structure_prefixes(forecast: dict[str, Any], decisions: list[dict[str, Any]]) -> set[str]:
     """The namespace each structure prefixes its branch ids with (``primary``, ...).
 
     The forecast and the actor decisions carry structure-qualified branch ids
@@ -308,7 +353,11 @@ def _merge_steps(
             {
                 "type": "event",
                 "time": e.get("time"),
-                "order": (e.get("time") or "", _event_rank(e.get("kind") or "", e.get("payload") or {}), i),
+                "order": (
+                    e.get("time") or "",
+                    _event_rank(e.get("kind") or "", e.get("payload") or {}),
+                    i,
+                ),
                 "event_id": e.get("event_id"),
                 "kind": e.get("kind"),
                 "actor_id": e.get("actor_id"),
@@ -438,7 +487,8 @@ def discover_traces(root: str | Path) -> list[dict[str, Any]]:
 
     root = Path(root)
     by_dir: dict[str, dict[str, Any]] = {}
-    for marker in root.rglob("diagnosis.json"):
+    markers = [m for name in TRACE_MARKERS for m in root.rglob(name)]
+    for marker in markers:
         # A case dir often holds a copy of run_trace/diagnosis.json beside the real
         # run_trace/ one. Resolve both to the same canonical trace dir and keep one entry,
         # preferring whichever carries the actor decisions (the richer, real trace).

@@ -1,0 +1,739 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>World Model — Run Dossier</title>
+<style>
+  :root{
+    --bg:#f5f7fa; --bg2:#ffffff; --panel:#ffffff; --panel2:#eef2f7;
+    --line:#d5dde8; --line2:#b9c6d6; --ink:#1a2534; --dim:#5a6b81; --dimmer:#8695a9;
+    --accent:#0a6e9e; --warn:#8a6100; --warnbg:#fff7e0; --bad:#b02a3a; --badbg:#fdeef0;
+    --good:#1a7a4a; --goodbg:#e9f7ef; --info:#31536e; --infobg:#eaf2f9;
+    --prebg:#f0f3f8; --promptbg:#eef4fb; --respbg:#eefaf3;
+    --mono:"SFMono-Regular",ui-monospace,"JetBrains Mono",Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Inter,sans-serif;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg:#070b12; --bg2:#0b1220; --panel:#0e1626; --panel2:#111d31;
+      --line:#1c2c44; --line2:#263a58; --ink:#dce6f5; --dim:#7f92ad; --dimmer:#54657f;
+      --accent:#39d0ff; --warn:#ffcf5c; --warnbg:#241c05; --bad:#ff6b7d; --badbg:#2a0d12;
+      --good:#5cf39a; --goodbg:#07220f; --info:#9fc3e2; --infobg:#0d1b2a;
+      --prebg:#060b14; --promptbg:#081426; --respbg:#08160f;
+    }
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0}
+  body{background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:13px;
+       -webkit-font-smoothing:antialiased}
+  a{color:var(--accent)}
+  .mono{font-family:var(--mono)}
+
+  /* top bar */
+  #topbar{border-bottom:1px solid var(--line);background:var(--bg2);padding:8px 16px;
+    display:flex;gap:12px;align-items:center;flex-wrap:wrap;position:sticky;top:0;z-index:20}
+  #topbar .brand{font-weight:700;letter-spacing:.5px;color:var(--accent);white-space:nowrap}
+  #topbar .brand small{color:var(--dimmer);font-weight:400}
+  select{background:var(--panel2);color:var(--ink);border:1px solid var(--line2);border-radius:6px;
+    padding:5px 8px;font-family:var(--mono);font-size:12px;max-width:44vw}
+  .badge{border:1px solid var(--line2);border-radius:999px;padding:2px 9px;font-size:11px;
+    color:var(--dim);white-space:nowrap;font-family:var(--mono)}
+  .badge b{color:var(--ink);font-weight:600}
+
+  /* banner */
+  #banner{padding:12px 16px;border-bottom:1px solid var(--line);display:flex;gap:14px;
+    flex-wrap:wrap;align-items:stretch}
+  .bcard{flex:1;min-width:240px;border:1px solid var(--line2);border-radius:10px;padding:10px 14px;
+    background:var(--panel)}
+  .bcard .lab{font-size:10px;letter-spacing:1.4px;text-transform:uppercase;color:var(--dimmer)}
+  .bcard .big{font-size:18px;font-weight:700;font-family:var(--mono);margin:4px 0 2px}
+  .bcard .sub{font-size:11px;color:var(--dim);line-height:1.4}
+  .bcard.good{border-color:var(--good);background:var(--goodbg)} .bcard.good .big{color:var(--good)}
+  .bcard.warn{border-color:var(--warn);background:var(--warnbg)} .bcard.warn .big{color:var(--warn)}
+  .bcard.bad{border-color:var(--bad);background:var(--badbg)}   .bcard.bad .big{color:var(--bad)}
+  .bcard.dim .big{color:var(--dim)}
+
+  #meta{padding:10px 16px;border-bottom:1px solid var(--line);background:var(--bg2)}
+  #meta .q{font-size:14px;font-weight:600;margin-bottom:6px}
+  #meta .badges{display:flex;gap:6px;flex-wrap:wrap}
+
+  /* nav + main */
+  #nav{display:flex;gap:2px;flex-wrap:wrap;padding:6px 12px;border-bottom:1px solid var(--line);
+    background:var(--bg2);position:sticky;top:49px;z-index:19}
+  #nav button{background:none;border:none;border-bottom:2px solid transparent;color:var(--dim);
+    padding:7px 11px;font-size:12px;cursor:pointer;font-family:var(--mono);letter-spacing:.2px}
+  #nav button:hover{color:var(--ink)}
+  #nav button.sel{color:var(--accent);border-bottom-color:var(--accent);font-weight:600}
+  #view{padding:14px 16px 60px;max-width:1500px}
+
+  h3.v{font-size:15px;margin:2px 0 10px}
+  h4.k{font-size:10px;letter-spacing:1.2px;text-transform:uppercase;color:var(--dimmer);margin:16px 0 6px}
+  .hint{color:var(--dimmer);font-style:italic}
+  .notice{border:1px solid var(--warn);background:var(--warnbg);color:var(--ink);border-radius:8px;
+    padding:8px 12px;margin:8px 0;font-size:12px}
+  .notice.info{border-color:var(--line2);background:var(--infobg);color:var(--info)}
+  .srcchip{display:inline-block;font-family:var(--mono);font-size:10px;border:1px solid var(--line2);
+    border-radius:4px;padding:1px 6px;color:var(--dim);margin-left:8px;vertical-align:middle}
+
+  pre{background:var(--prebg);border:1px solid var(--line);border-radius:7px;padding:9px 10px;margin:6px 0;
+    font-family:var(--mono);font-size:11px;line-height:1.5;color:var(--ink);white-space:pre-wrap;
+    word-break:break-word;overflow:auto}
+  pre.prompt{background:var(--promptbg)}
+  pre.resp{background:var(--respbg)}
+
+  .kv{display:grid;grid-template-columns:auto 1fr;gap:2px 14px;font-family:var(--mono);font-size:11.5px;margin:4px 0}
+  .kv .lbl{color:var(--dim);white-space:nowrap}
+  .kv .val{color:var(--ink);word-break:break-word}
+
+  .tablewrap{overflow-x:auto;border:1px solid var(--line);border-radius:8px;margin:8px 0;background:var(--panel)}
+  table{border-collapse:collapse;width:100%;min-width:640px;font-size:12px}
+  th{font-size:10px;letter-spacing:1px;text-transform:uppercase;color:var(--dimmer);text-align:left;
+    padding:7px 10px;border-bottom:1px solid var(--line);white-space:nowrap;background:var(--panel2)}
+  td{padding:6px 10px;border-bottom:1px solid var(--line);vertical-align:top;font-family:var(--mono);font-size:11.5px}
+  tr:last-child td{border-bottom:none}
+
+  details.row{border:1px solid var(--line);border-radius:8px;margin:6px 0;background:var(--panel)}
+  details.row>summary{cursor:pointer;padding:8px 12px;display:flex;gap:12px;align-items:baseline;
+    flex-wrap:wrap;list-style:none;font-family:var(--mono);font-size:11.5px}
+  details.row>summary::-webkit-details-marker{display:none}
+  details.row>summary::before{content:"▸";color:var(--dimmer);margin-right:-4px}
+  details.row[open]>summary::before{content:"▾"}
+  details.row>.body{padding:4px 14px 12px;border-top:1px solid var(--line)}
+  details.inner{margin:6px 0;border:1px solid var(--line);border-radius:7px;background:var(--panel2)}
+  details.inner>summary{cursor:pointer;padding:6px 10px;font-size:11px;color:var(--dim);
+    font-family:var(--mono);list-style:none}
+  details.inner>summary::-webkit-details-marker{display:none}
+  details.inner>summary::before{content:"▸ "}
+  details.inner[open]>summary::before{content:"▾ "}
+  details.inner>.body{padding:2px 10px 8px}
+
+  .t-event{color:var(--good)} .t-invocation{color:var(--accent);font-weight:600}
+  .oc-YES{color:var(--good);font-weight:700} .oc-NO{color:var(--bad);font-weight:700}
+  .oc-UNRESOLVED{color:var(--warn);font-weight:700}
+  .sev{display:inline-block;border-radius:4px;padding:0 7px;font-size:10px;font-family:var(--mono);
+    font-weight:700;border:1px solid var(--line2);color:var(--dim)}
+  .sev.PASS,.sev.OK,.sev.LOW{color:var(--good);border-color:var(--good)}
+  .sev.MEDIUM,.sev.WARN{color:var(--warn);border-color:var(--warn)}
+  .sev.HIGH,.sev.CRITICAL,.sev.FAIL{color:var(--bad);border-color:var(--bad)}
+  .chip{display:inline-block;font-family:var(--mono);font-size:10.5px;padding:1px 7px;border-radius:5px;
+    border:1px solid var(--line2);color:var(--dim);margin:0 4px 4px 0}
+  .chip b{color:var(--ink)}
+  .chip.bad{border-color:var(--bad);color:var(--bad)}
+  .chip.good{border-color:var(--good);color:var(--good)}
+  .chip.warn{border-color:var(--warn);color:var(--warn)}
+  .btabs{display:flex;gap:5px;flex-wrap:wrap;margin:6px 0 10px}
+  .btab{border:1px solid var(--line2);border-radius:6px;padding:3px 9px;font-size:11px;cursor:pointer;
+    color:var(--dim);background:var(--panel);font-family:var(--mono)}
+  .btab.sel{border-color:var(--accent);color:var(--accent);font-weight:600}
+  .link{color:var(--accent);cursor:pointer;text-decoration:underline;text-underline-offset:2px}
+  .dimtxt{color:var(--dimmer)}
+  input[type=range]{width:100%;accent-color:var(--accent)}
+  .cols{display:flex;gap:14px;flex-wrap:wrap}
+  .cols>div{flex:1;min-width:260px}
+  .statecell.changed{background:var(--goodbg)}
+  .subsum{color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:52vw}
+  ::-webkit-scrollbar{width:10px;height:10px}
+  ::-webkit-scrollbar-thumb{background:var(--line2);border-radius:5px}
+  ::-webkit-scrollbar-track{background:transparent}
+</style>
+</head>
+<body>
+<header id="topbar">
+  <div class="brand">◉ WORLD&nbsp;MODEL <small>run dossier</small></div>
+  <select id="tracepick" title="Pick a run"></select>
+  <span class="badge"><a id="replaylink" href="/">replay view</a></span>
+  <span class="badge" id="dirbadge"></span>
+</header>
+<div id="banner"></div>
+<div id="meta"></div>
+<nav id="nav"></nav>
+<main id="view"></main>
+<script>
+"use strict";
+const $ = s => document.querySelector(s);
+const $$ = s => Array.from(document.querySelectorAll(s));
+const esc = s => (s==null?"":String(s)).replace(/[&<>"]/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[m]));
+const fx = (n,d=4)=> (n==null||isNaN(n))?"—":Number(n).toFixed(d);
+const pct = n => (n==null||isNaN(n))?"—":(Number(n)*100).toFixed(1)+"%";
+const num = n => n==null?"—":Number(n).toLocaleString();
+const short = (s,n=110)=>{s=s==null?"":String(s); return s.length>n?s.slice(0,n)+"…":s;};
+const jf = o => esc(JSON.stringify(o,null,1));
+const dash = v => (v===null||v===undefined||v==="")?"—":esc(String(v));
+
+const VIEWS = [
+  ["timeline","Timeline"],["actors","Actors"],["comms","Communications"],["processes","Processes"],
+  ["state","World state"],["llm","Model calls"],["branches","Branches & weights"],
+  ["lineage","Terminal lineage"],["cost","Cost & timing"],["audit","Audit"]
+];
+const S = { d:null, view:"timeline", tlBranch:0, wsBranch:0, wsPos:{}, trace:null, forensics:null };
+
+// ---------- generic fragments ----------
+function kv(pairs){ return `<div class="kv">`+pairs.filter(p=>p&&p[1]!=null&&p[1]!=="").map(([k,v])=>
+  `<div class="lbl">${esc(k)}</div><div class="val">${v}</div>`).join("")+`</div>`; }
+function inner(label, body, open){ return `<details class="inner"${open?" open":""}><summary>${label}</summary><div class="body">${body}</div></details>`; }
+function noticeBox(txt, cls){ return txt?`<div class="notice ${cls||""}">${esc(txt)}</div>`:""; }
+function srcChip(name){
+  const s=(S.d.sources||{})[name];
+  if(!s||!s.from) return `<span class="srcchip">absent</span>`;
+  return `<span class="srcchip" title="${esc(s.path||"")}">${esc(name)} · ${s.from==="run"?"run dir":"forensics"}</span>`;
+}
+function evidenceBlock(ids){
+  ids=ids||[]; if(!ids.length) return `<span class="dimtxt">no evidence claims attached</span>`;
+  const ev=S.d.evidence||{};
+  return ids.map(id=>{
+    const c=ev[id];
+    if(!c) return `<div class="chip">${esc(id)} <span class="dimtxt">(not in evidence manifest)</span></div>`;
+    return inner(`claim <b>${esc(id)}</b> — ${esc(short(c.proposition,90))}`, kv([
+      ["proposition",esc(c.proposition)],["normalized",esc(c.normalized_value)],
+      ["entities",(c.entities||[]).map(esc).join(", ")],["type",esc(c.epistemic_type)],
+      ["authority level",dash(c.authority_level)],["available at",esc(c.available_at)],
+      ["by cutoff",c.available_by_cutoff==null?null:String(c.available_by_cutoff)],
+      ["source",esc(c.source_url||c.url||c.source||"")],
+    ]));
+  }).join("");
+}
+function fullText(label, txt, cls, hashNote){
+  if(txt==null||txt==="")
+    return `<h4 class="k">${esc(label)}</h4><div class="notice">${esc(hashNote||"not recorded by this run")}</div>`;
+  const body = typeof txt==="string"?esc(txt):jf(txt);
+  return inner(`${esc(label)} (${(typeof txt==="string"?txt.length+" chars":"json")}) — expands to full text`,
+    `<pre class="${cls||""}">${body}</pre>`);
+}
+function invLink(i){ return `<span class="link" onclick="gotoInvocation(${i})">invocation #${i+1}</span>`; }
+
+// ---------- boot ----------
+async function boot(){
+  const u=new URL(location.href);
+  S.trace=u.searchParams.get("trace"); S.forensics=u.searchParams.get("forensics");
+  let traces=[];
+  try{ const r=await fetch("/api/traces"); const j=await r.json(); traces=j.traces||[]; }
+  catch(e){ $("#meta").innerHTML=`<div class="notice">Cannot reach the dossier server.</div>`; return; }
+  const pick=$("#tracepick"); pick.innerHTML="";
+  traces.forEach(t=>{ const o=document.createElement("option"); o.value=t.path;
+    o.textContent=`${t.case} · ${t.status}`+(t.branches?` · ${t.branches}br`:"")+(t.actor_calls?` · ${t.actor_calls} actor calls`:"");
+    pick.appendChild(o); });
+  if(!S.trace && traces.length) S.trace=(traces.find(t=>t.actor_calls>0)||traces[0]).path;
+  if(S.trace) pick.value=S.trace;
+  pick.onchange=()=>{ S.trace=pick.value; load(); };
+  $("#nav").innerHTML=VIEWS.map(([id,label])=>`<button data-v="${id}">${esc(label)}</button>`).join("");
+  $$("#nav button").forEach(b=>b.onclick=()=>{S.view=b.dataset.v; render();});
+  load();
+}
+
+async function load(){
+  if(!S.trace){ $("#meta").innerHTML=`<div class="notice">No traces found under the server root.</div>`; return; }
+  const u=new URL(location.href);
+  u.searchParams.set("trace",S.trace);
+  if(S.forensics) u.searchParams.set("forensics",S.forensics);
+  history.replaceState(null,"",u.toString());
+  $("#replaylink").href="/";
+  $("#meta").innerHTML=`<div class="hint">loading…</div>`;
+  let d;
+  try{
+    let url="/api/dossier?trace="+encodeURIComponent(S.trace);
+    if(S.forensics) url+="&forensics="+encodeURIComponent(S.forensics);
+    d=await (await fetch(url)).json();
+  }catch(e){ $("#meta").innerHTML=`<div class="notice">failed to load dossier</div>`; return; }
+  if(d.error){ $("#meta").innerHTML=`<div class="notice">error: ${esc(d.error)}</div>`; return; }
+  S.d=d; S.tlBranch=0; S.wsBranch=0; S.wsPos={};
+  renderBanner(); renderMeta(); render();
+}
+
+// ---------- banner ----------
+function renderBanner(){
+  const b=S.d.banner||{}, cal=b.calibration||{};
+  const cards=[];
+  const vClass = b.verdict==null?"dim":(String(b.verdict).includes("VERIF")?"good":(String(b.verdict).includes("INVALID")?"bad":"warn"));
+  cards.push(`<div class="bcard ${vClass}"><div class="lab">forensic verdict</div>
+    <div class="big">${b.verdict?esc(b.verdict):"not recorded"}</div>
+    <div class="sub">${b.audit_classification?("audit classification: "+esc(b.audit_classification)):""}
+    ${b.verdict?"":esc(b.verdict_notice||"")}</div></div>`);
+  const rc=b.responsibility;
+  const rClass = rc==null?"dim":(["ACTOR_CAUSED","PROCESS_CAUSED","ACTOR_AND_PROCESS_CAUSED","FACTUALLY_RESOLVED"].includes(rc)?"good":"bad");
+  cards.push(`<div class="bcard ${rClass}"><div class="lab">responsibility classification</div>
+    <div class="big">${rc?esc(rc):"not recorded"}</div>
+    <div class="sub">${rc?"deterministic deletion counterfactuals + weight sensitivity (see Audit)":esc(b.responsibility_notice||"")}</div></div>`);
+  let calBig, calClass, calSub;
+  if(cal.point_estimate_calibrated===true){ calBig="CALIBRATED"; calClass="good"; calSub="recorded in forecast.json integrity block"; }
+  else if(cal.point_estimate_calibrated===false){ calBig="NOT CALIBRATED"; calClass="bad"; calSub="recorded in forecast.json integrity block"; }
+  else if(cal.all_weights_ungrounded===true){ calBig="WEIGHTS UNGROUNDED"; calClass="bad";
+    calSub="probability_source: "+esc(cal.probability_source||"—")+(cal.weights_flag?(" · flag: "+esc(cal.weights_flag)):"")+" — "+esc(cal.note||""); }
+  else { calBig="NOT RECORDED"; calClass="dim"; calSub=esc(cal.note||"calibration not recorded by this run"); }
+  cards.push(`<div class="bcard ${calClass}"><div class="lab">point-estimate calibration</div>
+    <div class="big">${calBig}</div><div class="sub">${calSub}</div></div>`);
+  $("#banner").innerHTML=cards.join("");
+}
+
+function renderMeta(){
+  const m=S.d.meta||{};
+  const badges=[
+    ["status",m.status],["P",m.probability!=null?pct(m.probability):null],
+    ["source",m.probability_source],["bounds",m.lower_bound!=null?`[${fx(m.lower_bound,2)}, ${fx(m.upper_bound,2)}]`:null],
+    ["mass Y/N/U",m.resolved_yes_mass!=null?`${fx(m.resolved_yes_mass,2)}/${fx(m.resolved_no_mass,2)}/${fx(m.unresolved_mass,2)}`:null],
+    ["model",m.model],["mode",m.mode],["commit",m.commit?String(m.commit).slice(0,10):null],
+    ["as-of",m.as_of],["horizon",m.horizon],
+  ].filter(x=>x[1]!=null).map(([k,v])=>`<span class="badge">${esc(k)} <b>${esc(v)}</b></span>`).join("");
+  const src=S.d.sources||{};
+  const srcRows=Object.keys(src).sort().map(n=>{
+    const s=src[n];
+    return `<tr><td>${esc(n)}</td><td>${s.from?esc(s.from):`<span class="sev HIGH">absent</span>`}</td><td class="dimtxt">${esc(s.path||"—")}</td></tr>`;
+  }).join("");
+  $("#meta").innerHTML=`<div class="q">${esc(m.question)}</div><div class="badges">${badges}</div>`+
+    inner(`artifact provenance — every file this dossier read and where it came from`,
+      `<div class="tablewrap"><table><tr><th>artifact</th><th>from</th><th>path</th></tr>${srcRows}</table></div>
+       <div class="hint">"run dir" = written by the production run; "forensics" = derived offline by scripts/forensics.py; absent files render an explicit notice, never a placeholder.</div>`);
+  $("#dirbadge").innerHTML=`run <b>${esc(m.trace_dir)}</b>${m.forensics_dir?` · forensics <b>${esc(m.forensics_dir)}</b>`:""}`;
+}
+
+// ---------- router ----------
+function render(){
+  $$("#nav button").forEach(b=>b.classList.toggle("sel",b.dataset.v===S.view));
+  const r={timeline:vTimeline,actors:vActors,comms:vComms,processes:vProcesses,state:vState,
+           llm:vLLM,branches:vBranches,lineage:vLineage,cost:vCost,audit:vAudit}[S.view];
+  $("#view").innerHTML=r?r():"";
+}
+function branchTabs(list, sel, fn){
+  return `<div class="btabs">`+list.map((b,i)=>
+    `<span class="btab${i===sel?" sel":""}" onclick="${fn}(${i})">${esc(b.local_id||b.id)}</span>`).join("")+`</div>`;
+}
+window.setTlBranch=i=>{S.tlBranch=i;render();};
+window.setWsBranch=i=>{S.wsBranch=i;render();};
+window.gotoInvocation=i=>{
+  S.view="actors"; render();
+  const elx=document.getElementById("inv-"+i);
+  if(elx){ elx.open=true; elx.scrollIntoView({behavior:"smooth",block:"start"}); }
+};
+
+// ---------- 1 · timeline ----------
+function vTimeline(){
+  const t=S.d.timeline||{}, branches=t.branches||[];
+  let h=`<h3 class="v">Timeline — merged chronological events + actor invocations per branch ${srcChip("event_ledger.jsonl")}${srcChip("actor_decisions.jsonl")}</h3>`;
+  if(!branches.length) return h+`<div class="notice">No branches recorded: the event ledger and actor decisions are empty or absent for this run.</div>`;
+  h+=branchTabs(branches, S.tlBranch, "setTlBranch");
+  if(t.state_diff_notice) h+=noticeBox(t.state_diff_notice, t.state_diff_notice.startsWith("not recorded")?"":"info");
+  const b=branches[S.tlBranch]||branches[0];
+  h+=`<div class="hint" style="margin-bottom:6px">${b.rows.length} rows · branch <span class="mono">${esc(b.id)}</span></div>`;
+  h+=b.rows.map(r=>{
+    if(r.type==="invocation"){
+      const sum=`<span>#${r.seq+1}</span><span>${esc(r.time)}</span><span class="t-invocation">actor invocation</span>
+        <span><b>${esc(r.actor_name||r.actor_id)}</b> → ${esc(r.action||"—")} <span class="dimtxt">(${esc(r.validation_status||"")})</span></span>
+        <span class="dimtxt">woke: ${esc(short(r.wake_reason,40))}</span>`;
+      const body=kv([
+        ["actor",esc(r.actor_id)],["wake reason",esc(r.wake_reason)],
+        ["chose",esc(r.action||"—")+" · validation: "+esc(r.validation_status||"—")],
+        ["triggered by events",(r.trigger_event_ids||[]).map(esc).join(", ")||"—"],
+        ["events applied",(r.applied_event_ids||[]).map(esc).join(", ")||"—"],
+        ["exact prompt / response",invLink(r.invocation_index)+" in the Actors view carries the full verbatim prompt and raw model response"],
+      ])+`<h4 class="k">Evidence lineage (actor's grounded claims)</h4>`+evidenceBlock(r.evidence_claim_ids);
+      return `<details class="row"><summary>${sum}</summary><div class="body">${body}</div></details>`;
+    }
+    const p=r.payload||{};
+    const psum = p.field!==undefined?`${esc(p.field)} = ${esc(JSON.stringify(p.value))}`
+      : p.text?esc(short(p.text,70)) : esc(short(JSON.stringify(p.data??p),70));
+    const sum=`<span>#${r.seq+1}</span><span>${esc(r.time)}</span><span class="t-event">${esc(r.kind)}</span>
+      <span class="subsum">${psum}</span>${r.actor_id?`<span class="dimtxt">by ${esc(r.actor_id)}</span>`:""}
+      ${r.state_diff?`<span class="chip good">state diff</span>`:""}`;
+    let body=kv([["event id",esc(r.event_id)],["kind",esc(r.kind)],["actor",dash(r.actor_id)],["visibility",dash(r.visibility)]]);
+    body+=`<h4 class="k">Payload — the recorded transformation</h4><pre>${jf(p)}</pre>`;
+    body+=`<h4 class="k">State diff for this event</h4>`;
+    if(r.state_diff) body+=kv([["operation",esc(r.state_diff.runtime_operation)],["triggered by",esc(r.state_diff.triggered_by)]])+
+      `<pre>${jf({diff:r.state_diff.diff, state_after:r.state_diff.state_after})}</pre>`;
+    else body+=`<div class="hint">no state diff recorded for this event${t.state_diff_notice?" ("+esc(t.state_diff_notice)+")":" — this event did not change branch state"}</div>`;
+    body+=`<h4 class="k">Evidence lineage</h4>`+evidenceBlock(r.evidence_claim_ids);
+    return `<details class="row"><summary>${sum}</summary><div class="body">${body}</div></details>`;
+  }).join("");
+  return h;
+}
+
+// ---------- 2 · actors ----------
+function vActors(){
+  const a=S.d.actors||{};
+  let h=`<h3 class="v">Actors — every invocation, verbatim ${srcChip("actor_decisions.jsonl")}${srcChip("actor_grounding.json")}</h3>`;
+  if(!a.recorded) return h+noticeBox(a.notice);
+  if(a.zero_actor_note) h+=noticeBox(a.zero_actor_note,"info");
+  if(!(a.invocations||[]).length && !a.zero_actor_note) h+=`<div class="hint">The run recorded zero actor invocations.</div>`;
+  const g=a.grounding||{};
+  if(Object.keys(g).length){
+    h+=inner("Actor grounding — what each agent verifiably is (actor_grounding.json)",
+      Object.entries(g).map(([id,rec])=>{
+        const gg=(rec&&rec.grounding)||{};
+        return `<h4 class="k">${esc(rec.canonical_identity||id)}</h4>`+kv([
+          ["actor id",esc(id)],["role",esc(rec.role)],["authority",(rec.authority||[]).map(esc).join(", ")],
+          ["grounding level",gg.grounding_level_name?`${esc(gg.grounding_level_name)} (${dash(gg.grounding_level)})`:null],
+          ["basis",esc(gg.grounding_basis)],["reason",esc(gg.reason)],
+          ["missing",(rec.missing_information||[]).map(esc).join(" · ")||null],
+          ["supporting claims",(rec.claim_ids||[]).map(esc).join(", ")],
+        ]);
+      }).join(""));
+  }
+  h+=(a.invocations||[]).map(inv=>{
+    const sum=`<span>#${inv.index+1}</span><span>${esc(inv.time)}</span>
+      <span><b>${esc(inv.actor_name||inv.actor_id)}</b></span>
+      <span class="dimtxt">${esc(inv.branch)}</span>
+      <span>→ ${esc(inv.action||"—")}</span>
+      <span class="chip ${inv.validation_status==="rejected"?"bad":""}">${esc(inv.validation_status||"—")}</span>`;
+    let body=kv([
+      ["stage",esc(inv.stage)],["branch",esc(inv.branch_id)],["model",esc(inv.model)],
+      ["world version",dash(inv.world_version_at_decision)],["prompt sha256",esc(inv.prompt_hash)],
+    ]);
+    body+=`<h4 class="k">Why it woke</h4>`+kv([["reason",esc(inv.wake_reason)]])+
+      (inv.wake_detail?`<pre>${esc(inv.wake_detail)}</pre>`:"");
+    body+=`<h4 class="k">Information: delivered / noticed / missed</h4>`+kv([
+      ["delivered",(inv.delivered_observation_ids||[]).map(esc).join(", ")||"none"],
+      ["noticed",(inv.noticed_observation_ids||[]).map(esc).join(", ")||"none"],
+      ["missed",(inv.missed_observation_ids||[]).length?`<span class="chip warn">${inv.missed_observation_ids.map(esc).join(", ")}</span>`:"none — everything delivered was noticed"],
+      ["trigger events",(inv.trigger_event_ids||[]).map(esc).join(", ")||"—"],
+      ["retrieved memories",(inv.retrieved_memory_ids||[]).map(esc).join(", ")||"none"],
+    ]);
+    body+=`<h4 class="k">Feasible actions offered</h4>`+
+      ((inv.feasible_actions||[]).length?inner(`${inv.feasible_actions.length} action(s)`,`<pre>${jf(inv.feasible_actions)}</pre>`):`<span class="dimtxt">none recorded</span>`);
+    body+=fullText("EXACT prompt given to the model", inv.exact_prompt, "prompt");
+    body+=fullText("EXACT raw provider response", inv.provider_response, "resp");
+    body+=`<h4 class="k">Parsed intent</h4><pre>${jf(inv.intent)}</pre>`;
+    body+=`<h4 class="k">Environment validation</h4>`+kv([
+      ["status",esc(inv.validation_status)],["reason",esc(inv.validation_reason)]]);
+    body+=`<h4 class="k">Resulting events (applied to the world)</h4>`;
+    body+=(inv.resulting_events||[]).length
+      ? inv.resulting_events.map(e=>inner(`${esc(e.event_id)} · ${esc(e.kind)} @ ${esc(e.time)}`,`<pre>${jf(e.payload)}</pre>`)).join("")
+      : `<span class="dimtxt">no events applied (the actor waited or was rejected)</span>`;
+    if(inv.plan_before!=null||inv.plan_after!=null||inv.plan_disposition)
+      body+=`<h4 class="k">Plan transition</h4>`+kv([["disposition",esc(inv.plan_disposition)],
+        ["before",inv.plan_before==null?"—":jf(inv.plan_before)],["after",inv.plan_after==null?"—":jf(inv.plan_after)]]);
+    if(inv.local_view) body+=inner("Full local view (everything the actor could see)",`<pre>${jf(inv.local_view)}</pre>`);
+    if(inv.state_before||inv.state_after)
+      body+=inner("Actor state before / after",`<pre>${jf({before:inv.state_before, after:inv.state_after})}</pre>`);
+    body+=`<h4 class="k">Actor evidence lineage</h4>`+evidenceBlock(inv.actor_evidence_claim_ids);
+    return `<details class="row" id="inv-${inv.index}"><summary>${sum}</summary><div class="body">${body}</div></details>`;
+  }).join("");
+  return h;
+}
+
+// ---------- 3 · communications ----------
+function vComms(){
+  const c=S.d.communications||{};
+  let h=`<h3 class="v">Communications — send → deliver → notice ${srcChip("communications.jsonl")}</h3>`;
+  if(!c.recorded) return h+noticeBox(c.notice);
+  if(c.notice) h+=noticeBox(c.notice,"info");
+  if(!(c.rows||[]).length) return h+`<div class="hint">communications.jsonl was recorded and contains no communication events for this run.</div>`;
+  h+=c.rows.map(r=>{
+    const chain=[`<span class="chip"><b>${esc(r.kind)}</b> @ ${esc(r.time)}</span>`];
+    (r.delivered_to||[]).forEach(d=>chain.push(`<span class="chip">delivered → ${esc(d.actor_id)} @ ${esc(d.time)}</span>`));
+    (r.noticed_by||[]).forEach(n=>chain.push(`<span class="chip good">noticed by ${esc(n.actor_id)} (${invLink(n.invocation_index)})</span>`));
+    (r.missed_by||[]).forEach(m=>chain.push(`<span class="chip warn">delivered but NOT noticed: ${esc(m.actor_id)}</span>`));
+    if(!(r.delivered_to||[]).length) chain.push(`<span class="chip">no recorded delivery to an actor invocation</span>`);
+    const sum=`<span>${esc(r.time)}</span><span class="t-event">${esc(r.kind)}</span>
+      <span class="subsum">${esc(short(r.content||"(no content recorded)",80))}</span>
+      <span class="dimtxt">${esc(r.branch)}</span>`;
+    const body=kv([
+      ["event id",esc(r.event_id)],["sender",dash(r.sender)],
+      ["recipients",(r.recipients||[]).map(esc).join(", ")||"—"],["visibility",dash(r.visibility)],
+      ["content",r.content?esc(r.content):`<span class="dimtxt">no content recorded on this event</span>`],
+    ])+`<h4 class="k">Chain</h4>${chain.join(" ")}`
+      +(r.payload?`<h4 class="k">Ledger payload</h4><pre>${jf(r.payload)}</pre>`:"");
+    return `<details class="row"><summary>${sum}</summary><div class="body">${body}</div></details>`;
+  }).join("");
+  return h;
+}
+
+// ---------- 4 · processes ----------
+function vProcesses(){
+  const p=S.d.processes||{};
+  let h=`<h3 class="v">Processes — non-actor transitions ${srcChip("process_transitions.jsonl")}</h3>`;
+  if(!p.recorded) return h+noticeBox(p.notice);
+  if(p.notice) h+=noticeBox(p.notice,"info");
+  if(!(p.rows||[]).length) return h+`<div class="hint">process_transitions.jsonl was recorded and contains no process transitions.</div>`;
+  h+=p.rows.map(r=>{
+    const sum=`<span>${esc(r.time)}</span><span class="t-event">${esc(r.operation)}</span>
+      <span class="subsum">${esc(short(JSON.stringify(r.inputs),80))}</span><span class="dimtxt">${esc(r.branch)}</span>`;
+    const body=kv([["event id",esc(r.event_id)],["operation",esc(r.operation)],["branch",esc(r.branch)]])
+      +`<h4 class="k">Inputs</h4><pre>${jf(r.inputs)}</pre>`
+      +`<h4 class="k">Outputs</h4>`+(r.outputs&&Object.keys(r.outputs).length?`<pre>${jf(r.outputs)}</pre>`:`<span class="dimtxt">no outputs recorded</span>`)
+      +`<h4 class="k">Evidence</h4>`+evidenceBlock(r.evidence_claim_ids);
+    return `<details class="row"><summary>${sum}</summary><div class="body">${body}</div></details>`;
+  }).join("");
+  return h;
+}
+
+// ---------- 5 · world state ----------
+function stateTable(state, prev){
+  if(state==null) return `<div class="hint">not recorded</div>`;
+  const keys=Object.keys(state);
+  if(!keys.length) return `<div class="hint">empty state (recorded)</div>`;
+  return `<div class="tablewrap"><table><tr><th>field</th><th>value</th></tr>`+keys.sort().map(k=>{
+    const changed=prev&&JSON.stringify(prev[k])!==JSON.stringify(state[k]);
+    return `<tr><td>${esc(k)}</td><td class="statecell${changed?" changed":""}">${esc(JSON.stringify(state[k]))}</td></tr>`;
+  }).join("")+`</table></div>`;
+}
+window.setWsPos=(bi,pos)=>{ S.wsPos[bi]=+pos; render(); };
+function vState(){
+  const w=S.d.world_state||{};
+  let h=`<h3 class="v">World state — per-branch fields over time ${srcChip("state_diffs.jsonl")}</h3>`;
+  if(!w.recorded){
+    h+=noticeBox(w.notice);
+    if((w.branches||[]).length){
+      h+=`<div class="hint">The forecast's per-branch final state is still shown below — it is a real recorded artifact.</div>`;
+      w.branches.forEach(b=>{ h+=inner(`branch ${esc(b.id)} — final state from forecast.json`, stateTable(b.forecast_final)); });
+    }
+    return h;
+  }
+  if(w.notice) h+=noticeBox(w.notice,"info");
+  const branches=w.branches||[];
+  if(!branches.length) return h+`<div class="hint">no branches recorded</div>`;
+  h+=branchTabs(branches, S.wsBranch, "setWsBranch");
+  const b=branches[S.wsBranch]||branches[0];
+  const steps=b.steps||[];
+  const pos=Math.min(S.wsPos[S.wsBranch]??steps.length, steps.length);
+  const stateAt = pos===0 ? (b.initial??{}) : steps[pos-1].state_after;
+  const prev = pos<=1 ? (b.initial??{}) : steps[pos-2].state_after;
+  h+=`<h4 class="k">Scrub the recorded diffs (initial state + ordered diffs = the branch, no model call)</h4>`;
+  h+=`<input type="range" min="0" max="${steps.length}" value="${pos}" oninput="setWsPos(${S.wsBranch},this.value)">`;
+  h+=`<div class="hint">position ${pos}/${steps.length} — ${pos===0?"initial state (before any diff)":`after ${esc(steps[pos-1].operation)} @ ${esc(steps[pos-1].time)} (event ${esc(steps[pos-1].event_id)}, by ${esc(steps[pos-1].triggered_by)})`}</div>`;
+  h+=stateTable(stateAt, pos===0?null:prev);
+  if(pos>0) h+=inner("diff applied at this position",`<pre>${jf(steps[pos-1].diff)}</pre>`);
+  h+=`<h4 class="k">All recorded diffs for this branch</h4>`;
+  h+=steps.length?`<div class="tablewrap"><table><tr><th>time</th><th>event</th><th>operation</th><th>triggered by</th><th>diff</th></tr>`+
+    steps.map(s=>`<tr><td>${esc(s.time)}</td><td>${esc(s.event_id)}</td><td>${esc(s.operation)}</td><td>${esc(s.triggered_by)}</td><td>${esc(JSON.stringify(s.diff))}</td></tr>`).join("")+`</table></div>`
+    :`<div class="hint">no diffs recorded for this branch — its state never changed after initialization</div>`;
+  h+=`<h4 class="k">Initial vs final</h4><div class="cols">
+    <div><h4 class="k">initial (state before first diff)</h4>${stateTable(b.initial)}</div>
+    <div><h4 class="k">final (after last diff)</h4>${stateTable(b.final, b.initial)}</div>
+    <div><h4 class="k">forecast.json world_state (published)</h4>${stateTable(b.forecast_final)}</div>
+  </div>`;
+  return h;
+}
+
+// ---------- 6 · model calls ----------
+function vLLM(){
+  const L=S.d.llm||{}, t=L.totals||{}, fp=L.field_presence||{};
+  let h=`<h3 class="v">Model calls ${srcChip("llm_calls.jsonl")}${srcChip("llm_calls_full.jsonl")}</h3>`;
+  if(L.notice) h+=noticeBox(L.notice);
+  h+=`<div>${[["calls",num(t.count)],["tokens in",num(t.tokens_in)],["tokens out",num(t.tokens_out)],
+    ["retries",num(t.retries)],["est. cost",t.estimated_cost_usd!=null?("$"+t.estimated_cost_usd):"not recorded"]]
+    .map(([k,v])=>`<span class="chip">${k} <b>${v}</b></span>`).join("")}</div>`;
+  const missing=Object.entries(fp).filter(([k,v])=>v!=="recorded");
+  if(missing.length) h+=noticeBox("Per-call fields absent from this run's log: "+missing.map(([k,v])=>`${k} (${v})`).join("; "));
+  h+=`<h4 class="k">By task kind</h4><div>`+Object.entries(t.by_kind||{}).sort((a,b)=>b[1]-a[1])
+    .map(([k,c])=>`<span class="chip">${esc(k)} <b>${c}</b></span>`).join("")+`</div>`;
+  h+=`<h4 class="k">Every call</h4>`;
+  h+=(L.calls||[]).map(c=>{
+    const sum=`<span>#${c.call_number}</span><span class="t-invocation">${esc(c.task_kind)}</span>
+      <span>${num(c.tokens_in)} → ${num(c.tokens_out)} tok</span>
+      <span class="dimtxt">${c.latency_ms!=null?c.latency_ms+" ms":"latency —"}</span>
+      <span class="dimtxt">${c.started_at?esc(c.started_at):"time —"}</span>
+      ${c.retries?`<span class="chip warn">retries ${c.retries}</span>`:""}
+      ${c.estimated_cost_usd!=null?`<span class="chip">$${c.estimated_cost_usd}</span>`:""}`;
+    let body=kv([
+      ["model",esc(c.model)],["seed",dash(c.seed)],["prompt sha256",esc(c.prompt_hash)],
+      ["started",c.started_at?esc(c.started_at):"not recorded by this run"],
+      ["ended",c.ended_at?esc(c.ended_at):"not recorded by this run"],
+      ["latency",c.latency_ms!=null?c.latency_ms+" ms":"not recorded by this run"],
+    ]);
+    body+=fullText("Prompt", c.prompt, "prompt",
+      `prompt text not recorded by this run — only its hash (${c.prompt_hash||"none"}). ${fp.prompt&&fp.prompt!=="recorded"?fp.prompt:""}`);
+    body+=fullText("Response (verbatim)", c.response, "resp", "response not recorded");
+    return `<details class="row"><summary>${sum}</summary><div class="body">${body}</div></details>`;
+  }).join("");
+  return h;
+}
+
+// ---------- 7 · branches & weights ----------
+function vBranches(){
+  const B=S.d.branches||{}, pr=B.probability||{};
+  let h=`<h3 class="v">Branches & weights ${srcChip("forecast.json")}${srcChip("branch_weight_history.jsonl")}${srcChip("probability_reconstruction.json")}</h3>`;
+  h+=`<h4 class="k">Exact probability substitution</h4>`;
+  if(pr.recorded){
+    h+=kv([["formula",esc(pr.aggregation_formula)]]);
+    h+=`<pre>${esc(pr.numeric_substitution||"(no substitution string recorded)")}</pre>`;
+    const w=pr.weights||{};
+    h+=`<div>${w.all_weights_ungrounded?`<span class="chip bad">all weights ungrounded</span>`:""}
+      ${w.flag?`<span class="chip warn">${esc(w.flag)}</span>`:""}
+      ${(w.outcome_provenances||[]).map(p=>`<span class="chip">provenance: ${esc(p)}</span>`).join("")}</div>`;
+    if((pr.mismatches||[]).length){
+      h+=`<h4 class="k">Published vs recomputed mismatches</h4><div class="tablewrap"><table>
+        <tr><th>field</th><th>published</th><th>recomputed</th><th>severity</th><th>invalidates</th><th>note</th></tr>`+
+        pr.mismatches.map(m=>`<tr><td>${esc(m.field)}</td><td>${dash(m.published)}</td><td>${dash(m.recomputed)}</td>
+          <td><span class="sev ${esc(m.severity)}">${esc(m.severity)}</span></td><td>${m.invalidates_result?"YES":"no"}</td><td style="font-family:var(--sans)">${esc(m.note)}</td></tr>`).join("")+`</table></div>`;
+    }
+    h+=inner("published vs recomputed (full)",`<pre>${jf({published:pr.published,recomputed:pr.recomputed})}</pre>`);
+  } else h+=noticeBox(pr.notice);
+  if(!B.pre_outcome_recorded)
+    h+=noticeBox("per-branch pre-simulation outcomes (pre_outcome) and weight-grounded flags are not recorded in this run's forecast.json — the columns below show them as such rather than inventing values");
+  if(B.weight_history_notice) h+=noticeBox(B.weight_history_notice, B.weight_history_notice.startsWith("not recorded")?"":"info");
+  h+=`<h4 class="k">Branches</h4><div class="tablewrap"><table>
+    <tr><th>branch</th><th>weight</th><th>grounded</th><th>provenance</th><th>conditions</th><th>pre-sim outcome</th><th>outcome</th><th>contribution</th></tr>`+
+    (B.rows||[]).map(b=>{
+      const hist=b.history||{};
+      const prov=(hist.provenance||[]).join(", ");
+      return `<tr><td>${esc(b.local_id)}</td><td>${fx(b.weight,4)}</td>
+        <td>${b.weight_grounded==null?`<span class="dimtxt">not recorded</span>`:(b.weight_grounded?`<span class="sev PASS">yes</span>`:`<span class="sev HIGH">no</span>`)}</td>
+        <td>${prov?esc(prov):`<span class="dimtxt">—</span>`}</td>
+        <td>${esc(JSON.stringify(b.conditions))}</td>
+        <td>${b.pre_outcome==null?`<span class="dimtxt">not recorded</span>`:`<span class="oc-${esc(b.pre_outcome)}">${esc(b.pre_outcome)}</span>`}</td>
+        <td><span class="oc-${esc(b.outcome||"UNRESOLVED")}">${esc(b.outcome||(b.resolved===false?"UNRESOLVED":"—"))}</span></td>
+        <td>${hist.contribution_to_probability!=null?fx(hist.contribution_to_probability,4):"—"}</td></tr>`;
+    }).join("")+`</table></div>`;
+  h+=(B.rows||[]).map(b=>{
+    const hist=b.history, te=b.terminal_evaluation, sch=b.schedule;
+    let body=kv([["branch id",esc(b.id)],["resolved",String(b.resolved)],["unresolved reason",dash(b.unresolved_reason)]]);
+    if(hist) body+=`<h4 class="k">Weight history</h4>`+kv([
+      ["starting weight",fx(hist.starting_weight,4)],["final weight",fx(hist.final_weight,4)],
+      ["why it started there",esc(hist.reason_for_starting_weight)],
+      ["provenance",(hist.provenance||[]).map(esc).join(", ")],
+      ["changes during run",(hist.weight_changes||[]).length?jf(hist.weight_changes):"none recorded"],
+      ["assumptions",jf(hist.assumptions)],["terminal result",esc(hist.terminal_result)]]);
+    else body+=`<h4 class="k">Weight history</h4><div class="hint">not recorded for this branch</div>`;
+    if(sch) body+=`<h4 class="k">Schedule</h4>`+kv([
+      ["batches",dash(sch.batches)],["events (in loop)",dash(sch.events)],
+      ["actor invocations",jf(sch.actor_invocations||{})],["stop reason",esc(sch.stop_reason)],
+      ["unfired in horizon",dash(sch.unfired_in_horizon)],
+      ["pending beyond horizon",(sch.pending_beyond_horizon||[]).length?jf(sch.pending_beyond_horizon):"none"]]);
+    if(te) body+=`<h4 class="k">Terminal evaluation</h4>`+kv([
+      ["published outcome",`<span class="oc-${esc(te.published_outcome)}">${esc(te.published_outcome)}</span>`],
+      ["recomputed outcome",`<span class="oc-${esc(te.recomputed_outcome)}">${esc(te.recomputed_outcome)}</span>`],
+      ["matches published",te.matches_published?`<span class="sev PASS">yes</span>`:`<span class="sev HIGH">NO</span>`],
+      ["fields read",jf(te.fields_read)],["evaluated via",esc(te.terminal_evaluated_via)]]);
+    if(b.counterfactuals) body+=`<h4 class="k">Deletion counterfactuals</h4><pre>${jf(b.counterfactuals)}</pre>`;
+    body+=`<h4 class="k">Final world state (published)</h4><pre>${jf(b.world_state)}</pre>`;
+    return `<details class="row"><summary><span>${esc(b.local_id)}</span><span>w=${fx(b.weight,3)}</span>
+      <span class="oc-${esc(b.outcome||"UNRESOLVED")}">${esc(b.outcome||"—")}</span>
+      <span class="dimtxt">details: weight history · schedule · terminal eval · counterfactuals</span></summary>
+      <div class="body">${body}</div></details>`;
+  }).join("");
+  h+=`<h4 class="k">Uncertainty variables (weights provenance)</h4>`;
+  h+=(B.uncertainties||[]).map(u=>inner(
+    `${esc(u.variable)} — ${esc(short(u.why_unknown,90))}`,
+    `<div class="tablewrap"><table><tr><th>value</th><th>weight</th><th>provenance</th></tr>`+
+    (u.outcomes||[]).map(o=>`<tr><td>${esc(o.value)}</td><td>${fx(o.weight,3)}</td><td>${esc(o.provenance)}</td></tr>`).join("")+
+    `</table></div>${u.reversal_capable!=null?`<span class="chip">reversal capable: ${u.reversal_capable}</span>`:""}`)).join("")
+    ||`<div class="hint">no uncertainty variables recorded</div>`;
+  const su=B.structural_uncertainty;
+  h+=`<h4 class="k">Structural uncertainty ${srcChip("structural_uncertainty.json")}</h4>`;
+  h+=su?kv([["material",String(su.is_material)],["primary weight",fx(su.primary_weight,3)],
+    ["undescribed mass",fx(su.undescribed_mass,3)],["reason",esc(su.reason)]])
+    :`<div class="notice">structural_uncertainty.json not recorded by this run</div>`;
+  return h;
+}
+
+// ---------- 8 · terminal lineage ----------
+function vLineage(){
+  const L=S.d.lineage||{};
+  let h=`<h3 class="v">Terminal lineage — claim → semantic object → runtime id → events → terminal ${srcChip("semantic_runtime_lineage.jsonl")}${srcChip("terminal_evaluations.jsonl")}</h3>`;
+  if(!L.recorded) h+=noticeBox(L.notice);
+  else{
+    if(L.notice) h+=noticeBox(L.notice,"info");
+    const groups={};
+    (L.records||[]).forEach(r=>{(groups[r.namespace||"?"]=groups[r.namespace||"?"]||[]).push(r);});
+    h+=Object.entries(groups).map(([ns,recs])=>
+      `<h4 class="k">${esc(ns)} (${recs.length})</h4>`+recs.map(r=>{
+        const sum=`<span><b>${esc(r.semantic_object)}</b> → <span class="t-event">${esc(r.runtime_id)}</span></span>
+          <span class="dimtxt">${esc(r.lowering_rule)}</span>
+          <span class="chip ${r.executed?"good":""}">${r.executed?"executed":"never executed"}</span>
+          ${(r.event_ids||[]).length?`<span class="chip">${r.event_ids.length} event(s)</span>`:""}`;
+        const body=kv([["lowering rule",esc(r.lowering_rule)],["executed",String(r.executed)],
+          ["runtime events",(r.event_ids||[]).map(esc).join(", ")||"none"]])+
+          `<h4 class="k">Evidence claims behind this object</h4>`+evidenceBlock(r.evidence_claim_ids);
+        return `<details class="row"><summary>${sum}</summary><div class="body">${body}</div></details>`;
+      }).join("")).join("");
+  }
+  h+=`<h4 class="k">Terminal evaluations (recomputed from the ledger vs published)</h4>`;
+  if(L.terminals_notice&&!(L.terminals||[]).length) h+=noticeBox(L.terminals_notice);
+  else h+=`<div class="tablewrap"><table><tr><th>branch</th><th>published</th><th>recomputed</th><th>match</th><th>fields read</th><th>evaluated via</th></tr>`+
+    (L.terminals||[]).map(t=>`<tr><td>${esc(t.branch)}</td>
+      <td><span class="oc-${esc(t.published_outcome)}">${esc(t.published_outcome)}</span></td>
+      <td><span class="oc-${esc(t.recomputed_outcome)}">${esc(t.recomputed_outcome)}</span></td>
+      <td>${t.matches_published?`<span class="sev PASS">yes</span>`:`<span class="sev HIGH">NO</span>`}</td>
+      <td>${esc(JSON.stringify(t.fields_read))}</td><td style="font-family:var(--sans)">${esc(t.terminal_evaluated_via)}</td></tr>`).join("")+`</table></div>`;
+  return h;
+}
+
+// ---------- 9 · cost & timing ----------
+function vCost(){
+  const C=S.d.cost||{}, t=C.totals||{};
+  let h=`<h3 class="v">Cost & timing — per-stage aggregates from the model-call log ${srcChip("llm_calls.jsonl")}${srcChip("llm_calls_full.jsonl")}</h3>`;
+  h+=`<div>${[["calls",num(t.calls)],["tokens in",num(t.tokens_in)],["tokens out",num(t.tokens_out)],
+    ["est. cost",t.estimated_cost_usd!=null?("$"+t.estimated_cost_usd):"not recorded"],
+    ["run started",C.started_at||"—"],["wall",C.wall_seconds!=null?Math.round(C.wall_seconds)+"s":"not recorded"]]
+    .map(([k,v])=>`<span class="chip">${esc(k)} <b>${esc(v)}</b></span>`).join("")}</div>`;
+  if(C.cost_note) h+=noticeBox(C.cost_note,"info");
+  if(C.latency_notice) h+=noticeBox(C.latency_notice);
+  h+=`<div class="tablewrap"><table><tr><th>stage (task kind)</th><th>calls</th><th>tokens in</th><th>tokens out</th><th>retries</th><th>est. cost USD</th><th>latency</th></tr>`+
+    (C.by_stage||[]).map(s=>`<tr><td>${esc(s.task_kind)}</td><td>${num(s.calls)}</td><td>${num(s.tokens_in)}</td>
+      <td>${num(s.tokens_out)}</td><td>${num(s.retries)}</td>
+      <td>${s.estimated_cost_usd!=null?("$"+s.estimated_cost_usd):`<span class="dimtxt">not recorded</span>`}</td>
+      <td>${s.latency_ms!=null?(s.latency_ms+" ms"):`<span class="dimtxt">not recorded</span>`}</td></tr>`).join("")+
+    `</table></div>`;
+  return h;
+}
+
+// ---------- 10 · audit ----------
+function findingsTable(findings){
+  if(!(findings||[]).length) return `<div class="hint">no findings recorded</div>`;
+  return `<div class="tablewrap"><table><tr><th>severity</th><th>key</th><th>finding</th><th>evidence basis</th></tr>`+
+    findings.map(f=>`<tr><td><span class="sev ${esc(f.severity)}">${esc(f.severity)}</span></td>
+      <td>${esc(f.key)}</td><td style="font-family:var(--sans)">${esc(f.finding)}</td>
+      <td style="font-family:var(--sans)" class="dimtxt">${esc(f.evidence_basis)}</td></tr>`).join("")+`</table></div>`;
+}
+function vAudit(){
+  const A=S.d.audit||{};
+  let h=`<h3 class="v">Audit — world review · trajectory audit · forensic verdict · responsibility</h3>`;
+  const wr=A.world_review;
+  h+=`<h4 class="k">Pre-simulation world review ${srcChip("world_review.json")}</h4>`;
+  if(!wr) h+=noticeBox(A.world_review_notice);
+  else{
+    if((wr.blocking_failures||[]).length)
+      h+=`<div>${wr.blocking_failures.map(b=>`<span class="chip bad">BLOCKING: ${esc(b)}</span>`).join("")}</div>`;
+    if(wr.disposition) h+=kv([["disposition",esc(wr.disposition)]]);
+    if((wr.concerns||[]).length) h+=inner(`${wr.concerns.length} concern(s)`,wr.concerns.map(c=>`<pre>${esc(c)}</pre>`).join(""));
+    h+=findingsTable(wr.findings);
+    if((wr.answers||[]).length) h+=inner("reviewer answers (all questions)",
+      `<div class="tablewrap"><table><tr><th>ok</th><th>question</th><th>why</th></tr>`+
+      wr.answers.map(a=>`<tr><td>${a.ok?`<span class="sev PASS">ok</span>`:`<span class="sev FAIL">FAIL</span>`}</td>
+        <td>${esc(a.question)}</td><td style="font-family:var(--sans)">${esc(a.why)}</td></tr>`).join("")+`</table></div>`);
+  }
+  const ta=A.trajectory_audit;
+  h+=`<h4 class="k">Post-simulation trajectory audit ${srcChip("trajectory_audit.json")}</h4>`;
+  if(!ta) h+=noticeBox(A.trajectory_audit_notice);
+  else{
+    h+=kv([["classification",`<b>${esc(ta.classification)}</b>`],["error",ta.error?esc(ta.error):null]]);
+    h+=findingsTable(ta.findings);
+  }
+  const v=A.verdict;
+  h+=`<h4 class="k">Forensic verdict ${srcChip("forensic_verdict.json")}</h4>`;
+  if(!v) h+=noticeBox(A.verdict_notice);
+  else{
+    h+=kv([["verdict",`<b>${esc(v.verdict)}</b>`],["audit classification",esc(v.audit_classification)],
+      ["commit",esc(v.commit)],["label",esc(v.label)],["run dir",esc(v.run_dir)],
+      ["world review disposition",esc(v.world_review_disposition)],
+      ["world review blocking",(v.world_review_blocking||[]).map(b=>`<span class="chip bad">${esc(b)}</span>`).join(" ")||null]]);
+    if((v.mismatches||[]).length) h+=`<div class="tablewrap"><table><tr><th>field</th><th>published</th><th>recomputed</th><th>severity</th><th>note</th></tr>`+
+      v.mismatches.map(m=>`<tr><td>${esc(m.field)}</td><td>${dash(m.published)}</td><td>${dash(m.recomputed)}</td>
+        <td><span class="sev ${esc(m.severity)}">${esc(m.severity)}</span></td><td style="font-family:var(--sans)">${esc(m.note)}</td></tr>`).join("")+`</table></div>`;
+    if((v.reconstruction_notes||[]).length) h+=inner("reconstruction notes",v.reconstruction_notes.map(n=>`<pre>${esc(typeof n==="string"?n:JSON.stringify(n,null,1))}</pre>`).join(""));
+    h+=inner("full verdict record",`<pre>${jf(v)}</pre>`);
+  }
+  const R=A.responsibility;
+  h+=`<h4 class="k">Trajectory responsibility ${srcChip("trajectory_responsibility.json")}</h4>`;
+  if(!R) h+=noticeBox(A.responsibility_notice);
+  else{
+    h+=kv([["classification",`<b>${esc(R.classification)}</b>`],["method",esc(R.method)]]);
+    if(R.signals) h+=inner("signals",`<pre>${jf(R.signals)}</pre>`);
+    const pb=R.per_branch_counterfactuals||{};
+    if(Object.keys(pb).length){
+      h+=`<h4 class="k">Per-branch deletion counterfactuals (outcome if the listed record is deleted)</h4>`;
+      h+=`<div class="tablewrap"><table><tr><th>branch</th><th>all actors removed</th><th>all processes removed</th><th>everything removed</th><th>terminal-relevant actions removed</th></tr>`+
+        Object.entries(pb).map(([bid,c])=>`<tr><td>${esc(bid)}</td>
+          <td><span class="oc-${esc(c.all_actor_output_removed)}">${esc(c.all_actor_output_removed)}</span></td>
+          <td><span class="oc-${esc(c.all_process_output_removed)}">${esc(c.all_process_output_removed)}</span></td>
+          <td><span class="oc-${esc(c.everything_removed)}">${esc(c.everything_removed)}</span></td>
+          <td><span class="oc-${esc(c.terminal_relevant_actions_removed)}">${esc(c.terminal_relevant_actions_removed)}</span></td></tr>`).join("")+`</table></div>`;
+      h+=inner("per-branch counterfactuals (full, incl. per-actor / per-process-kind)",`<pre>${jf(pb)}</pre>`);
+    }
+  }
+  return h;
+}
+
+boot();
+</script>
+</body>
+</html>

@@ -168,6 +168,7 @@
   <header id="topbar">
     <div class="brand">◉ WORLD&nbsp;MODEL <small>replay</small></div>
     <select id="tracepick" title="Pick a run to replay"></select>
+    <a id="dossierlink" class="badge" href="/dossier" title="Full run dossier: timeline, actors, communications, processes, state, calls, weights, lineage, cost, audit">dossier ⧉</a>
     <div class="q" id="question">Select a run to begin.</div>
     <div class="badges" id="badges"></div>
   </header>
@@ -244,6 +245,7 @@ async function boot(){
 
 async function loadTrace(path){
   $("#question").textContent="loading…";
+  $("#dossierlink").href="/dossier?trace="+encodeURIComponent(path);
   let d;
   try{ const r=await fetch("/api/replay?trace="+encodeURIComponent(path)); d=await r.json(); }
   catch(e){ $("#question").textContent="failed to load trace"; return; }

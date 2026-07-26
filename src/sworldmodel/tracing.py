@@ -9,11 +9,13 @@ deterministic so artifacts are hashable and comparable across runs.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from . import replaycore
 from .compiled import CompiledWorld
 from .engine import RunResult
 from .evidence import EvidenceStore
@@ -366,8 +368,126 @@ class TraceContext:
             audit_dict = getattr(audit, "as_dict", None)
             if callable(audit_dict):
                 (out_dir / name).write_text(canonical_json(audit_dict()) + "\n")
+        self._write_observability(out_dir)
         (out_dir / report_name).write_text(self.render_report(forecast_hash))
         return forecast_hash
+
+    # -- observability (OBS-1..4, OBS-7, OBS-8; derived through the D7 replay core) --
+
+    def _executable_world(self) -> Any:
+        """The run's own executable world, for replay: the exact compilation dict the
+        engine executed when the bundle carries it, else the parsed spec itself."""
+
+        executed = getattr(self.bundle, "executed_compilation", None)
+        return executed if executed is not None else self.compiled.spec
+
+    def _observability_record(self, out_dir: Path) -> replaycore.RunRecord:
+        """This run, presented to the replay core exactly as a later reader sees it."""
+
+        def as_dict(obj: Any) -> dict[str, Any]:
+            method = getattr(obj, "as_dict", None)
+            return dict(method()) if callable(method) else {}
+
+        stamp_path = out_dir / "run_stamp.json"
+        try:
+            stamp = json.loads(stamp_path.read_text()) if stamp_path.exists() else {}
+        except (OSError, ValueError):
+            stamp = {}
+        return replaycore.RunRecord(
+            label=out_dir.name or "run",
+            run_dir=str(out_dir),
+            forecast=self.forecast_payload(),
+            manifest=self.world_manifest(),
+            schedule=self.schedule_manifest(),
+            stamp=stamp if isinstance(stamp, dict) else {},
+            events=list(self.run_result.event_ledger),
+            decisions=list(self.run_result.actor_decisions),
+            calls=self._gateway_calls(),
+            audit=as_dict(self.trajectory_audit),
+            review=as_dict(self.world_review),
+            world=self._executable_world(),
+        )
+
+    def _write_observability(self, out_dir: Path) -> None:
+        """Persist the complete observability set, at trace-write time, derived from
+        the run's own record through the ONE shared replay core (decision D7).
+
+        Everything here is a deterministic replay of what this run already recorded —
+        no model call, no re-simulation, no second replay implementation. A value the
+        run did not record is written as absent/unknown, never guessed.
+        """
+
+        world = self._executable_world()
+        initials = replaycore.initial_fields_from_world(world) or {}
+        events = list(self.run_result.event_ledger)
+        decisions = list(self.run_result.actor_decisions)
+        by_branch = replaycore.group_events_by_branch(events)
+
+        # OBS-1: per namespaced branch, the complete field state after this branch's
+        # scenario conditions and before any simulated effect.
+        initial_states: dict[str, Any] = {}
+        initial_by_key: dict[str, dict[str, Any]] = {}
+        for b in self.run_result.branch_outcomes:
+            key = replaycore.branch_key(b.branch_id)
+            branch_events = by_branch.get(key, [])
+            state = replaycore.branch_initial_state(initials, branch_events)
+            initial_by_key[key] = state
+            initial_states[b.branch_id] = {
+                "branch_key": key,
+                "conditions": dict(b.key_conditions),
+                "fields": state,
+                "source": (
+                    "executed compilation field initials + this branch's scenario "
+                    "release_data conditions; a declared field with no initial and no "
+                    "scenario condition reads null (never written, never invented)"
+                ),
+            }
+        # A branch that appears in the ledger without a branch outcome still replays
+        # from the compiled initials rather than silently from nothing.
+        for key, branch_events in by_branch.items():
+            if key not in initial_by_key:
+                initial_by_key[key] = replaycore.branch_initial_state(initials, branch_events)
+        (out_dir / "branch_initial_state.json").write_text(canonical_json(initial_states) + "\n")
+
+        # OBS-2 (§12): every state diff, with trigger, authority lineage and terminal
+        # relevance; initial state + these diffs reconstruct every branch exactly.
+        terminal_fields = replaycore.terminal_field_reads(
+            replaycore.terminal_ast_from_world(world),
+            dict(self.world_manifest().get("terminal") or {}),
+        )
+        diffs = replaycore.derive_state_diffs(
+            events, initial_by_branch=initial_by_key, terminal_fields=terminal_fields
+        )
+        _write_jsonl(out_dir / "state_diffs.jsonl", diffs)
+
+        # OBS-3 (§11): every communication, with the honest delivery→notice join
+        # against the recorded actor decisions.
+        _write_jsonl(
+            out_dir / "communications.jsonl",
+            replaycore.extract_communications(events, decisions),
+        )
+
+        # OBS-4: every non-actor process transition.
+        _write_jsonl(
+            out_dir / "process_transitions.jsonl",
+            replaycore.extract_process_transitions(events),
+        )
+
+        # OBS-8 (§13): the chronological dossier, rendered from the same
+        # reconstruction the forensic tool performs — at trace-write time.
+        record = self._observability_record(out_dir)
+        result = replaycore.reconstruct_run(record)
+        timeline = replaycore.build_timeline(events, decisions)
+        (out_dir / "run_dossier.html").write_text(
+            replaycore.render_dossier(
+                result,
+                timeline,
+                decisions,
+                record.calls,
+                title_prefix="Run dossier",
+                artifacts_note=replaycore.RUN_ARTIFACTS_NOTE,
+            )
+        )
 
     def structure_manifest(self) -> dict[str, Any]:
         """Whether the compiled causal structure was treated as settled, which
@@ -544,6 +664,13 @@ class TraceContext:
             add(f"- {lim}")
 
         return "\n".join(lines) + "\n"
+
+
+def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
+    """One canonical-JSON line per row; an empty derivation writes an empty file, so a
+    reader can tell 'nothing happened' from 'nothing was persisted'."""
+
+    path.write_text("".join(canonical_json(r) + "\n" for r in rows))
 
 
 def _invocation_line(d: Any) -> str:

@@ -50,6 +50,13 @@ PIPELINE_ARTIFACTS = (
     "branch_schedule.json",
     "trajectory_audit.json",
     "run_audit.json",
+    # the observability set (OBS-1..4, OBS-7, OBS-8), derived at trace-write time
+    # from the run's own record through the shared replay core (decision D7)
+    "branch_initial_state.json",
+    "state_diffs.jsonl",
+    "communications.jsonl",
+    "process_transitions.jsonl",
+    "run_dossier.html",
     # research and diagnosis
     "research_trace.json",
     "evidence_store.json",
