@@ -326,6 +326,12 @@ PROBABILITY_SOURCE = "weighted_simulated_trajectories"
 # any evidence (symmetric ignorance / sensitivity enumeration). The scenario average is
 # still reported for reference, but the honest answer is the bounds.
 PROBABILITY_SOURCE_UNGROUNDED_WEIGHTS = "scenario_enumeration_ungrounded_weights"
+# Every resolved branch already carried its final answer before the first event fired:
+# the cited record decided the question and the simulation changed nothing. Reporting
+# such a run as "weighted_simulated_trajectories" claims a provenance it does not have —
+# a live OPEC+ run published 1.00 under that label with zero scheduling batches, zero
+# actor invocations and a terminal that was true at t0.
+PROBABILITY_SOURCE_ESTABLISHED = "established_before_simulation_from_cited_record"
 
 
 @dataclass(frozen=True)

@@ -49,6 +49,11 @@ class ResearchBundle:
     outcome: dict[str, Any] | None = None  # post-cutoff; never used by the forecast
     live_trace: dict[str, Any] | None = None
     compile_responses: tuple[Any, ...] = ()
+    # The exact compilation dict this bundle was parsed from — the executable world,
+    # verbatim, as ``parse_world_spec`` consumed it. Persisted with the trace so a run
+    # can be replayed deterministically without recompiling: a trace that records what
+    # a world DID but not what the world WAS cannot be independently reconstructed.
+    executed_compilation: dict[str, Any] | None = None
 
 
 class ResearchBackend(Protocol):
@@ -106,4 +111,8 @@ def assemble_bundle(store: EvidenceStore, data: dict[str, Any]) -> ResearchBundl
         as_of=as_of,
         outcome=data.get("outcome"),
         compile_responses=tuple(data.get("_compile_responses", []) or []),
+        # Verbatim, minus the gateway response objects (not JSON, and already written
+        # to the call log): this is the world the engine executed, kept so the trace
+        # can persist it for replay.
+        executed_compilation={k: v for k, v in data.items() if k != "_compile_responses"},
     )

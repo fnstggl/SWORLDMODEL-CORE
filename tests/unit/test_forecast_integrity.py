@@ -15,6 +15,7 @@ from datetime import datetime
 import pytest
 
 from sworldmodel.models import (
+    PROBABILITY_SOURCE,
     BranchOutcome,
     IntegrityVerdict,
     RealityManifest,
@@ -160,10 +161,13 @@ def test_agreeing_ungrounded_branches_do_not_flag_the_source() -> None:
     """When every ungrounded branch says the same thing, the arbitrary weights cannot
     move the number, so the point estimate does not depend on them."""
 
+    # The branches resolve YES through the simulation (pre_outcome=None): a branch
+    # already YES at t0 is a record-established answer, which is a different claim with
+    # its own source label and its own test below.
     forecast = _aggregate(
         (
-            _branch("a", 0.5, "YES", pre_outcome="YES", weight_grounded=False, value="a"),
-            _branch("b", 0.5, "YES", pre_outcome="YES", weight_grounded=False, value="b"),
+            _branch("a", 0.5, "YES", pre_outcome=None, weight_grounded=False, value="a"),
+            _branch("b", 0.5, "YES", pre_outcome=None, weight_grounded=False, value="b"),
         )
     )
     assert forecast.simulation_probability == pytest.approx(1.0)
@@ -300,3 +304,32 @@ def test_scenario_groundedness_helper_reads_the_weakest_provenance() -> None:
     assert weights_grounded(scenario(WeightProvenance.MARKET_SURVEY))
     assert weights_grounded(scenario(WeightProvenance.CALIBRATED_BEHAVIOR))
     assert weights_grounded(scenario(WeightProvenance.EXPLICIT_MODEL))
+
+
+def test_an_answer_the_record_already_carried_is_not_labeled_a_trajectory() -> None:
+    """A live OPEC+ run published 1.00 under probability_source
+    'weighted_simulated_trajectories' with zero scheduling batches, zero actor
+    invocations, and a terminal already true at t0. The label claimed a provenance the
+    trace could not support. When every resolved branch already carried its final
+    answer before the first event fired, the source must say so."""
+
+    from sworldmodel.models import PROBABILITY_SOURCE_ESTABLISHED
+
+    settled = _aggregate(
+        (_branch("b1", 1.0, "YES", pre_outcome="YES", weight_grounded=True, event_count=0),)
+    )
+    assert settled.probability_source == PROBABILITY_SOURCE_ESTABLISHED
+    assert settled.simulation_probability == 1.0
+
+    # Produced by the run rather than carried into it: the trajectory label stands.
+    produced = _aggregate((_branch("b1", 1.0, "YES", pre_outcome=None, weight_grounded=True),))
+    assert produced.probability_source == PROBABILITY_SOURCE
+
+    # A settled branch beside one the simulation actually moved is NOT "established".
+    mixed = _aggregate(
+        (
+            _branch("b1", 0.5, "YES", pre_outcome="YES", weight_grounded=True),
+            _branch("b2", 0.5, "NO", pre_outcome=None, weight_grounded=True),
+        )
+    )
+    assert mixed.probability_source != PROBABILITY_SOURCE_ESTABLISHED

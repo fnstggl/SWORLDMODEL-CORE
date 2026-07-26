@@ -20,6 +20,7 @@ from __future__ import annotations
 from .errors import MassConservationError
 from .models import (
     PROBABILITY_SOURCE,
+    PROBABILITY_SOURCE_ESTABLISHED,
     PROBABILITY_SOURCE_UNGROUNDED_WEIGHTS,
     BranchOutcome,
     ForecastIntegrity,
@@ -118,11 +119,25 @@ def aggregate(
         b.outcome for b in branch_outcomes if b.resolved and not b.weight_grounded
     }
     answer_depends_on_arbitrary_weights = len(ungrounded_answers) > 1
-    probability_source = (
-        PROBABILITY_SOURCE_UNGROUNDED_WEIGHTS
-        if answer_depends_on_arbitrary_weights
-        else PROBABILITY_SOURCE
+    # A run in which every resolved branch already carried its final answer at t0 did
+    # not produce that answer by simulating: the cited record did. Labeling it
+    # "weighted_simulated_trajectories" claims a provenance the trace cannot support,
+    # which is exactly how a live OPEC+ run published 1.00 with zero scheduling
+    # batches and zero actor invocations under a trajectory label.
+    # Restricted to YES on purpose, matching the compile gate's own framing: a terminal
+    # already SATISFIED at t0 was carried in by the record, while a terminal that says
+    # NO at t0 and still says NO is the ordinary open world in which the actors simply
+    # never produced the outcome — a real simulated result, not a citation.
+    resolved_branches = [b for b in branch_outcomes if b.resolved]
+    established_before_simulation = bool(resolved_branches) and all(
+        b.pre_resolved and b.pre_outcome == "YES" and b.outcome == "YES" for b in resolved_branches
     )
+    if established_before_simulation:
+        probability_source = PROBABILITY_SOURCE_ESTABLISHED
+    elif answer_depends_on_arbitrary_weights:
+        probability_source = PROBABILITY_SOURCE_UNGROUNDED_WEIGHTS
+    else:
+        probability_source = PROBABILITY_SOURCE
     point_estimate_is_calibrated = sim_prob is not None and not answer_depends_on_arbitrary_weights
 
     integrity = ForecastIntegrity(

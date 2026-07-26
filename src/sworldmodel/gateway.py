@@ -20,6 +20,7 @@ from __future__ import annotations
 import abc
 import threading
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 from .errors import GatewayError
@@ -49,6 +50,13 @@ class GatewayResponse:
     retries: int = 0
     validation_failures: tuple[str, ...] = ()
     latency_ms: int = 0
+    # Forensic fields, stamped by :meth:`ModelGateway.generate` so no implementation can
+    # forget them. A forecast whose call log carries only a prompt HASH cannot be
+    # independently reconstructed — a reviewer can see that a call happened and not what
+    # was asked — and without wall timestamps the run has no chronology at all.
+    prompt: str = ""
+    started_at: str = ""
+    ended_at: str = ""
 
 
 class ModelGateway(abc.ABC):
@@ -120,7 +128,17 @@ class ModelGateway(abc.ABC):
 
     def generate(self, request: GatewayRequest) -> GatewayResponse:
         self._check_budget(request)
+        started = datetime.now(UTC)
         response = self._generate(request)
+        ended = datetime.now(UTC)
+        # Stamped here rather than in each implementation: a forensic reconstruction
+        # needs the exact request text and a wall chronology for EVERY call, and a
+        # field an implementation can forget is a field the record will be missing.
+        response.prompt = request.prompt
+        response.started_at = started.isoformat()
+        response.ended_at = ended.isoformat()
+        if not response.latency_ms:
+            response.latency_ms = int((ended - started).total_seconds() * 1000)
         with self._lock:
             self.call_count += 1
             self.total_tokens += response.tokens_in + response.tokens_out

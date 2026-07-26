@@ -204,18 +204,34 @@ class TraceContext:
         ]
 
     def llm_call_lines(self) -> list[str]:
+        """Every provider call, in order, complete enough to reconstruct the run.
+
+        ``call_number`` gives the chronology an independent reviewer needs; ``prompt``
+        and ``raw_text`` are the exact request and the exact unparsed response beside
+        the parsed one, so a reviewer can check the parse rather than trust it. A log
+        carrying only a prompt hash proves that a call happened and nothing about what
+        it asked.
+        """
+
         lines = []
-        for r in self._gateway_calls():
+        for i, r in enumerate(self._gateway_calls(), start=1):
             lines.append(
                 canonical_json(
                     {
+                        "call_number": i,
                         "task_kind": r.task_kind,
                         "model": r.model,
                         "seed": r.seed,
                         "prompt_hash": r.prompt_hash,
+                        "started_at": r.started_at,
+                        "ended_at": r.ended_at,
+                        "latency_ms": r.latency_ms,
                         "tokens_in": r.tokens_in,
                         "tokens_out": r.tokens_out,
                         "retries": r.retries,
+                        "validation_failures": list(r.validation_failures),
+                        "prompt": r.prompt,
+                        "raw_text": r.raw_text,
                         "response": r.data,
                     }
                 )
@@ -306,6 +322,13 @@ class TraceContext:
             canonical_json(self.evidence_manifest()) + "\n"
         )
         (out_dir / "world_manifest.json").write_text(canonical_json(self.world_manifest()) + "\n")
+        # The executable world itself, not a summary of it. world_manifest.json renders
+        # the terminal as a human-readable string; replaying a run needs the exact dict
+        # parse_world_spec consumed. Without it a completed forecast cannot be
+        # re-executed or independently re-evaluated without recompiling through an LLM.
+        executed = getattr(self.bundle, "executed_compilation", None)
+        if executed is not None:
+            (out_dir / "compiled_world.json").write_text(canonical_json(executed) + "\n")
         (out_dir / "coverage_report.json").write_text(
             canonical_json(self.coverage_manifest()) + "\n"
         )

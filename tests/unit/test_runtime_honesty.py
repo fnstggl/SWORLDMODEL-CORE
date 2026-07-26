@@ -709,3 +709,35 @@ def test_completion_exports_the_bundle_that_was_actually_simulated(monkeypatch, 
     assert trace == {"semantic_repair_rounds": [{"plan": "the simulated one"}]}
     store = _json.loads((tmp_path / "evidence_store.json").read_text())
     assert {c["id"] for c in store} == {c.id for c in final_bundle.evidence_store.all()}
+
+
+# --------------------------------------------------------------------------- #
+# The forensic record: a published number must be reconstructable from the trace.
+# --------------------------------------------------------------------------- #
+
+
+def test_the_trace_persists_the_executable_world_for_replay() -> None:
+    """world_manifest.json renders the terminal as a human-readable string; replaying a
+    run needs the exact dict parse_world_spec consumed. Without it a completed forecast
+    cannot be re-evaluated without recompiling through an LLM."""
+
+    from sworldmodel.research import assemble_bundle
+
+    data = _authority_mismatch_world()
+    bundle = assemble_bundle(build_bundle(data).evidence_store, data)
+    assert bundle.executed_compilation is not None
+    assert bundle.executed_compilation["world_spec"] == data["world_spec"]
+    assert "_compile_responses" not in bundle.executed_compilation
+
+
+def test_every_provider_call_records_its_prompt_and_wall_chronology() -> None:
+    """A call log carrying only a prompt hash proves a call happened and nothing about
+    what it asked, and without wall timestamps a run has no chronology at all. The base
+    gateway stamps both so no implementation can omit them."""
+
+    gw = _wait_gateway()
+    resp = gw.generate(_request())
+    assert resp.prompt == _request().prompt and resp.prompt
+    assert resp.started_at and resp.ended_at
+    assert resp.started_at <= resp.ended_at
+    assert resp.latency_ms >= 0
