@@ -46,7 +46,9 @@ if m.exists():
                tokens_cached=mt.get("tokens_cached_prompt"),
                cache_hit_rate=mt.get("prompt_cache_hit_rate"),
                memo_reuses=mt.get("memo_reuses"),
-               calls_by_stage=mt.get("calls_by_stage"))
+               calls_by_stage=mt.get("calls_by_stage"),
+               provider_seconds=mt.get("provider_seconds_total"),
+               max_call_seconds=mt.get("max_call_seconds"))
 print(json.dumps(row, sort_keys=True))
 PY
     ) &

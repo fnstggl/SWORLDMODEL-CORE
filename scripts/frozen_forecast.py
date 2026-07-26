@@ -110,6 +110,12 @@ def _write_metrics(out: Path, gateway: DeepSeekGateway, wall: float, mode: str, 
                 "memo_reuses": gateway.memo_hits,
                 "retries": gateway.retries,
                 "failed_calls": gateway.failed_calls,
+                # The floor analysis: how much of the wall is provider generation.
+                # provider_seconds_total sums every call's latency (it exceeds the
+                # wall when calls overlap); the serial floor is what a fully serial
+                # run of the same calls would have cost.
+                "provider_seconds_total": round(sum(gateway.latencies_ms) / 1000, 1),
+                "max_call_seconds": round(max(gateway.latencies_ms, default=0) / 1000, 1),
             }
         )
         + "\n"
