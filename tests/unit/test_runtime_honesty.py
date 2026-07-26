@@ -480,3 +480,67 @@ def test_evidence_export_writes_every_claim_field(tmp_path: Any) -> None:
         for key in ("valid_from", "valid_until", "archived_at"):
             value = getattr(claim, key)
             assert record[key] == (value.isoformat() if value is not None else None)
+
+
+# ---------------------------------------------------------------------------
+# M-5: per-run call/token ceilings at the gateway
+# ---------------------------------------------------------------------------
+
+
+def _request(kind: str = "actor_decision") -> Any:
+    from sworldmodel.gateway import GatewayRequest
+
+    return GatewayRequest(task_kind=kind, prompt="p", context={}, seed=0)
+
+
+def test_call_budget_exhaustion_raises_a_gateway_error() -> None:
+    from sworldmodel.errors import GatewayError
+
+    gw = ProgrammableGateway({"actor_decision": {"mode": "wait", "reason": "r"}})
+    gw.set_budget(max_calls=2)
+    gw.generate(_request())
+    gw.generate(_request())
+    with pytest.raises(GatewayError, match="call budget exhausted"):
+        gw.generate(_request())
+    assert gw.call_count == 2, "the refused call must not be counted as made"
+
+
+def test_token_budget_exhaustion_raises_a_gateway_error() -> None:
+    from sworldmodel.errors import GatewayError
+
+    gw = ProgrammableGateway({"actor_decision": {"mode": "wait", "reason": "r"}})
+    gw.set_budget(max_tokens_total=1)
+    gw.generate(_request())  # crosses the ceiling
+    with pytest.raises(GatewayError, match="token budget exhausted"):
+        gw.generate(_request())
+
+
+def test_directly_constructed_gateways_stay_unbounded() -> None:
+    gw = ProgrammableGateway({"actor_decision": {"mode": "wait", "reason": "r"}})
+    for _ in range(10):
+        gw.generate(_request())
+    assert gw.call_count == 10
+
+
+def test_run_forecast_threads_the_configured_caps_to_the_gateway() -> None:
+    """A config cap of zero calls must stop the pipeline at its first model call with
+    the budget's own GatewayError — proof the config reached the gateway."""
+
+    from _fakes import FixtureResearchBackend
+    from sworldmodel.api import run_forecast
+    from sworldmodel.config import ForecastConfig
+    from sworldmodel.errors import GatewayError
+
+    assert ForecastConfig.__dataclass_fields__["max_calls"].default == 400
+    assert ForecastConfig.__dataclass_fields__["max_tokens_total"].default == 2_000_000
+
+    gw = _wait_gateway()
+    bundle = build_bundle(_authority_mismatch_world())
+    config = ForecastConfig(
+        gateway=gw,
+        research_backend=FixtureResearchBackend(bundle),
+        max_calls=0,
+    )
+    with pytest.raises(GatewayError, match="call budget exhausted"):
+        run_forecast("will an entry be recorded?", AS_OF, HORIZON, config)
+    assert gw.call_count == 0

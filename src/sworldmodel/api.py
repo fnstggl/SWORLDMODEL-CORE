@@ -694,6 +694,13 @@ def run_forecast(
 ) -> tuple[ForecastResult, TraceContext]:
     """Run the full pipeline and return the result plus a trace context for writing."""
 
+    # The run's spend ceilings reach the gateway before the first call: research,
+    # compilation, assessment, actors and audit all share one budget, and exhaustion
+    # surfaces as a GatewayError the existing handlers turn into honest refusals or
+    # unresolved branches — never into a cheaper answer.
+    config.gateway.set_budget(
+        max_calls=config.max_calls, max_tokens_total=config.max_tokens_total
+    )
     log = RepairLog()
     try:
         bundle = config.research_backend.research(question, as_of, horizon)
