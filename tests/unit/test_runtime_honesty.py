@@ -432,3 +432,51 @@ def test_no_feasible_action_wake_is_recorded_with_reasons() -> None:
     assert "authority" in rec.validation_reason
     # The skip records a wake, not an action: nothing was applied.
     assert rec.event_ids == []
+
+
+# ---------------------------------------------------------------------------
+# H-6 (export half): the evidence export carries the COMPLETE claim record
+# ---------------------------------------------------------------------------
+
+
+def test_evidence_export_writes_every_claim_field(tmp_path: Any) -> None:
+    """The export used to write 8 of the claim's fields, dropping authority_level,
+    source_type, published_at, validity, source_id, confidence, retrieved_at and
+    lineage_event_id — so replayed stores misranked authority and changed which claims
+    the compiler saw. Every dataclass field must reach disk, stably encoded."""
+
+    import json
+
+    from sworldmodel.api import _write_research_files
+    from sworldmodel.evidence import EvidenceClaim
+
+    bundle = build_bundle(_authority_mismatch_world())
+
+    class _Cfg:
+        trace_dir = tmp_path
+
+    _write_research_files(_Cfg, {}, bundle.evidence_store)
+    records = json.loads((tmp_path / "evidence_store.json").read_text())
+    assert records, "no claims exported"
+
+    expected = set(EvidenceClaim.__dataclass_fields__)
+    for record in records:
+        missing = expected - set(record)
+        assert not missing, f"export drops claim fields: {sorted(missing)}"
+
+    # Stable encodings: enum VALUES and ISO datetimes, never reprs.
+    claims = {c.id: c for c in bundle.evidence_store.all()}
+    for record in records:
+        claim = claims[record["id"]]
+        assert record["epistemic_type"] == claim.epistemic_type.value
+        assert record["source_type"] == claim.source_type.value
+        assert record["authority_level"] == claim.authority_level.value
+        assert record["confidence"] == claim.confidence
+        assert record["lineage_event_id"] == claim.lineage_event_id
+        assert record["source_id"] == claim.source_id
+        assert datetime.fromisoformat(record["published_at"]) == claim.published_at
+        assert datetime.fromisoformat(record["retrieved_at"]) == claim.retrieved_at
+        assert datetime.fromisoformat(record["available_at"]) == claim.available_at
+        for key in ("valid_from", "valid_until", "archived_at"):
+            value = getattr(claim, key)
+            assert record[key] == (value.isoformat() if value is not None else None)

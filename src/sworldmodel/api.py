@@ -622,25 +622,52 @@ def _write_research_files(config: ForecastConfig, live_trace: dict[str, Any], st
         out.mkdir(parents=True, exist_ok=True)
         (out / "research_trace.json").write_text(canonical_json(live_trace) + "\n")
         (out / "evidence_store.json").write_text(
-            canonical_json(
-                [
-                    {
-                        "id": c.id,
-                        "proposition": c.proposition,
-                        "normalized_value": c.normalized_value,
-                        "entities": list(c.entities),
-                        "epistemic_type": c.epistemic_type.value,
-                        "source_url": c.source_url,
-                        "supporting_excerpt": c.supporting_excerpt,
-                        "available_at": c.available_at.isoformat(),
-                    }
-                    for c in store.all()
-                ]
-            )
-            + "\n"
+            canonical_json([_claim_record(c) for c in store.all()]) + "\n"
         )
     except OSError:
         pass
+
+
+def _claim_record(c: Any) -> dict[str, Any]:
+    """The COMPLETE evidence claim, exported stably (ISO datetimes, enum values).
+
+    The export used to write eight fields and drop authority_level, source_type,
+    published_at, valid_from/valid_until, source_id, confidence, retrieved_at and
+    lineage_event_id — so a store replayed from disk misranked authority and changed
+    which claims the compiler saw as decisive. Every dataclass field is written; the
+    original eight keep their exact names and encodings for backward compatibility.
+    """
+
+    def _iso(v: Any) -> str | None:
+        return v.isoformat() if isinstance(v, datetime) else None
+
+    return {
+        # -- the original eight, unchanged ---------------------------------------
+        "id": c.id,
+        "proposition": c.proposition,
+        "normalized_value": c.normalized_value,
+        "entities": list(c.entities),
+        "epistemic_type": c.epistemic_type.value,
+        "source_url": c.source_url,
+        "supporting_excerpt": c.supporting_excerpt,
+        "available_at": c.available_at.isoformat(),
+        # -- the rest of the record ----------------------------------------------
+        "valid_from": _iso(c.valid_from),
+        "valid_until": _iso(c.valid_until),
+        "published_at": c.published_at.isoformat(),
+        "source_id": c.source_id,
+        "source_title": c.source_title,
+        "source_type": c.source_type.value,
+        "authority_level": c.authority_level.value,
+        "lineage_event_id": c.lineage_event_id,
+        "confidence": c.confidence,
+        "retrieved_at": c.retrieved_at.isoformat(),
+        "contradiction_ids": list(c.contradiction_ids),
+        "retrieved_url": c.retrieved_url,
+        "archived_at": _iso(c.archived_at),
+        "content_sha256": c.content_sha256,
+        "extraction_prompt_sha256": c.extraction_prompt_sha256,
+    }
 
 
 def _checkpoint_partial(config: ForecastConfig, exc: BaseException) -> bool:
