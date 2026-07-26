@@ -143,6 +143,49 @@ def test_a_semantic_refusal_never_falls_back_to_direct() -> None:
     assert not [r for r in gw.seen if r.task_kind == "compile_world_spec"]
 
 
+def test_an_empty_admissible_view_refuses_before_any_model_call() -> None:
+    """A store with nothing admissible at the cutoff cannot ground any world, so no
+    plan it produced could cite anything and every repair round would re-derive the
+    same impossibility. The Banxico pastcast measured it: 939 seconds — the entire
+    compile-and-repair budget — spent discovering that nothing can cite nothing, then
+    refusing anyway. The refusal must arrive immediately, name the archive gap rather
+    than the compiler, and cost zero model calls; and it must be final, not
+    recompilable."""
+
+    from sworldmodel.api import compile_for_mode
+    from sworldmodel.evidence import EvidenceStore
+
+    empty = EvidenceStore().view(AS_OF)
+    for mode in ("semantic", "direct"):
+        gw = ProgrammableGateway({})
+        config = ForecastConfig(
+            gateway=gw,
+            research_backend=FixtureResearchBackend(build_bundle(single_response_world())),
+            compiler_mode=mode,
+        )
+        with pytest.raises(WorldIntegrityError) as exc:
+            compile_for_mode(config, "q?", AS_OF, HORIZON, empty)
+        assert exc.value.details["failure"] == "no_admissible_evidence"
+        assert exc.value.details["recompilable"] is False
+        assert gw.call_count == 0, f"{mode}: an ungroundable world must cost no calls"
+
+
+def test_the_empty_view_refusal_names_the_record_not_the_compiler() -> None:
+    from sworldmodel.diagnosis import RunDiagnosis
+    from sworldmodel.errors import WorldIntegrityError as WIE
+
+    diagnosis = RunDiagnosis(
+        question="q?",
+        as_of=AS_OF,
+        horizon=HORIZON,
+        failure=WIE("no evidence", details={"failure": "no_admissible_evidence"}),
+        failure_stage="compilation",
+    )
+    causes = [c["cause"] for c in diagnosis.root_cause()]
+    assert "archive_coverage_failure" in causes
+    assert "compiler_omission" not in causes
+
+
 def test_resume_rejects_artifacts_from_the_other_compiler_mode() -> None:
     """Rule 4. A bundle whose research trace was recorded under direct mode cannot be
     extended by a semantic run (or vice versa) — the mismatch refuses with its own

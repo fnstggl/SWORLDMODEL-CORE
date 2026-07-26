@@ -354,6 +354,28 @@ def compile_for_mode(
     record without a second return channel.
     """
 
+    # An empty admissible view cannot ground ANY world, so every plan it could
+    # produce is uncitable and every repair round re-derives the same impossibility.
+    # The Banxico pastcast measured this exactly: 40 candidate URLs, none with an
+    # archived capture at or before the cutoff, an empty store — and the semantic
+    # path then spent 939 seconds (the whole compile-and-repair budget) discovering
+    # that nothing can cite nothing, before refusing anyway. Refusing here is the
+    # SAME refusal 900 seconds earlier, and it names the true cause: the archive gap,
+    # not the compiler. No fidelity is traded — a world built from no evidence is
+    # precisely what the gates exist to refuse.
+    available = getattr(view, "available", None)
+    if callable(available) and not available():
+        raise WorldIntegrityError(
+            "no evidence is admissible at the cutoff — every claim retrieved postdates "
+            f"{as_of.isoformat()} or none was retrieved at all, so no faithful causal "
+            "world can be grounded and no compilation is attempted",
+            details={
+                "failure": "no_admissible_evidence",
+                "recompilable": False,
+                "as_of": as_of.isoformat(),
+            },
+        )
+
     # Semantic is the canonical default: a config that never states a mode compiles
     # semantically. "direct" runs ONLY when explicitly configured (the CLI's
     # `--compiler direct` diagnostic flag) — never chosen by question type, and never

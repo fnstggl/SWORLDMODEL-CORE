@@ -500,6 +500,14 @@ class RunDiagnosis:
                     "why": f"the semantic compiler stopped at the {gate} gate",
                 }
             )
+        if gate == "no_admissible_evidence":
+            out.append(
+                {
+                    "cause": "archive_coverage_failure",
+                    "why": "no claim is admissible at the cutoff, so no world was "
+                    "compiled at all — the record, not the compiler, is what is missing",
+                }
+            )
         if gate == "compiler_mode_mismatch":
             out.append(
                 {
