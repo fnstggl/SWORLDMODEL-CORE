@@ -591,3 +591,42 @@ def test_a_report_line_survives_an_intentless_wake() -> None:
 
     normal = _decision(intent={"mode": "act", "action_id": "sign_it"})
     assert "intent act sign_it" in _invocation_line(normal)
+
+
+def test_a_conjunction_of_conditions_is_caught_like_a_single_separating_variable() -> None:
+    """A Bank of England run resolved YES exactly on (job_market=slowing AND
+    inflation=other). The check only tested one variable at a time, so it reported PASS
+    with the words 'not a pure function of their symmetric-ignorance conditions' — while
+    the outcomes were precisely that function, of both variables jointly. An independent
+    forensic audit found the stated finding broader than the code that produced it."""
+
+    from sworldmodel.trajectory_audit import mechanical_trajectory_checks
+
+    def cell(job: str, infl: str, outcome: str) -> object:
+        return _branch(
+            f"sc_job:{job}_infl:{infl}",
+            outcome,
+            conditions=(("job_market", job), ("inflation", infl)),
+        )
+
+    run = _run(
+        branches=(
+            cell("not slowing", "other", "NO"),
+            cell("not slowing", "elevated", "NO"),
+            cell("slowing", "other", "YES"),
+            cell("slowing", "elevated", "NO"),
+        ),
+        final_worlds={},
+    )
+    compiled = _compiled(
+        _spec(),
+        tuple(
+            _scenario(f"sc_job:{j}_infl:{i}")
+            for j in ("not slowing", "slowing")
+            for i in ("other", "elevated")
+        ),
+    )
+    by_key = {f.key: f for f in mechanical_trajectory_checks(compiled, run)}
+    finding = by_key["result_equals_initialization"]
+    assert finding.severity == "MEDIUM", "a joint-function outcome must not report PASS"
+    assert "condition tuple" in finding.finding

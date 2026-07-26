@@ -70,6 +70,12 @@ class TraceContext:
             "model": self.model_id,
             "model_call_count": f.model_call_count,
             "token_usage": f.token_usage,
+            # The integrity block was computed on every run and written to no artifact:
+            # p_before, the shift the simulation produced, and the counterfactual note
+            # were visible only on the console. They are the numbers a reviewer needs
+            # FIRST — whether the trajectories moved the answer at all — and a forensic
+            # audit had to rebuild them from the raw ledger to find out.
+            "integrity": f.integrity.as_dict() if f.integrity is not None else None,
             "branches": [
                 {
                     "branch_id": b.branch_id,
@@ -79,6 +85,13 @@ class TraceContext:
                     "unresolved_reason": b.unresolved_reason,
                     "conditions": dict(b.key_conditions),
                     "world_state": dict(b.records),
+                    # Per branch, what the terminal already said at initialization.
+                    # Comparing it with `outcome` is how a reader sees which branches
+                    # the simulation actually decided.
+                    "pre_resolved": b.pre_resolved,
+                    "pre_outcome": b.pre_outcome,
+                    "weight_grounded": b.weight_grounded,
+                    "event_count": b.event_count,
                 }
                 for b in f.branch_outcomes
             ],

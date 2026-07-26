@@ -343,19 +343,54 @@ def _result_equals_initialization(
         ):
             separating = variable
             break
-    if not separating:
-        return [_pass(key, checked)]
-    return [
-        AuditFinding(
-            key=key,
-            severity="HIGH",
-            finding="the forecast repeats its initialization",
-            evidence_basis=(
-                f"every branch's YES/NO is a function of its condition on {separating!r} "
-                "alone, and every branch weight carries symmetric-ignorance provenance"
-            ),
-        )
-    ]
+    if separating:
+        return [
+            AuditFinding(
+                key=key,
+                severity="HIGH",
+                finding="the forecast repeats its initialization",
+                evidence_basis=(
+                    f"every branch's YES/NO is a function of its condition on "
+                    f"{separating!r} alone, and every branch weight carries "
+                    "symmetric-ignorance provenance"
+                ),
+            )
+        ]
+
+    # Single-variable separation is not the only way an outcome can be its own input.
+    # A Bank of England run resolved YES exactly on (job_market=slowing AND
+    # inflation=other) — a clean conjunction, invisible to the loop above, which
+    # reported PASS with the words "not a pure function of their symmetric-ignorance
+    # conditions". The outcomes were precisely that function, of both variables
+    # jointly. Any injective map from the full condition tuple to the answer is the
+    # same defect one dimension up: no two branches sharing a condition tuple disagree,
+    # so the answer is determined the moment the branch is chosen.
+    joint: dict[tuple[tuple[str, str], ...], set[str]] = {}
+    for b in outcomes:
+        joint.setdefault(tuple(sorted(b.key_conditions)), set()).add(str(b.outcome))
+    distinct_answers = {next(iter(v)) for v in joint.values() if len(v) == 1}
+    if (
+        len(joint) == len(outcomes)  # every branch has its own condition tuple
+        and all(len(v) == 1 for v in joint.values())
+        and len(distinct_answers) > 1
+    ):
+        return [
+            AuditFinding(
+                key=key,
+                severity="MEDIUM",
+                finding=(
+                    "each branch's YES/NO is determined by its condition tuple, so the "
+                    "answer is fixed once the branch is chosen and the probability is "
+                    "the weight of the winning cells"
+                ),
+                evidence_basis=(
+                    f"the {len(outcomes)} branches have {len(joint)} distinct condition "
+                    "tuples and no two branches sharing a tuple disagree; every branch "
+                    "weight carries symmetric-ignorance provenance"
+                ),
+            )
+        ]
+    return [_pass(key, checked)]
 
 
 def _unproduced_yes(compiled: CompiledWorld, run_result: RunResult) -> list[AuditFinding]:

@@ -1034,6 +1034,17 @@ def run_forecast(
     # digest. Advisory and never raising — it classifies what happened, it does not
     # decide whether the run was allowed.
     ctx.trajectory_audit = audit_trajectory(compiled, run_result, config.gateway, question=question)
+    # The audit is a call this run made, so it belongs in this run's cost. The counters
+    # were snapshotted when the result was assembled, one call earlier: a forensic
+    # reconstruction of a Bank of England run recomputed 26 calls / 166,883 tokens
+    # against a published 25 / 158,859 — the exact size of the audit call — and the
+    # run's own console log disagreed with its own sealed forecast.
+    result = replace(
+        result,
+        model_call_count=config.gateway.call_count,
+        token_usage=config.gateway.total_tokens,
+    )
+    ctx.forecast = result
     return result, ctx
 
 
