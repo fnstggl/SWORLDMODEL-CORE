@@ -356,6 +356,134 @@ def compile_for_mode(
     return data
 
 
+def _replan_initial_compile(
+    question: str,
+    as_of: datetime,
+    horizon: datetime,
+    config: ForecastConfig,
+    exc: SWorldModelError,
+    log: RepairLog,
+) -> ResearchBundle | None:
+    """Repair a compile refusal that fired inside ``research()``, before any bundle
+    existed.
+
+    The repair registry covers plan-stage failures — ``semantic_plan_invalid``,
+    ``lowering_gap`` — but the repair loop only wraps the world-level gates, so an
+    initial compile that refused with ``recompilable: True`` propagated straight to a
+    refusal whose diagnosis read ``repair_attempts: []``: the registered plan existed
+    and was never consulted. The research the refusal carries is complete (it rides on
+    the exception), so this re-reads that same store with the plan's instruction — the
+    identical discipline as :func:`_recompile` — and hands any resulting bundle back to
+    the normal gate-and-repair path, which decides everything else. Refusals repeat
+    with the same diagnosis, run out of plan, or run out of budget: then the refusal
+    stands, with the attempts on its record.
+    """
+
+    if not isinstance(exc, WorldIntegrityError) or exc.details.get("recompilable") is False:
+        return None
+    store = getattr(exc, "partial_evidence_store", None)
+    if store is None or not getattr(config.gateway, "is_live", False):
+        return None
+    deadline = time.monotonic() + max(0.0, config.max_compile_seconds)
+    failure_exc = exc
+    seen: set[str] = set()
+    claims = len(store.claims)
+    for _ in range(_REPAIR_CEILING):
+        failure = str(failure_exc.details.get("failure") or "unclassified")
+        plan = plan_repair(failure_exc, question, subject_entity="")
+        if plan is None:
+            log.record(
+                None,
+                failure=failure,
+                message=str(failure_exc),
+                claims_before=claims,
+                claims_after=claims,
+                outcome="no repair plan for this failure",
+            )
+            return None
+        signature = f"{failure}|{_failure_signature(failure_exc)}"
+        if signature in seen:
+            log.record(
+                plan,
+                failure=failure,
+                message=str(failure_exc),
+                claims_before=claims,
+                claims_after=claims,
+                outcome=(
+                    "the same refusal repeated with nothing new to read — a reroll, not a repair"
+                ),
+            )
+            return None
+        seen.add(signature)
+        if time.monotonic() > deadline:
+            log.record(
+                plan,
+                failure=failure,
+                message=str(failure_exc),
+                claims_before=claims,
+                claims_after=claims,
+                outcome=(
+                    f"repair budget of {config.max_compile_seconds:.0f}s exhausted "
+                    "before the attempt; the last diagnosis stands"
+                ),
+            )
+            return None
+        try:
+            data = compile_for_mode(
+                config,
+                question,
+                as_of,
+                horizon,
+                store.view(as_of),
+                extra_instruction=plan.instruction,
+                structure_id="primary",
+            )
+        except WorldIntegrityError as retry_exc:
+            log.record(
+                plan,
+                failure=failure,
+                message=str(failure_exc),
+                claims_before=claims,
+                claims_after=claims,
+                outcome=(
+                    "the replanned compilation was refused again: "
+                    f"{retry_exc.details.get('failure') or retry_exc}"
+                ),
+            )
+            if retry_exc.details.get("recompilable") is False:
+                return None
+            failure_exc = retry_exc
+            continue
+        except (GatewayError, ValueError, KeyError, TypeError, IndexError):
+            log.record(
+                plan,
+                failure=failure,
+                message=str(failure_exc),
+                claims_before=claims,
+                claims_after=claims,
+                outcome=(
+                    "the replanned compilation could not be produced or read — a "
+                    "provider error, or a world the parser could not make sense of"
+                ),
+            )
+            return None
+        log.record(
+            plan,
+            failure=failure,
+            message=str(failure_exc),
+            claims_before=claims,
+            claims_after=claims,
+            outcome="replanned from the refusal's own research; the world gates decide next",
+        )
+        live_trace = dict(getattr(exc, "partial_live_trace", None) or {})
+        if "_semantic" in data:
+            rounds = list(live_trace.get("semantic_repair_rounds") or [])
+            rounds.append(data["_semantic"])
+            live_trace["semantic_repair_rounds"] = rounds
+        return replace(assemble_bundle(store, data), live_trace=live_trace)
+    return None
+
+
 def _recompile(
     question: str,
     as_of: datetime,
@@ -710,11 +838,21 @@ def run_forecast(
         # The initial compile runs inside research(); when IT refuses, the research
         # that preceded it is complete and rides on the exception. Writing it and
         # naming the true stage keeps a compile refusal from erasing twenty minutes of
-        # retrieval and being misfiled as a discovery failure.
+        # retrieval and being misfiled as a discovery failure. And when the refusal is
+        # recompilable, the registered repair plan gets its chance here too — a
+        # plan-stage failure used to refuse outright with ``repair_attempts: []``
+        # because the repair loop only wrapped the world-level gates.
         reached_compile = _checkpoint_partial(config, exc)
-        raise ForecastRefused(
-            exc, stage="compilation" if reached_compile else "research", repair_log=log
-        ) from exc
+        replanned = (
+            _replan_initial_compile(question, as_of, horizon, config, exc, log)
+            if reached_compile
+            else None
+        )
+        if replanned is None:
+            raise ForecastRefused(
+                exc, stage="compilation" if reached_compile else "research", repair_log=log
+            ) from exc
+        bundle = replanned
     except (TypeError, ValueError, KeyError) as exc:
         # A parser or provider shape nobody anticipated. It is still a run that stopped,
         # and it still owes a diagnosis rather than a traceback.

@@ -540,3 +540,123 @@ def test_run_forecast_threads_the_configured_caps_to_the_gateway() -> None:
     with pytest.raises(GatewayError, match="call budget exhausted"):
         run_forecast("will an entry be recorded?", AS_OF, HORIZON, config)
     assert gw.call_count == 0
+
+
+# --------------------------------------------------------------------------- #
+# An initial-compile refusal gets its registered repair before it becomes final.
+# --------------------------------------------------------------------------- #
+
+
+def _initial_refusal(store) -> WorldIntegrityError:
+    from sworldmodel.errors import WorldIntegrityError
+
+    exc = WorldIntegrityError(
+        "the semantic plan is invalid after validator rounds: affordance 'hold' changes nothing",
+        details={"failure": "semantic_plan_invalid", "recompilable": True},
+    )
+    exc.partial_evidence_store = store  # type: ignore[attr-defined]
+    exc.partial_live_trace = {"queries": []}  # type: ignore[attr-defined]
+    return exc
+
+
+def test_an_initial_compile_refusal_is_replanned_not_refused_outright(monkeypatch) -> None:
+    """A geopolitical slice refused semantic_plan_invalid with ``repair_attempts: []``:
+    the repair registry held a plan for exactly that failure, but the repair loop only
+    wrapped the world-level gates, so a refusal from the initial compile inside
+    ``research()`` never consulted it. The replan must re-read the refusal's own store
+    with the plan's instruction and hand back a bundle for the normal gate path."""
+
+    import sworldmodel.api as api
+    from _fakes import FixtureResearchBackend
+    from sworldmodel.config import ForecastConfig
+    from sworldmodel.repair import RepairLog
+
+    bundle = build_bundle(_authority_mismatch_world())
+    exc = _initial_refusal(bundle.evidence_store)
+
+    seen: dict[str, object] = {}
+
+    def fake_compile(
+        config, question, as_of, horizon, view, *, extra_instruction="", structure_id="primary"
+    ):
+        seen["instruction"] = extra_instruction
+        return {"compiled": True}
+
+    def fake_assemble(store, data):
+        seen["store"] = store
+        return bundle
+
+    monkeypatch.setattr(api, "compile_for_mode", fake_compile)
+    monkeypatch.setattr(api, "assemble_bundle", fake_assemble)
+
+    gw = _wait_gateway()
+    gw.is_live = True  # type: ignore[attr-defined]
+    config = ForecastConfig(gateway=gw, research_backend=FixtureResearchBackend(bundle))
+    log = RepairLog()
+    out = api._replan_initial_compile("q?", AS_OF, HORIZON, config, exc, log)
+
+    assert out is not None
+    assert out.live_trace == {"queries": []}
+    assert seen["store"] is bundle.evidence_store
+    assert "changes nothing" in str(seen["instruction"]) or seen["instruction"], (
+        "the plan's instruction must reach the recompile"
+    )
+    assert len(log.attempts) == 1
+    assert log.attempts[0]["failure"] == "semantic_plan_invalid"
+    assert "replanned" in str(log.attempts[0]["outcome"])
+
+
+def test_a_replan_that_repeats_the_same_refusal_stops_as_a_reroll(monkeypatch) -> None:
+    """Temperature-zero replans can reproduce the exact failure. Repeating the same
+    diagnosis with nothing new to read is a reroll, and an honest run stops there
+    instead of burning the ceiling."""
+
+    import sworldmodel.api as api
+    from _fakes import FixtureResearchBackend
+    from sworldmodel.config import ForecastConfig
+    from sworldmodel.errors import WorldIntegrityError
+    from sworldmodel.repair import RepairLog
+
+    bundle = build_bundle(_authority_mismatch_world())
+    exc = _initial_refusal(bundle.evidence_store)
+
+    def same_refusal(*a, **k):
+        raise WorldIntegrityError(
+            str(exc), details={"failure": "semantic_plan_invalid", "recompilable": True}
+        )
+
+    monkeypatch.setattr(api, "compile_for_mode", same_refusal)
+
+    gw = _wait_gateway()
+    gw.is_live = True  # type: ignore[attr-defined]
+    config = ForecastConfig(gateway=gw, research_backend=FixtureResearchBackend(bundle))
+    log = RepairLog()
+    out = api._replan_initial_compile("q?", AS_OF, HORIZON, config, exc, log)
+
+    assert out is None
+    assert len(log.attempts) == 2, "one refused attempt, then the reroll stop"
+    assert "reroll" in str(log.attempts[-1]["outcome"])
+
+
+def test_a_final_refusal_and_a_dead_gateway_are_not_replanned() -> None:
+    import sworldmodel.api as api
+    from _fakes import FixtureResearchBackend
+    from sworldmodel.config import ForecastConfig
+    from sworldmodel.errors import WorldIntegrityError
+    from sworldmodel.repair import RepairLog
+
+    bundle = build_bundle(_authority_mismatch_world())
+    config = ForecastConfig(
+        gateway=_wait_gateway(), research_backend=FixtureResearchBackend(bundle)
+    )
+
+    final = WorldIntegrityError(
+        "reviewed and abstained",
+        details={"failure": "semantic_plan_invalid", "recompilable": False},
+    )
+    final.partial_evidence_store = bundle.evidence_store  # type: ignore[attr-defined]
+    assert api._replan_initial_compile("q?", AS_OF, HORIZON, config, final, RepairLog()) is None
+
+    # Recompilable, but the gateway is not live: no replan, no crash.
+    exc = _initial_refusal(bundle.evidence_store)
+    assert api._replan_initial_compile("q?", AS_OF, HORIZON, config, exc, RepairLog()) is None
