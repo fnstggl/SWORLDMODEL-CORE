@@ -45,7 +45,15 @@ byte-identical. Real gate run artifacts/phase1/individual/ completed at the
 integrated commit with the FULL observability set; it took the settled-record path
 and published established_before_simulation_from_cited_record (new honest label
 working in production). Read-only reviewer `obs-reviewer` is auditing it now —
-Phase-1 exit awaits its APPROVE. Note for FD-12: same frozen store has now produced
+Phase-1 exit REJECTED by obs-reviewer:
+trace side sound (OBS-1..5,7,8 closeable — every artifact recomputes byte-identically,
+LLM-free replay confirms YES at t0), but OBS-6 CRITICAL: viz resolve_forensics
+basename fallback attached slice92's forensics (0.25 BRANCH_WEIGHTS_DOMINATED) to the
+phase1 run (1.0 FACTUALLY_RESOLVED); plus HIGH (_llm prefers stale llm_calls_full) and
+MEDIUM (state view ignores branch_initial_state.json). obs-viewer respawned with the
+three findings (identity-match rule, own-calls preference, initial-state artifact);
+after its fix: CTO verify, commit, obs-reviewer re-checks items 4+8 only, then OBS
+rows close and Phase 2 launches (runtime-impl + realism-adversary per plan). Note for FD-12: same frozen store has now produced
 three structurally different plans across runs (0.25 four-branch, 0.50-class, 1.0
 factual resolution) — repeatability work is Phase 5.
 
