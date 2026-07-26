@@ -26,6 +26,7 @@ from .semantic_plan import (
     UNKNOWN,
     SemanticChange,
     SemanticPlan,
+    SemanticProcess,
     SemanticValue,
     TerminalQuery,
 )
@@ -408,6 +409,16 @@ def _lower_terminal(q: TerminalQuery, t: SymbolTable) -> dict[str, Any]:
 _VALUE_TYPES = {"quantity": "number", "boolean": "bool", "category": "string", "text": "string"}
 
 
+def _produced(base: str, p: SemanticProcess) -> str:
+    """information_produced is meaning, not metadata: it rides in the description the
+    actors, auditors and replay viewer actually read — validated content must lower
+    into something a consumer reads, or be recorded as dropped, never vanish."""
+
+    if p.information_produced:
+        return f"{base} [produces: {p.information_produced}]"
+    return base
+
+
 def _terminal_counted_events(q: TerminalQuery) -> set[str]:
     """Event names whose records the terminal counts (event_exists / record_count)."""
 
@@ -588,10 +599,15 @@ def lower_plan(
 
     fields = []
     for s in plan.states:
+        # why_material is meaning, not metadata: it survives in the field description
+        # every consumer of the field reads, never validated-then-vanished.
+        desc = f"{s.name} ({s.owner})" + (f" [{s.unit}]" if s.unit else "")
+        if s.why_material:
+            desc = f"{desc} — {s.why_material}"
         f: dict[str, Any] = {
             "field_id": t.resolve("field", s.name),
             "value_type": _lookup(_VALUE_TYPES, s.state_type, "state_type"),
-            "description": f"{s.name} ({s.owner})" + (f" [{s.unit}]" if s.unit else ""),
+            "description": desc,
             "evidence_claim_ids": list(s.evidence_claim_ids),
         }
         if s.initial != UNKNOWN:
@@ -676,7 +692,7 @@ def lower_plan(
                 {
                     "node_id": node_id,
                     "stage": node_id,
-                    "description": p.meaning,
+                    "description": _produced(p.meaning, p),
                     "at": p.at,
                     "after_node": "",
                     "delay_seconds": 0,
@@ -704,13 +720,16 @@ def lower_plan(
                     {
                         "node_id": node_id,
                         "stage": t.resolve("node", p.name),
-                        "description": o.description or p.meaning,
+                        "description": _produced(o.description or p.meaning, p),
                         "at": o.at,
                         "after_node": "",
                         "delay_seconds": o.delay_seconds,
                         "participants": [],
                         "action_ids": [],
                         "allow_novel": False,
+                        # A deadline is a deadline whatever the process kind: every
+                        # emitted node carries it, not only actor moments.
+                        "deadline": p.deadline,
                         "effects": effects,
                         "next_nodes": [],
                         "evidence_claim_ids": list(p.evidence_claim_ids),
@@ -729,11 +748,25 @@ def lower_plan(
             externals.append(
                 {
                     "process_id": t.resolve("external", p.name),
-                    "description": p.meaning,
+                    "description": _produced(p.meaning, p),
                     "occurrences": occurrences,
                     "evidence_claim_ids": list(p.evidence_claim_ids),
                 }
             )
+            if p.deadline is not None:
+                # An external process has no node to carry a deadline — the runtime
+                # enforces deadlines on process nodes only. The meaning cannot lower,
+                # so its loss is recorded, never silent.
+                t.records.append(
+                    {
+                        "semantic": f"deadline of process {p.name}",
+                        "namespace": "dropped",
+                        "runtime_id": "",
+                        "lowering_rule": "carried nowhere: an external process has no "
+                        "node to carry a deadline; only process nodes enforce one",
+                        "evidence_claim_ids": list(p.evidence_claim_ids),
+                    }
+                )
 
     # Second pass over dependencies: wire each dependent node into its predecessor's
     # next_nodes. Within a process, occurrence j follows occurrence j-1 when it names

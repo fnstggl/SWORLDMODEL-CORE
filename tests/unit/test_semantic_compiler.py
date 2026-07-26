@@ -1045,6 +1045,67 @@ def test_required_reality_facts_are_derived_from_cited_plan_content() -> None:
     assert len(parsed) == len(facts) and all(f.evidence_claim_ids for f in parsed)
 
 
+def test_no_validated_field_vanishes_without_lowering_or_a_dropped_record() -> None:
+    """M-2: SemanticProcess.inputs, information_produced, deadline on non-actor_moment
+    processes and SemanticState.why_material were validated and then discarded with no
+    trace. The silent-loss policy: everything the validator accepted must either lower
+    into something a consumer reads, or leave an explicit "dropped" mapping record
+    saying why it could not."""
+
+    data = observatory_plan()
+    data["processes"][0]["information_produced"] = "the realised february observing tally"
+    data["processes"][0]["deadline"] = "2026-02-27T00:00:00+00:00"
+    assert _valid(data) == []
+    compilation, mapping = lower_plan(parse_semantic_plan(data))
+    blob = json.dumps(compilation, default=str)
+
+    # information_produced and why_material lower into descriptions consumers read.
+    assert "the realised february observing tally" in blob
+    assert "drives how many hours February adds" in blob
+
+    # This world has no deciding entity, so the process input can wake nobody, and an
+    # external process has no node to carry a deadline: both leave explicit dropped
+    # records in the mapping artifact rather than vanishing.
+    dropped = [r for r in mapping if r["namespace"] == "dropped"]
+    assert dropped
+    for r in dropped:
+        assert r["runtime_id"] == ""
+        assert str(r["lowering_rule"]).startswith("carried nowhere: ")
+    assert any("february clear fraction" in r["semantic"] for r in dropped)
+    assert any("deadline" in r["semantic"] for r in dropped)
+
+    # The same deadline on a NODE process is not dropped: chained into the process
+    # graph, every emitted node carries it — a deadline is a deadline whatever the
+    # process kind, not an actor_moment privilege.
+    data2 = observatory_plan()
+    data2["processes"][0]["deadline"] = "2026-02-27T00:00:00+00:00"
+    data2["processes"].append(
+        {
+            "name": "march calibration",
+            "meaning": "the calibration pass follows the february runs",
+            "kind": "operational",
+            "occurrences": [
+                {
+                    "description": "calibration",
+                    "after_process": "february observing runs",
+                    "delay_seconds": 3600,
+                    "changes": [
+                        {"op": "increase", "target": "logged clear-sky hours", "amount": 1}
+                    ],
+                }
+            ],
+            "evidence_claim_ids": ["c-o2"],
+        }
+    )
+    assert _valid(data2) == []
+    comp2, mapping2 = lower_plan(parse_semantic_plan(data2))
+    nodes = {n["node_id"]: n for n in comp2["world_spec"]["process"]["nodes"]}
+    assert nodes["february_observing_runs"]["deadline"] == "2026-02-27T00:00:00+00:00"
+    assert not any(
+        r["namespace"] == "dropped" and "deadline" in r["semantic"] for r in mapping2
+    )
+
+
 def test_an_occurrence_at_or_before_the_cutoff_is_refused() -> None:
     """The simulation cannot re-perform history: a t0 occurrence that records the
     resolving event let a branch resolve YES off a re-enactment nobody produced."""
