@@ -408,6 +408,19 @@ class RunDiagnosis:
                     f"{fetch['rejection_reasons']}",
                 }
             )
+        if ext["claims_stored"] > 0 and ext["claims_admissible_at_cutoff"] == 0:
+            # The cause was registered in ROOT_CAUSES and never emitted: a holdout run
+            # with a cutoff seconds in the past stored claims whose availability all
+            # postdated as_of, compiled from an empty admissible view, and was filed
+            # as compiler_omission — pointing at the compiler for a record it never saw.
+            out.append(
+                {
+                    "cause": "archive_coverage_failure",
+                    "why": f"{ext['claims_stored']} claim(s) stored, none admissible at "
+                    "the cutoff — everything retrieved postdates as_of, so the compiler "
+                    "saw an empty record (a past cutoff admits only archived captures)",
+                }
+            )
         if research_recorded and disc["urls_considered_count"] == 0:
             out.append(
                 {"cause": "discovery_failure", "why": "no candidate URL was discovered at all"}

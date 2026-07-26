@@ -43,6 +43,7 @@ class _Diagnosis(RunDiagnosis):
         return {
             "claims_stored": 14,
             "claim_candidates": 20,
+            "claims_admissible_at_cutoff": 14,
             "extraction_calls": 8,
             "calls_returning_nothing": 1,
             "verification_rejection_reasons": {},
@@ -204,3 +205,33 @@ def test_nothing_can_act_with_idle_actors_gets_a_no_research_action_repair() -> 
     empty_plan = plan_repair(empty, "Will OPEC+ raise quotas?")
     assert empty_plan is not None
     assert empty_plan.queries  # research for the missing producer
+
+
+def test_a_store_with_nothing_admissible_at_the_cutoff_names_the_archive_gap() -> None:
+    """A holdout run whose cutoff sat seconds in the past stored claims that all
+    postdated as_of, compiled from an empty admissible view, and was filed as
+    compiler_omission — pointing at the compiler for a record it never saw.
+    archive_coverage_failure was in the vocabulary and never emitted."""
+
+    class _Starved(_Diagnosis):
+        def extraction(self) -> dict[str, Any]:
+            return {
+                "claims_stored": 9,
+                "claim_candidates": 12,
+                "claims_admissible_at_cutoff": 0,
+                "extraction_calls": 8,
+                "calls_returning_nothing": 1,
+                "verification_rejection_reasons": {},
+            }
+
+    d = _Starved(
+        question="q",
+        as_of=AS_OF,
+        horizon=HORIZON,
+        failure=_gate("semantic_plan_invalid"),
+    )
+    causes = [c["cause"] for c in d.root_cause()]
+    assert "archive_coverage_failure" in causes
+    assert causes.index("archive_coverage_failure") == 0, (
+        "the evidence-stage cause must be named before any compiler-stage cause"
+    )
