@@ -921,3 +921,76 @@ def test_a_factual_resolution_world_is_not_refused_for_having_no_producer() -> N
     with pytest.raises(WorldIntegrityError) as exc:
         verify_reality(_contract(subject_entity="the agreement"), view, {}, uncited)
     assert exc.value.details["failure"] == "no_causal_producer"
+
+
+# --------------------------------------------------------------------------- #
+# 6. The exclusion reviewer judges against the actual question, not in a vacuum.
+# --------------------------------------------------------------------------- #
+
+
+def test_the_exclusion_reviewer_is_shown_the_question_and_the_settled_record() -> None:
+    """A live OPEC+ run refused after the reviewer challenged the exclusion of a claim
+    about a member urging quota reassessment — while the compiled world already resolved
+    YES from the cited record of a pre-cutoff announcement. The reviewer had been asked
+    "could this item matter?" with no question, no window, and no knowledge that the
+    outcome was already established, so every topical claim earned a reflexive yes.
+    The prompt must carry the contract and, under a cited factual resolution, invert
+    the materiality test to "could this contradict the settled record?"."""
+
+    from sworldmodel.gateway import GatewayRequest, GatewayResponse, ModelGateway
+    from sworldmodel.world_compiler import exclusion_reviewer
+
+    class _CapturingGateway(ModelGateway):
+        is_live = True
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.prompts: list[str] = []
+
+        @property
+        def model_id(self) -> str:
+            return "capturing-stub"
+
+        def _generate(self, request: GatewayRequest) -> GatewayResponse:
+            self.prompts.append(request.prompt)
+            return GatewayResponse(
+                task_kind=request.task_kind,
+                data={"could_matter": False, "why": "stub"},
+                raw_text="{}",
+                model=self.model_id,
+                params={},
+                seed=request.seed,
+                prompt_hash="",
+                tokens_in=1,
+                tokens_out=1,
+            )
+
+    pressure = EvidenceCandidate(
+        candidate_id="c_pressure",
+        kind=CandidateKind.RESOURCE,
+        canonical_identity="context: a member urges a reassessment of production quotas",
+        description="context: a member urges a reassessment of production quotas",
+        claim_ids=("k_pressure",),
+        lineage_ids=("ev_pressure",),
+        materiality=Materiality.IMMATERIAL,
+    )
+    contract = _contract(subject_entity="the group")
+
+    gw = _CapturingGateway()
+    review = exclusion_reviewer(gw, contract=contract, cited_resolution=True)
+    assert review is not None
+    review(pressure)
+    (prompt,) = gw.prompts
+    assert contract.question in prompt
+    assert AS_OF.isoformat() in prompt
+    assert HORIZON.isoformat() in prompt
+    assert "contradict, retract, or invalidate" in prompt
+
+    # An open world gets the question context but no settled-record inversion.
+    gw2 = _CapturingGateway()
+    review2 = exclusion_reviewer(gw2, contract=contract, cited_resolution=False)
+    assert review2 is not None
+    review2(pressure)
+    (open_prompt,) = gw2.prompts
+    assert contract.question in open_prompt
+    assert "contradict, retract, or invalidate" not in open_prompt

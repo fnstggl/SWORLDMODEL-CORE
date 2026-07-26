@@ -177,7 +177,13 @@ def compile_world(
         focal_identities=tuple(e.name for e in spec.entities) + (spec.title,),
     )
     coverage_report = assess_coverage(
-        inventory, view, exclusion_reviewer=exclusion_reviewer(gateway)
+        inventory,
+        view,
+        exclusion_reviewer=exclusion_reviewer(
+            gateway,
+            contract=contract,
+            cited_resolution=_cited_factual_resolution(spec, base_world),
+        ),
     )
     enforce_coverage(coverage_report)
 
@@ -1680,7 +1686,32 @@ _CHALLENGE_KINDS = frozenset(
 _MAX_CHALLENGES = 12
 
 
-def exclusion_reviewer(gateway: ModelGateway | None) -> ExclusionReviewer | None:
+def _cited_factual_resolution(spec: WorldSpec, base_world: Any) -> bool:
+    """True when the initial world already answers YES on the cited record's authority.
+
+    This is the one legitimate preresolved state Gate 4b admits: the runtime's own
+    evaluator says the terminal is satisfied at t0, and every term it reads is
+    established by an ``evidence:`` producer. The coverage gate's exclusion reviewer
+    needs to know this, because materiality inverts under a settled record: a claim
+    about the topic's future dynamics cannot change an outcome that cited pre-cutoff
+    events already established — only a claim contradicting that record can.
+    """
+
+    from .engine import evaluate_terminal
+
+    ev = evaluate_terminal(base_world, spec.terminal)
+    if not (ev.resolved and ev.outcome == "YES"):
+        return False
+    producers = terminal_producers(spec)
+    return all(any(str(w).startswith("evidence:") for w in who) for who in producers.values())
+
+
+def exclusion_reviewer(
+    gateway: ModelGateway | None,
+    *,
+    contract: ResolutionContract | None = None,
+    cited_resolution: bool = False,
+) -> ExclusionReviewer | None:
     """An independent LLM review of borderline exclusions (live gateways only).
 
     The compiler may not drop a candidate merely by deeming it irrelevant: for the
@@ -1688,11 +1719,37 @@ def exclusion_reviewer(gateway: ModelGateway | None) -> ExclusionReviewer | None
     plausibly change an actor's knowledge, authority, feasible actions, a constraint,
     a branch, timing, or the outcome. A "yes" invalidates the exclusion and blocks.
     Offline/deterministic gateways get no reviewer, so the gate stays deterministic.
+
+    The reviewer judges against the actual question, not in a vacuum: without the
+    contract, "could this item matter?" has no referent and every topical claim earns
+    a reflexive yes. And when the compiled world already resolves YES from the cited
+    pre-cutoff record (``cited_resolution``), the materiality test inverts — the item
+    matters only if it could contradict that record, not because it bears on future
+    dynamics the settled record has overtaken.
     """
 
     if gateway is None or not getattr(gateway, "is_live", False):
         return None
     budget = {"n": 0}
+
+    question_block = ""
+    if contract is not None:
+        question_block = (
+            f"\nThe world simulates this forecast question: {contract.question}\n"
+            f"Cutoff (facts before this are history): {contract.as_of.isoformat()}\n"
+            f"Horizon (outcome is judged by): {contract.horizon.isoformat()}\n"
+        )
+    resolution_block = ""
+    if cited_resolution:
+        resolution_block = (
+            "\nIMPORTANT: the compiled world already resolves this question YES at the "
+            "cutoff — every terminal term is established by cited, verified record of "
+            "events that occurred before the cutoff. Nothing that happens after the "
+            "cutoff can un-happen them. Answer true ONLY if this item could plausibly "
+            "contradict, retract, or invalidate that cited record itself. Claims about "
+            "the topic's ongoing pressures, negotiations, or future dynamics cannot "
+            "matter here: the settled record has already overtaken them.\n"
+        )
 
     def review(cand: EvidenceCandidate) -> bool:
         if cand.kind.value not in _CHALLENGE_KINDS or budget["n"] >= _MAX_CHALLENGES:
@@ -1700,14 +1757,16 @@ def exclusion_reviewer(gateway: ModelGateway | None) -> ExclusionReviewer | None
         budget["n"] += 1
         prompt = (
             "An automated compiler is about to EXCLUDE the following verified evidence "
-            "item from a simulated world as irrelevant. Challenge that decision.\n\n"
-            f"ITEM ({cand.kind.value}): {cand.canonical_identity}\n"
-            f"DESCRIPTION: {cand.description}\n\n"
+            "item from a simulated world as irrelevant. Challenge that decision.\n"
+            f"{question_block}"
+            f"\nITEM ({cand.kind.value}): {cand.canonical_identity}\n"
+            f"DESCRIPTION: {cand.description}\n"
+            f"{resolution_block}\n"
             "Would including or removing this item plausibly change an actor's "
             "knowledge, authority, feasible actions, a resource constraint, the causal "
             "pathway, an uncertainty branch, the timing of events, or the terminal "
-            'outcome? Reply JSON {"could_matter": true|false, "why": "..."}. '
-            "Answer true only if it plausibly could.\n\n"
+            'outcome of THIS question? Reply JSON {"could_matter": true|false, '
+            '"why": "..."}. Answer true only if it plausibly could.\n\n'
             "Facts about a SOURCE rather than about the world are always false here: "
             "when a page was published, who bylined it, what it is titled, where it "
             "lives. That is provenance, it is already recorded against every claim it "

@@ -746,6 +746,39 @@ def test_a_question_the_record_has_already_answered_compiles_from_its_citations(
     assert exc.value.details["failure"] == "terminal_has_no_producer"
 
 
+def test_the_settled_record_is_detected_for_the_exclusion_reviewer() -> None:
+    """The coverage gate's exclusion reviewer inverts its materiality test when the
+    world already resolves YES from the cited pre-cutoff record. The detector must fire
+    exactly on that state — YES at t0 with every terminal term evidence-cited — and
+    stay off for the normal open world, or future-dynamics claims would be waved
+    through on questions the record has not settled."""
+
+    from sworldmodel.world_compiler import _cited_factual_resolution
+
+    data = _split_world()
+    cited = data["claims"][0]["id"]
+    data["world_spec"]["documents"] = [
+        {
+            "document_id": "agreement",
+            "fields": {"signed": True},
+            "evidence_claim_ids": [cited],
+        }
+    ]
+    data["world_spec"]["terminal"]["yes_when"] = {
+        "op": "equals",
+        "args": [{"op": "document_field", "args": ["agreement", "signed"]}, True],
+    }
+    data["world_spec"]["terminal"]["unresolved_when"] = {"op": "const", "args": [False]}
+    data["uncertainties"] = []
+    _, compiled = _compile(data, _gateway(_signal_sensitive))
+    assert _cited_factual_resolution(compiled.spec, compiled.base_world)
+
+    # The same shape starting unsigned is the normal open state: no inversion.
+    data["world_spec"]["documents"][0]["fields"]["signed"] = False
+    _, open_world = _compile(data, _gateway(_signal_sensitive))
+    assert not _cited_factual_resolution(open_world.spec, open_world.base_world)
+
+
 def test_a_world_whose_initial_values_already_answer_yes_uncited_is_refused() -> None:
     """The OPEC+ shape: the answer baked into an uncited initial value.
 
