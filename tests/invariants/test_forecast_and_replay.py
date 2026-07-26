@@ -779,6 +779,53 @@ def test_the_settled_record_is_detected_for_the_exclusion_reviewer() -> None:
     assert not _cited_factual_resolution(open_world.spec, open_world.base_world)
 
 
+def test_the_pre_rollout_review_is_told_when_the_record_already_answered() -> None:
+    """A live Bank of England run compiled the legitimate preresolved state — outcome
+    initial-true on cited pre-cutoff record — and the pre-rollout review attacked it
+    for lacking a production process, forcing a recompile whose world demanded the
+    already-made statement be made AGAIN inside the window: an absolute NO
+    manufactured by changing the question's meaning. Under a cited factual resolution
+    the review prompt must carry the settled-record basis and redirect the attack to
+    citation sufficiency; an open world must not get that block."""
+
+    from sworldmodel.world_review import _QUESTIONS, review_world
+
+    findings = {
+        "findings": [
+            {"key": k, "severity": "PASS", "finding": "ok", "evidence_basis": "the world"}
+            for k, _ in _QUESTIONS
+        ]
+    }
+
+    data = _split_world()
+    cited = data["claims"][0]["id"]
+    data["world_spec"]["documents"] = [
+        {"document_id": "agreement", "fields": {"signed": True}, "evidence_claim_ids": [cited]}
+    ]
+    data["world_spec"]["terminal"]["yes_when"] = {
+        "op": "equals",
+        "args": [{"op": "document_field", "args": ["agreement", "signed"]}, True],
+    }
+    data["world_spec"]["terminal"]["unresolved_when"] = {"op": "const", "args": [False]}
+    data["uncertainties"] = []
+    _, compiled = _compile(data, _gateway(_signal_sensitive))
+
+    gw = ProgrammableGateway({"world_review": findings})
+    review = review_world(compiled, None, gw, question="q?", evidence_render="the evidence")
+    assert not review.error and not review.should_repair
+    (req,) = [r for r in gw.seen if r.task_kind == "world_review"]
+    assert "CITED FACTUAL RESOLUTION" in req.prompt
+    assert "same subject, same act" in req.prompt
+
+    # The open world's review carries no settled-record basis.
+    data["world_spec"]["documents"][0]["fields"]["signed"] = False
+    _, open_world = _compile(data, _gateway(_signal_sensitive))
+    gw2 = ProgrammableGateway({"world_review": findings})
+    review_world(open_world, None, gw2, question="q?", evidence_render="the evidence")
+    (req2,) = [r for r in gw2.seen if r.task_kind == "world_review"]
+    assert "CITED FACTUAL RESOLUTION" not in req2.prompt
+
+
 def test_a_world_whose_initial_values_already_answer_yes_uncited_is_refused() -> None:
     """The OPEC+ shape: the answer baked into an uncited initial value.
 

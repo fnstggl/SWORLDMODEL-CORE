@@ -342,6 +342,40 @@ def review_world(
         return WorldReview(error=f"the review could not run: {type(exc).__name__}: {exc}")
 
 
+def _settled_record_block(compiled: CompiledWorld) -> str:
+    """The resolution-basis paragraph for a world that already answers from citations.
+
+    A live Bank of England run compiled the one legitimate preresolved state — the
+    outcome state initial-true on cited pre-cutoff record, endorsed by the plan's own
+    independent review — and this review then attacked it for lacking a production
+    process, forcing a recompile whose world demanded the already-made statement be
+    made AGAIN inside the window. That recompile changed the question's meaning and
+    manufactured an absolute NO. The audit's classifier already knows this state
+    (``factual_resolution``); the reviewer has to know it too, and aim its attack at
+    the only thing still attackable: whether the cited record establishes the outcome
+    as the question means it.
+    """
+
+    from .world_compiler import _cited_factual_resolution
+
+    if not _cited_factual_resolution(compiled.spec, compiled.base_world):
+        return ""
+    return (
+        "## THE WORLD CLAIMS A CITED FACTUAL RESOLUTION\n"
+        "The terminal already resolves YES at the cutoff, and every term it reads is "
+        "established by cited verified record of pre-cutoff events. That is the one "
+        "legitimate preresolved state: a question the record has already answered is "
+        "not re-produced inside the window, and a repair that demands the outcome be "
+        "performed again after the cutoff changes the question's meaning. Do NOT fail "
+        "this world for a preresolved terminal, an unrepresented production process, "
+        "or decorative actors on that basis alone. Attack the citation instead: does "
+        "the cited record establish the outcome exactly as the question means it — "
+        "same subject, same act, same specificity, same instrument and degree? If it "
+        "does not, fail terminal_preresolved and name the precise gap between what "
+        "the record says and what the question asks."
+    )
+
+
 def _review(
     compiled: CompiledWorld,
     gateway: ModelGateway,
@@ -351,7 +385,8 @@ def _review(
 ) -> WorldReview:
     body = "\n".join(f"{key}: {text}" for key, text in _QUESTIONS)
     prompt = "\n\n".join(
-        [
+        segment
+        for segment in [
             "You are the adversarial reality auditor of a compiled simulation world, "
             "run BEFORE any rollout budget is spent. Your job is to ATTACK this world, "
             "not to praise it: find where it fails as a description of the real process "
@@ -361,6 +396,7 @@ def _review(
             f"QUESTION THE WORLD MUST RESOLVE: {question}",
             "## THE COMPILED WORLD\n"
             + json.dumps(summarize_world(compiled), indent=2, sort_keys=True, default=str),
+            _settled_record_block(compiled),
             "## THE VERIFIED EVIDENCE IT WAS BUILT FROM\n" + evidence_render,
             "## ANSWER EACH\n" + body,
             "For every question return exactly one finding object: "
@@ -375,6 +411,7 @@ def _review(
             "be severity LOW. "
             'Reply with JSON {"findings": [<one object per key, all 14 keys>]}.',
         ]
+        if segment
     )
     try:
         resp = gateway.generate(
