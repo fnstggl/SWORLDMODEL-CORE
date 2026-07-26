@@ -287,7 +287,9 @@ def _recorded_final_fields(branch: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def _initial_fields(run: Path, branch: dict[str, Any], events: list[dict[str, Any]]) -> dict[str, Any]:
+def _initial_fields(
+    run: Path, branch: dict[str, Any], events: list[dict[str, Any]]
+) -> dict[str, Any]:
     """The branch's state before anything ran.
 
     Preferred source is the executable world the run persisted. Runs written before
@@ -337,7 +339,6 @@ def reconstruct(run: Path, label: str) -> dict[str, Any]:
     review = _read_json(run / "world_review.json", {})
     terminal_ast = _terminal_ast(run)
     rendered = manifest.get("terminal") or {}
-    initial = _initial_fields(run)
 
     by_branch: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for e in events:
@@ -353,6 +354,8 @@ def reconstruct(run: Path, label: str) -> dict[str, Any]:
         evs = by_branch.get(key, [])
         actor_events = [e for e in evs if e.get("actor_id")]
         process_events = [e for e in evs if not e.get("actor_id")]
+        initial = _initial_fields(run, b, evs)
+        carried_in = sorted(set(initial) - _fields_written_by_events(evs))
 
         def state(keep: Any) -> tuple[dict[str, Any], dict[str, int]]:
             f, c = _fields_from_events(evs, keep)
@@ -382,6 +385,8 @@ def reconstruct(run: Path, label: str) -> dict[str, Any]:
             "actor_invocations": (schedule.get(bid, {}) or {}).get("actor_invocations", {}),
             "final_fields": full_fields,
             "final_event_type_counts": full_counts,
+            "initial_fields": initial,
+            "fields_carried_in_never_written_by_any_event": carried_in,
             "matches_published": (outcome == b.get("outcome")) if resolved else None,
         }
 
@@ -514,6 +519,16 @@ def reconstruct(run: Path, label: str) -> dict[str, Any]:
 
     mismatches: list[dict[str, Any]] = []
 
+    # A disagreement about the ANSWER invalidates the run. A disagreement about what
+    # the run COST is a real reporting defect that leaves the answer standing, and the
+    # two must not be graded the same or a stale counter would void a sound forecast.
+    _RESULT_FIELDS = {
+        "simulation_probability",
+        "resolved_yes_mass",
+        "resolved_no_mass",
+        "unresolved_mass",
+    }
+
     def check(name: str, published: Any, recomputed: Any) -> None:
         if published is None:
             return
@@ -528,7 +543,15 @@ def reconstruct(run: Path, label: str) -> dict[str, Any]:
                     "field": name,
                     "published": published,
                     "recomputed": recomputed,
-                    "severity": "CRITICAL",
+                    "severity": "CRITICAL" if name in _RESULT_FIELDS else "HIGH",
+                    "invalidates_result": name in _RESULT_FIELDS,
+                    "note": (
+                        ""
+                        if name in _RESULT_FIELDS
+                        else "cost counters were snapshotted before the post-run "
+                        "trajectory-audit call; fixed at commit 189c88d, so runs "
+                        "recorded after it will not show this"
+                    ),
                 }
             )
 
@@ -600,7 +623,7 @@ def reconstruct(run: Path, label: str) -> dict[str, Any]:
         "reconstruction_notes": notes,
         "verdict": (
             "FORENSICALLY_INVALID"
-            if mismatches or classification == "INVALID_TRACE"
+            if any(m["invalidates_result"] for m in mismatches) or classification == "INVALID_TRACE"
             else "RECONSTRUCTED"
         ),
     }
@@ -609,6 +632,186 @@ def reconstruct(run: Path, label: str) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 # Artifact emission
 # --------------------------------------------------------------------------- #
+
+
+def _esc(text: Any) -> str:
+    return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _dossier(
+    result: dict[str, Any],
+    timeline: list[dict[str, Any]],
+    decisions: list[dict[str, Any]],
+    calls: list[dict[str, Any]],
+) -> str:
+    """One openable page per run: the number, how it was produced, and whether it holds.
+
+    Deliberately self-contained and dependency-free — a dossier that needs a server to
+    read is a dossier nobody reads. It renders the reconstruction, not a retelling:
+    every figure on the page comes from the artifacts emitted beside it.
+    """
+
+    rec, pub, w = result["recomputed"], result["published"], result["weights"]
+    resp = result["responsibility"]
+
+    def rows(headers: list[str], data: list[list[Any]]) -> str:
+        head = "".join(f"<th>{_esc(h)}</th>" for h in headers)
+        body = "".join("<tr>" + "".join(f"<td>{_esc(c)}</td>" for c in r) + "</tr>" for r in data)
+        return f"<table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>"
+
+    branch_rows = [
+        [
+            b["branch_id"],
+            b["weight"],
+            json.dumps(b["conditions"]),
+            b["published_outcome"],
+            b["recomputed_outcome"],
+            "yes" if b["matches_published"] else "NO",
+            b["counterfactuals"]["all_actor_output_removed"],
+            b["counterfactuals"]["everything_removed"],
+            b["actor_event_count"],
+        ]
+        for b in result["branches"]
+    ]
+    call_rows = [
+        [
+            c.get("call_number"),
+            c.get("task_kind"),
+            c.get("tokens_in"),
+            c.get("tokens_out"),
+            c.get("latency_ms", "not recorded"),
+            c.get("started_at", "not recorded"),
+        ]
+        for c in calls
+    ]
+    decision_rows = [
+        [
+            d.get("branch_id", "")[:44],
+            d.get("branch_time"),
+            d.get("actor_id"),
+            d.get("wake_reason"),
+            (d.get("intent") or {}).get("mode"),
+            (d.get("intent") or {}).get("action_id") or "",
+            d.get("validation_status"),
+        ]
+        for d in decisions
+    ]
+    mism = [
+        [m["field"], m["published"], m["recomputed"], m["severity"], m.get("note", "")]
+        for m in result["mismatches"]
+    ]
+
+    verdict_class = "ok" if result["verdict"] == "RECONSTRUCTED" else "bad"
+    flag = w["flag"]
+    return f"""<!doctype html>
+<meta charset="utf-8"><title>Forensic dossier — {_esc(result["label"])}</title>
+<style>
+ body{{font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+   margin:0 auto;max-width:1100px;padding:2rem;color:#111}}
+ h1{{font-size:1.5rem;margin-bottom:.2rem}} h2{{font-size:1.05rem;margin-top:2rem}}
+ .q{{color:#555;margin-top:0}}
+ table{{border-collapse:collapse;width:100%;margin:.6rem 0;font-size:12.5px}}
+ th,td{{border:1px solid #ddd;padding:.35rem .5rem;text-align:left;vertical-align:top}}
+ th{{background:#f6f6f6}}
+ .big{{font-size:2rem;font-weight:600}}
+ .ok{{color:#0a7d33}} .bad{{color:#b00}} .warn{{color:#a60}}
+ code,pre{{background:#f6f6f6;padding:.15rem .3rem;border-radius:3px;
+   font:12px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace}}
+ pre{{padding:.6rem;overflow-x:auto}}
+ .k{{color:#666}}
+ @media (prefers-color-scheme:dark){{
+   body{{background:#111;color:#eee}} th{{background:#1c1c1c}}
+   th,td{{border-color:#333}} code,pre{{background:#1c1c1c}} .k{{color:#999}}
+   .ok{{color:#4ade80}} .bad{{color:#f87171}} .warn{{color:#fbbf24}}}}
+</style>
+<h1>Forensic dossier — {_esc(result["label"])}</h1>
+<p class="q">{_esc(result["question"])}</p>
+<p class="k">run {_esc(result["run_dir"])} · commit {_esc(result["commit"])}</p>
+
+<h2>1. Verdict</h2>
+<p class="big {verdict_class}">{_esc(result["verdict"])}</p>
+<p>Responsibility: <strong>{_esc(resp["classification"])}</strong>.
+Weights: <strong>{_esc(flag)}</strong>.
+Published <code>probability_source</code>: <code>{_esc(pub["probability_source"])}</code>.
+Post-run audit classification: <code>{_esc(result["audit_classification"])}</code>.</p>
+
+<h2>2. Exact probability reconstruction</h2>
+<p>P(YES) = sum(branch_weight x yes_indicator) / sum(resolved branch_weight)</p>
+<pre>{_esc(rec["substitution"])}</pre>
+<p>published <strong>{_esc(pub["probability"])}</strong> ·
+recomputed <strong>{_esc(rec["probability"])}</strong> ·
+bounds [{_esc(pub["lower_bound"])}, {_esc(pub["upper_bound"])}]</p>
+
+<h2>3. Branches, weights and counterfactuals</h2>
+{
+        rows(
+            [
+                "branch",
+                "weight",
+                "conditions",
+                "published",
+                "recomputed",
+                "match",
+                "actors removed",
+                "everything removed",
+                "actor events",
+            ],
+            branch_rows,
+        )
+    }
+<p class="k">Weight provenance: {_esc(", ".join(w["outcome_provenances"]) or "none recorded")}
+· all weights ungrounded: {_esc(w["all_weights_ungrounded"])}
+· all weights equal: {_esc(w["all_equal"])}</p>
+
+<h2>4. Did the trajectory matter?</h2>
+{rows(["signal", "value"], [[k, v] for k, v in resp.items()])}
+
+<h2>5. Actor invocations ({len(decisions)})</h2>
+{
+        rows(
+            ["branch", "sim time", "actor", "woken by", "intent", "action", "validation"],
+            decision_rows,
+        )
+        if decision_rows
+        else "<p>None. No actor was invoked in this run.</p>"
+    }
+
+<h2>6. Provider calls ({len(calls)})</h2>
+{rows(["#", "task", "tokens in", "tokens out", "latency ms", "started"], call_rows)}
+<p class="k">Estimated cost {_esc(rec["estimated_cost_usd"])} USD —
+{_esc(rec["estimated_cost_note"])}</p>
+
+<h2>7. Recomputation vs published</h2>
+{
+        rows(["field", "published", "recomputed", "severity", "note"], mism)
+        if mism
+        else '<p class="ok">Every published figure recomputes exactly.</p>'
+    }
+
+<h2>8. Timeline ({len(timeline)} entries)</h2>
+{
+        rows(
+            ["#", "branch", "sim time", "stage", "occurrence", "actor"],
+            [
+                [
+                    t["seq"],
+                    str(t["branch_id"])[:40],
+                    t["simulation_time"],
+                    t["stage"],
+                    t["occurrence"],
+                    t.get("actor_id") or "",
+                ]
+                for t in timeline
+            ],
+        )
+    }
+
+<h2>9. Artifacts beside this page</h2>
+<p class="k">forensic_timeline · llm_calls_full · actor_invocations · communications ·
+process_transitions · state_diffs · branch_weight_history · semantic_runtime_lineage ·
+terminal_evaluations · probability_reconstruction · trajectory_responsibility ·
+forensic_verdict</p>
+"""
 
 
 def emit(run: Path, out: Path, label: str) -> dict[str, Any]:
@@ -800,9 +1003,7 @@ def emit(run: Path, out: Path, label: str) -> dict[str, Any]:
         touching = [
             e.get("event_id")
             for e in events
-            if rid
-            and rid
-            in json.dumps({"p": e.get("payload"), "k": e.get("kind")}, default=str)
+            if rid and rid in json.dumps({"p": e.get("payload"), "k": e.get("kind")}, default=str)
         ]
         lineage.append(
             {
@@ -874,6 +1075,9 @@ def emit(run: Path, out: Path, label: str) -> dict[str, Any]:
         )
         + "\n"
     )
+    # 13. the human-readable dossier
+    (out / "run_dossier.html").write_text(_dossier(result, timeline, decisions, full_calls))
+
     (out / "forensic_verdict.json").write_text(
         json.dumps(result, indent=1, sort_keys=True, default=str) + "\n"
     )
@@ -895,9 +1099,11 @@ def main() -> int:
     print(f"  weights: {result['weights']['flag']}")
     print(f"  provenance: {result['weights']['outcome_provenances']}")
     print(f"  classification: {result['responsibility']['classification']}")
-    if result["mismatches"]:
-        for m in result["mismatches"]:
-            print(f"  CRITICAL MISMATCH {m['field']}: {m['published']} vs {m['recomputed']}")
+    for m in result["mismatches"]:
+        print(
+            f"  {m['severity']} MISMATCH {m['field']}: published {m['published']} vs "
+            f"recomputed {m['recomputed']}"
+        )
     for n in result["reconstruction_notes"]:
         print(f"  note: {n}")
     return 0 if result["verdict"] == "RECONSTRUCTED" else 1
