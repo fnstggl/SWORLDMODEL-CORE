@@ -1222,3 +1222,20 @@ def test_an_occurrence_at_or_before_the_cutoff_is_refused() -> None:
     )
     errors = _valid(data)
     assert any("re-perform history" in e for e in errors)
+
+
+def test_the_executable_never_carries_a_naive_timestamp() -> None:
+    """A planner-emitted naive datetime crashed the ENGINE 354s into a live run when
+    compared against the aware contract clock. Lowering normalizes every timestamp at
+    the one place they enter the executable."""
+
+    from datetime import datetime
+
+    data = harbor_plan()
+    data["processes"][0]["at"] = "2026-02-10T10:00:00"  # naive, as a planner emitted it
+    data["processes"][0]["deadline"] = "2026-02-28T23:59:59"
+    compilation, _ = lower_plan(parse_semantic_plan(data))
+    for node in compilation["world_spec"]["process"]["nodes"]:
+        for key in ("at", "deadline"):
+            if node.get(key):
+                assert datetime.fromisoformat(node[key]).tzinfo is not None, (key, node[key])

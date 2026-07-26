@@ -351,6 +351,22 @@ _CMP_OPS = {
 }
 
 
+def _aware_iso(value: str | None) -> str | None:
+    """Every timestamp the executable carries is timezone-aware, or absent.
+
+    The validator coerces naive datetimes to UTC for its own comparisons, but the
+    lowered spec used to carry the planner's naive ISO string verbatim — and a live run
+    crashed 354 seconds in when the ENGINE compared that naive time against the aware
+    contract clock. Normalized once here, at the only place timestamps enter the
+    executable, so no downstream consumer can ever see a naive one.
+    """
+
+    from .semantic_plan import _parse_when
+
+    when = _parse_when(value)
+    return when.isoformat() if when is not None else None
+
+
 def _lookup(table: dict[str, str], key: Any, what: str) -> str:
     """A table miss is a named gap, never a KeyError and never a silent default.
 
@@ -707,13 +723,13 @@ def lower_plan(
                     "node_id": node_id,
                     "stage": node_id,
                     "description": _produced(p.meaning, p),
-                    "at": p.at,
+                    "at": _aware_iso(p.at),
                     "after_node": "",
                     "delay_seconds": 0,
                     "participants": [t.resolve("entity", who) for who in p.participants],
                     "action_ids": allowed,
                     "allow_novel": False,
-                    "deadline": p.deadline,
+                    "deadline": _aware_iso(p.deadline),
                     "effects": effects,
                     "next_nodes": [],
                     "evidence_claim_ids": list(p.evidence_claim_ids),
@@ -735,7 +751,7 @@ def lower_plan(
                         "node_id": node_id,
                         "stage": t.resolve("node", p.name),
                         "description": _produced(o.description or p.meaning, p),
-                        "at": o.at,
+                        "at": _aware_iso(o.at),
                         "after_node": "",
                         "delay_seconds": o.delay_seconds,
                         "participants": [],
@@ -770,7 +786,11 @@ def lower_plan(
                 for c in o.changes:
                     effects.extend(_lower_change(c, t, plan))
                 occurrences.append(
-                    {"at": o.at, "description": o.description or p.meaning, "effects": effects}
+                    {
+                        "at": _aware_iso(o.at),
+                        "description": o.description or p.meaning,
+                        "effects": effects,
+                    }
                 )
             externals.append(
                 {
@@ -860,7 +880,7 @@ def lower_plan(
                 "variable": field_id,
                 "why_unknown": f"{u.what_unknown} — {u.why_unknown}",
                 "reversal_capable": True,
-                "release_at": u.release_at,
+                "release_at": _aware_iso(u.release_at),
                 "constraining_evidence_ids": sorted(
                     {i for alt in u.alternatives for i in alt.evidence_claim_ids}
                 ),
