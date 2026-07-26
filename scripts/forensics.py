@@ -468,6 +468,19 @@ def reconstruct(run: Path, label: str) -> dict[str, Any]:
         b["counterfactuals"]["everything_removed"] == "YES" for b in per_branch
     )
 
+    # Is each branch's answer already fixed by its own condition tuple? If no two
+    # branches share a tuple and none disagrees, the answer is decided the moment the
+    # branch is chosen, and the probability is just the weight of the winning cells —
+    # whatever happened in between.
+    tuples: dict[str, set[str]] = defaultdict(set)
+    for b in per_branch:
+        tuples[json.dumps(b["conditions"], sort_keys=True)].add(str(b["recomputed_outcome"]))
+    answer_is_a_function_of_the_conditions = (
+        len(tuples) == len(per_branch)
+        and all(len(v) == 1 for v in tuples.values())
+        and len({next(iter(v)) for v in tuples.values()}) > 1
+    )
+
     if any(b["matches_published"] is False for b in per_branch) or (
         published_p is not None
         and recomputed_p is not None
@@ -480,11 +493,15 @@ def reconstruct(run: Path, label: str) -> dict[str, Any]:
         classification = "FACTUALLY_RESOLVED"
     elif not any_actor_changed and not any_process_changed:
         classification = "INITIAL_ASSUMPTIONS_DOMINATED"
-    elif not any_actor_changed and any_process_changed and uniform and all_ungrounded:
-        # A process ran, but it only arithmetically combined branch assumptions, and the
-        # number itself is 1/N of equal ungrounded weights.
+    elif uniform and all_ungrounded and answer_is_a_function_of_the_conditions:
+        # The trajectory may well have been necessary to produce any YES at all — that
+        # is recorded separately — but it did not fix the NUMBER. Equal, ungrounded
+        # weights over cells whose answers are decided by their own conditions make the
+        # magnitude an enumeration artifact: re-weight the same cells to any
+        # evidence-plausible asymmetry and the probability moves with nothing else
+        # changing. That is what dominated means here.
         classification = "BRANCH_WEIGHTS_DOMINATED"
-    elif any_actor_changed and uniform and all_ungrounded and len(published_outcomes) > 1:
+    elif any_actor_changed and uniform and all_ungrounded:
         classification = "PARTLY_TRAJECTORY_CAUSED"
     elif any_actor_changed or any_process_changed:
         classification = "TRAJECTORY_CAUSED"

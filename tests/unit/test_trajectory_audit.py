@@ -630,3 +630,53 @@ def test_a_conjunction_of_conditions_is_caught_like_a_single_separating_variable
     finding = by_key["result_equals_initialization"]
     assert finding.severity == "MEDIUM", "a joint-function outcome must not report PASS"
     assert "condition tuple" in finding.finding
+
+
+def test_the_merged_ledger_is_namespaced_like_every_other_collection() -> None:
+    """_merge prefixed branch ids on outcomes, worlds, diagnostics and decisions but
+    not on the event ledger. The mechanical checks key ledger data by branch_id and
+    look it up by the outcome's prefixed id, so every lookup missed and two checks
+    returned their vacuous PASS on every run — publishing "every resolved branch's
+    events span more than one timestamp" for a branch whose ledger held one event, and
+    "not a pure function of their symmetric-ignorance conditions" for outcomes that
+    were exactly that function. An independent forensic audit found both PASSes false."""
+
+    from sworldmodel.api import _merge
+
+    res = _run(
+        branches=(_branch("b1", "YES"),),
+        ledger=(_event("b1", "create_event", {}, event_id="e1"),),
+        decisions=(_decision(branch_id="b1"),),
+        final_worlds={"b1": _world("b1")},
+    )
+    merged = _merge([(1.0, "primary", True, res)])
+
+    outcome_ids = {b.branch_id for b in merged.branch_outcomes}
+    ledger_ids = {e.branch_id for e in merged.event_ledger}
+    assert outcome_ids == {"primary/b1"}
+    assert ledger_ids == outcome_ids, (
+        "ledger branch ids must join with outcome branch ids, or every mechanical "
+        "check that reads the ledger per branch silently passes"
+    )
+    assert {w for w in merged.final_worlds} == outcome_ids
+    assert {d.branch_id for d in merged.actor_decisions} == outcome_ids
+
+
+def test_time_advanced_actually_fires_on_a_single_instant_branch() -> None:
+    """The check that proves the defect above is closed: a resolved branch whose events
+    all share one timestamp must be flagged, not passed."""
+
+    from sworldmodel.trajectory_audit import mechanical_trajectory_checks
+
+    run = _run(
+        branches=(_branch("primary/b1", "YES"),),
+        ledger=(
+            _event("primary/b1", "create_event", {}, event_id="e1", at=AS_OF),
+            _event("primary/b1", "create_event", {}, event_id="e2", at=AS_OF),
+        ),
+        final_worlds={"primary/b1": _world("primary/b1")},
+    )
+    by_key = {f.key: f for f in mechanical_trajectory_checks(_compiled(_spec(), ()), run)}
+    assert by_key["time_advanced"].severity != "PASS", (
+        "a branch frozen at one instant must not report PASS"
+    )

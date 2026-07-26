@@ -1384,3 +1384,53 @@ def test_a_twice_unreadable_plan_refuses_as_the_pipeline_not_as_a_value_error() 
     assert exc.value.details["failure"] == "semantic_plan_invalid"
     assert exc.value.details["recompilable"] is True
     assert any("all_of" in e for e in exc.value.details["semantic_errors"])
+
+
+def test_a_citation_to_a_claim_that_does_not_exist_is_refused_anywhere_in_the_plan() -> None:
+    """A live Tesla plan cited 'c-83b62bb5759f' — the real id with two digits
+    transposed — on a world_fact and on the uncertainty alternative backing its entire
+    NO branch. The id existed in no evidence store, it was lowered into the executable
+    as a cited fact, and the coverage report still said complete. Validation checked
+    only entity citations; every other citation was unchecked."""
+
+    data = harbor_plan()
+    known = frozenset({"c-r1", "c-c1", "c-c2", "c-k1", "c-o1", "c-o2", "c-f1"})
+
+    clean = validate_semantic_plan(
+        parse_semantic_plan(data), as_of=AS_OF, horizon=HORIZON, known_claim_ids=known
+    )
+    assert not [e for e in clean if "not in the evidence store" in e]
+
+    for where, mutate in (
+        (
+            "world_fact",
+            lambda d: d.setdefault("world_facts", []).append(
+                {"text": "invented", "evidence_claim_ids": ["c-does-not-exist"]}
+            ),
+        ),
+        (
+            "resolution",
+            lambda d: d["resolution"].__setitem__("evidence_claim_ids", ["c-does-not-exist"]),
+        ),
+        (
+            "state",
+            lambda d: d["states"].append(
+                {
+                    "name": "invented state",
+                    "owner": "world",
+                    "state_type": "boolean",
+                    "initial": True,
+                    "why_material": "x",
+                    "evidence_claim_ids": ["c-does-not-exist"],
+                }
+            ),
+        ),
+    ):
+        bad = harbor_plan()
+        mutate(bad)
+        errors = validate_semantic_plan(
+            parse_semantic_plan(bad), as_of=AS_OF, horizon=HORIZON, known_claim_ids=known
+        )
+        assert any("c-does-not-exist" in e and "not in the evidence store" in e for e in errors), (
+            f"a fabricated citation on a {where} was accepted: {errors}"
+        )

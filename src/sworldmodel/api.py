@@ -729,7 +729,16 @@ def _merge(results: list[tuple[float, str, bool, RunResult]]) -> RunResult:
             outcomes.append(scaled)
         for s in res.trajectory_summaries:
             summaries.append(replace(s, branch_id=prefix + s.branch_id, weight=s.weight * weight))
-        ledger.extend(res.event_ledger)
+        # The ledger is namespaced with everything else. It was NOT, and the omission
+        # silently voided two mechanical trajectory checks: `time_advanced` keys its
+        # timestamps by the ledger's branch_id and looks them up by the outcome's
+        # prefixed id, and `result_equals_initialization` looks up scenarios the same
+        # way. Every lookup missed, so both checks returned their vacuous PASS on every
+        # run — publishing "every resolved branch's events span more than one
+        # timestamp" for a branch whose ledger held one event at one timestamp, and
+        # "branch outcomes are not a pure function of their symmetric-ignorance
+        # conditions" for outcomes that were exactly that function.
+        ledger.extend(replace(e, branch_id=prefix + e.branch_id) for e in res.event_ledger)
         for d in res.actor_decisions:
             d.branch_id = prefix + d.branch_id
             decisions.append(d)

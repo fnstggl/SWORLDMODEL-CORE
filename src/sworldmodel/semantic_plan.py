@@ -622,6 +622,31 @@ def _parse_when(value: str | None) -> datetime | None:
     return when
 
 
+def _all_citations(plan: SemanticPlan) -> list[tuple[str, tuple[str, ...]]]:
+    """Every (location, claim ids) pair the plan carries.
+
+    Enumerated exhaustively rather than by rule, because the point is to leave no
+    citation unchecked: entities, states, events, affordances, processes and their
+    occurrences, uncertainty alternatives, the resolution rule, and world facts.
+    """
+
+    out: list[tuple[str, tuple[str, ...]]] = [
+        ("resolution", plan.resolution_evidence_ids),
+    ]
+    out += [(f"entity {e.name!r}", e.evidence_claim_ids) for e in plan.entities]
+    out += [(f"state {s.name!r}", s.evidence_claim_ids) for s in plan.states]
+    out += [(f"event {e.name!r}", e.evidence_claim_ids) for e in plan.events]
+    out += [(f"affordance {a.name!r}", a.evidence_claim_ids) for a in plan.affordances]
+    for p in plan.processes:
+        out.append((f"process {p.name!r}", p.evidence_claim_ids))
+    for u in plan.uncertainties:
+        for i, alt in enumerate(u.alternatives):
+            out.append((f"uncertainty {u.name!r} alternative[{i}]", alt.evidence_claim_ids))
+    for i, (_text, ids) in enumerate(plan.world_facts):
+        out.append((f"world_fact[{i}]", ids))
+    return [(where, ids) for where, ids in out if ids]
+
+
 def validate_semantic_plan(
     plan: SemanticPlan,
     *,
@@ -905,6 +930,25 @@ def validate_semantic_plan(
             return False
         return True if known is None else all(i in known for i in ids)
 
+    # Every citation in the plan, not just the ones a producer rule happens to read.
+    # A live Tesla plan cited 'c-83b62bb5759f' — the real id with two digits transposed
+    # — on a world_fact and on the alternative backing its entire NO branch. The id
+    # existed in no evidence store, it was lowered into the executable as a cited fact,
+    # and coverage still reported complete. A fabricated citation is indistinguishable
+    # from a real one downstream, so it must die here.
+    if known is not None:
+        unknown: dict[str, set[str]] = {}
+        for where, ids in _all_citations(plan):
+            for cid in ids:
+                if cid not in known:
+                    unknown.setdefault(cid, set()).add(where)
+        for cid in sorted(unknown):
+            errors.append(
+                f"cites claim {cid!r}, which is not in the evidence store, at "
+                f"{sorted(unknown[cid])} — a citation to a claim that does not exist "
+                "grounds nothing"
+            )
+
     def check_terminal(t: TerminalQuery, where: str) -> None:
         if t.form in ("all_of", "any_of", "not"):
             for i, p_ in enumerate(t.parts):
@@ -1010,10 +1054,4 @@ def validate_semantic_plan(
                 "unit is one entity with represents_count 7), or lower "
                 "expected_participants to what the evidence actually names"
             )
-    if known is not None:
-        for e in plan.entities:
-            missing = [i for i in e.evidence_claim_ids if i not in known]
-            if missing:
-                errors.append(f"entity {e.name!r} cites unknown claim ids {missing}")
-
     return errors
