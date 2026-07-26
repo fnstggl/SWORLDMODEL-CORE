@@ -616,6 +616,23 @@ def _semantic_lowering_error(exc: WorldIntegrityError, subject: str) -> RepairPl
     )
 
 
+def _terminal_unset_fields_unguarded(exc: WorldIntegrityError, subject: str) -> RepairPlan:
+    fields = _strings(exc.details.get("unguarded fields") or exc.details.get("fields"))
+    return RepairPlan(
+        failure="terminal_unset_fields_unguarded",
+        missing_element=f"an honest unresolved guard for {fields}",
+        queries=(),
+        instruction=(
+            f"The terminal reads {fields}, which start with no value, and unresolved_when "
+            "never tests them — so a world that simply never produces them would resolve "
+            "a confident NO off a zero-coerced comparison. Either give each of these "
+            "fields a cited initial value the evidence establishes, or OR an is-unset "
+            "test (equals(field(<name>), None)) for each into terminal.unresolved_when "
+            "so an unproduced value reports honestly unresolved."
+        ),
+    )
+
+
 def _orphan_actors(exc: WorldIntegrityError, subject: str) -> RepairPlan:
     orphans = _strings(exc.details.get("orphan_actors"))
     return RepairPlan(
@@ -679,6 +696,7 @@ _PLANS = {
     "semantic_plan_invalid": _semantic_plan_invalid,
     "lowering_gap": _lowering_gap,
     "semantic_lowering_error": _semantic_lowering_error,
+    "terminal_unset_fields_unguarded": _terminal_unset_fields_unguarded,
     "terminal_reads_no_world_state": _terminal_reads_no_world_state,
     "decisive_evidence_contradiction": _decisive_evidence_contradiction,
     "unknown_expression_operator": _unknown_expression_operator,

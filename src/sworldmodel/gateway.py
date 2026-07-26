@@ -97,10 +97,7 @@ class ModelGateway(abc.ABC):
                     f"{self._max_calls}; refusing {request.task_kind!r} rather than "
                     "spending past the configured ceiling"
                 )
-            if (
-                self._max_tokens_total is not None
-                and self.total_tokens >= self._max_tokens_total
-            ):
+            if self._max_tokens_total is not None and self.total_tokens >= self._max_tokens_total:
                 raise GatewayError(
                     f"token budget exhausted: {self.total_tokens} tokens used, cap "
                     f"{self._max_tokens_total}; refusing {request.task_kind!r} rather "

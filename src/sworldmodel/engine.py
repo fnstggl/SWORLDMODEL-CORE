@@ -1065,8 +1065,7 @@ def _no_feasible_action_record(
     # The private check is the SAME one feasible_actions used to exclude these
     # actions; asking it again is what makes the recorded reason the true reason.
     reasons = [
-        f"{a.action_id}: {action_exec._check_availability(world, actor, a)[1]}"
-        for a in candidates
+        f"{a.action_id}: {action_exec._check_availability(world, actor, a)[1]}" for a in candidates
     ]
     why = (
         "; ".join(reasons)
@@ -1138,9 +1137,7 @@ def _invoke_actor(
         # record: skipping it silently made the world look inert for no stated reason.
         # The record carries WHY each offered action was infeasible, so the ledger
         # shows "the officer woke and lacked the authority", not nothing at all.
-        decisions.append(
-            _no_feasible_action_record(world, spec, node, actor, action_exec, entry)
-        )
+        decisions.append(_no_feasible_action_record(world, spec, node, actor, action_exec, entry))
         return world, []
 
     base_view = world.view_for(aid)

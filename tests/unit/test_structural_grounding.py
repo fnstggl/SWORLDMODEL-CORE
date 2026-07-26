@@ -214,9 +214,7 @@ def test_immaterial_assessment_changes_nothing() -> None:
         _CONTRACT, EvidenceStore().view(AS_OF), _SPEC, gateway=gw, seed=0
     )
     assert _structure_weight_grounded(assessment, "primary") is True
-    merged = _merge(
-        [(assessment.primary_weight, "primary", True, _one_branch_run("YES"))]
-    )
+    merged = _merge([(assessment.primary_weight, "primary", True, _one_branch_run("YES"))])
     (branch,) = merged.branch_outcomes
     assert branch.weight == 1.0
     assert branch.weight_grounded is True

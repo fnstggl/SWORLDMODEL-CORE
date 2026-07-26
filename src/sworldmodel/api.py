@@ -569,8 +569,7 @@ def _merge(results: list[tuple[float, str, bool, RunResult]]) -> RunResult:
                 scaled = replace(
                     scaled,
                     weight_grounded=False,
-                    key_conditions=scaled.key_conditions
-                    + ((_STRUCTURE_CONDITION, structure_id),),
+                    key_conditions=scaled.key_conditions + ((_STRUCTURE_CONDITION, structure_id),),
                 )
             outcomes.append(scaled)
         for s in res.trajectory_summaries:
@@ -698,9 +697,7 @@ def run_forecast(
     # compilation, assessment, actors and audit all share one budget, and exhaustion
     # surfaces as a GatewayError the existing handlers turn into honest refusals or
     # unresolved branches — never into a cheaper answer.
-    config.gateway.set_budget(
-        max_calls=config.max_calls, max_tokens_total=config.max_tokens_total
-    )
+    config.gateway.set_budget(max_calls=config.max_calls, max_tokens_total=config.max_tokens_total)
     log = RepairLog()
     try:
         bundle = config.research_backend.research(question, as_of, horizon)

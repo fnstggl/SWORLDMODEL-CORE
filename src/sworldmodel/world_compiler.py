@@ -1341,22 +1341,16 @@ def enforce_outcome_is_produced(
     # established, and no uncertainty touching any terminal term. A world with any
     # mechanism, or any branch draw near the terminal, is judged by the full gate.
     established = terminal_producers(spec)
-    pure_record = (
-        not spec.actions and not spec.external_processes and not spec.process.nodes
-    )
+    pure_record = not spec.actions and not spec.external_processes and not spec.process.nodes
     uncertainty_touched = {
-        f"field:{name}"
-        for u in uncertainties
-        for o in u.outcomes
-        for name, _ in o.field_effects
+        f"field:{name}" for u in uncertainties for o in u.outcomes for name, _ in o.field_effects
     } | {f"field:{u.variable}" for u in uncertainties}
     if (
         pure_record
         and established
         and not (uncertainty_touched & set(established))
         and all(
-            who and all(str(w).startswith("evidence:") for w in who)
-            for who in established.values()
+            who and all(str(w).startswith("evidence:") for w in who) for who in established.values()
         )
     ):
         return
@@ -1468,9 +1462,7 @@ def enforce_outcome_is_produced(
                 "terminal terms copied from an uncertainty": [
                     _display(t) for t in sorted(laundered)
                 ],
-                "copying producers": {
-                    _display(k): v for k, v in sorted(laundered.items())
-                },
+                "copying producers": {_display(k): v for k, v in sorted(laundered.items())},
                 "uncertainties": [u.variable for u in uncertainties],
             },
         )

@@ -132,9 +132,7 @@ def test_missing_actor_parameter_quantity_is_refused_not_zeroed() -> None:
     binding step earlier. The action must refuse, not transfer nothing as done."""
 
     world = _world()
-    eff = Effect(
-        op="adjust_field", params=(("field", "total"), ("delta", "$param.amount"))
-    )
+    eff = Effect(op="adjust_field", params=(("field", "total"), ("delta", "$param.amount")))
     ok, reason = EffectExecutor().can_apply(world, (eff,), {"actor": "a", "params": {}})
     assert not ok
     assert "could not determine" in reason
@@ -296,9 +294,7 @@ def test_guarded_terminal_over_unset_field_compiles_and_stays_unresolved() -> No
     ``equals(field(x), None)`` — passes the gate, and a branch in which nothing ever
     produces the field reports unresolved rather than a manufactured NO."""
 
-    data = _unset_field_world(
-        {"op": "equals", "args": [{"op": "field", "args": ["total"]}, None]}
-    )
+    data = _unset_field_world({"op": "equals", "args": [{"op": "field", "args": ["total"]}, None]})
     gw = _wait_gateway()
     compiled = _compile(data, gw)
     result = run(compiled, gw, seed=0)
