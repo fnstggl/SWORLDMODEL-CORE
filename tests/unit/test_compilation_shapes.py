@@ -214,3 +214,28 @@ def test_a_null_quantity_is_read_as_none_written_not_as_a_crash() -> None:
         }
     )
     assert [r.quantity for r in spec.resources] == [0.0, 1.5, 0.0]
+
+
+def test_a_set_field_effect_keyed_on_a_synonym_still_names_its_field() -> None:
+    """The effect schema names the ops but cannot spell out every op's params, so a
+    live Bank of England run emitted set_field keyed on `field_id` — the key it had
+    just seen on field definitions — rather than `field`. The effect wrote nothing the
+    producer gate could see, and the world was refused for an action that did nothing.
+    Renaming the synonym is shape coercion: the field named does not change."""
+
+    from sworldmodel.world_compiler import _effect_produces
+    from sworldmodel.worldspec import parse_effect
+
+    assert _effect_produces(
+        parse_effect({"op": "set_field", "field_id": "public_signal_made", "value": True})
+    ) == {"field:public_signal_made"}
+    assert _effect_produces(
+        parse_effect({"op": "adjust_field", "target": "deliveries", "delta": 100})
+    ) == {"field:deliveries"}
+    assert _effect_produces(
+        parse_effect({"op": "append_record", "record": "votes", "value": 1})
+    ) == {"collection:votes"}
+    # An effect that already names the canonical key is untouched, even beside a stray.
+    assert _effect_produces(
+        parse_effect({"op": "set_field", "field": "real", "field_id": "stray", "value": 1})
+    ) == {"field:real"}

@@ -292,7 +292,7 @@ def _payload_for(op: str, p: dict[str, Any]) -> dict[str, Any]:
     if op == "set_field":
         return {"field": str(p.get("field", "")), "value": p.get("value")}
     if op == "adjust_field":
-        return {"field": str(p.get("field", "")), "delta": _num(p.get("delta"))}
+        return {"field": str(p.get("field", "")), "delta": _num_or_none(p.get("delta"))}
     if op == "append_record":
         return {
             "collection": str(p.get("collection", "")),
@@ -307,13 +307,13 @@ def _payload_for(op: str, p: dict[str, Any]) -> dict[str, Any]:
             "resource": str(p.get("resource", "")),
             "from": str(p.get("from", "")),
             "to": str(p.get("to", "")),
-            "amount": _num(p.get("amount")),
+            "amount": _num_or_none(p.get("amount")),
         }
     if op == "consume_resource":
         return {
             "resource": str(p.get("resource", "")),
             "holder": str(p.get("holder", "")),
-            "amount": _num(p.get("amount")),
+            "amount": _num_or_none(p.get("amount")),
         }
     if op == "create_or_update_document":
         return {"document": str(p.get("document", "")), "fields": _as_dict(p.get("fields"))}
@@ -375,8 +375,19 @@ _QUANTITY_PARAMS: dict[str, tuple[str, ...]] = {
 
 def _unusable_quantity(op: str, p: dict[str, Any]) -> str:
     for name in _QUANTITY_PARAMS.get(op, ()):
-        if name not in p or p[name] is None:
+        if name not in p:
             continue
+        if p[name] is None:
+            # A quantity the world could not determine — an expression over state
+            # nothing has set, or a parameter the actor never supplied. Exempting None
+            # here let an adjust_field whose delta was undetermined stay feasible, be
+            # coerced to +0.0 downstream, and DETERMINE a previously-unset field —
+            # turning an unknown into a confident answer. No value is not zero.
+            return (
+                f"{op} needs {name!r} to be a quantity, but the world could not "
+                "determine its value; applying it as zero would state a quantity "
+                "nobody produced"
+            )
         if not _is_number(p[name]):
             return (
                 f"{op} needs {name!r} to be a number; got {p[name]!r}, which cannot be read as one"
@@ -409,3 +420,15 @@ def _num(v: Any) -> float:
         return float(v)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _num_or_none(v: Any) -> float | None:
+    """A quantity, or honestly no quantity at all.
+
+    An undetermined amount must stay ``None`` in the event payload so
+    :meth:`WorldState.apply` can refuse to state it — coercing it to ``0.0`` here is
+    how "adjust by an amount nobody produced" became "adjust by zero, recorded as
+    done", determining fields the world had never set.
+    """
+
+    return None if v is None else _num(v)

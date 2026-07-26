@@ -228,6 +228,23 @@ def checks(case: str) -> list[tuple[str, str, str]]:
         else f"{from_uncertainty}",
     )
 
+    # 9d. The reported point estimate must not rest on ungrounded weights. A run may
+    #     honestly abstain with scenario bounds when a driver is genuinely unknowable, but
+    #     these five questions are groundable, so an answer whose decisive weights are
+    #     `symmetric_ignorance_assumption` is the 50/50 coin flip this bar exists to reject —
+    #     a Tesla run reported 0.5000 with delivery_value_exogenous ungrounded, laundered
+    #     through a copying node so 9c did not see it. This reads the run's own integrity
+    #     record rather than re-deriving it.
+    fi = d.get("forecast_integrity") or {}
+    ungrounded = fi.get("ungrounded_variables") or []
+    check(
+        "the answer does not rest on ungrounded weights",
+        fi.get("weights_grounded_all") is not False and not ungrounded,
+        "weights grounded"
+        if not ungrounded
+        else f"ungrounded {ungrounded}; point calibrated={fi.get('point_estimate_is_calibrated')}",
+    )
+
     # 10. The answer is replayable: the ledger is present and the branches are recorded
     #     with the world state each resolved from.
     forecast = load(case, "forecast.json")

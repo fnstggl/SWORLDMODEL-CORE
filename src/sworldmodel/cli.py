@@ -37,6 +37,7 @@ from .ids import canonical_json
 from .live_research import ResearchBudget
 from .models import ForecastResult
 from .research import ResearchBundle
+from .rundir import prepare_run_dir
 from .tracing import TraceContext
 
 
@@ -86,6 +87,25 @@ def _print_summary(result: ForecastResult, forecast_hash: str, out_dir: Path | N
         recs = ", ".join(f"{k}={v}" for k, v in b.records[:6])
         state = b.outcome if b.resolved else f"UNRESOLVED({b.unresolved_reason})"
         print(f"  - {b.branch_id} w={b.weight:.4f} [{recs}] -> {state}")
+    integ = result.integrity
+    if integ is not None:
+        before = (
+            "—"
+            if integ.probability_before_simulation is None
+            else (f"{integ.probability_before_simulation:.4f}")
+        )
+        after = (
+            "—"
+            if integ.probability_after_simulation is None
+            else (f"{integ.probability_after_simulation:.4f}")
+        )
+        print(
+            f"Integrity: p_before={before} -> p_after={after}  "
+            f"calibrated={integ.point_estimate_is_calibrated}"
+        )
+        if integ.ungrounded_variables:
+            print(f"  ungrounded weights: {integ.ungrounded_variables}")
+        print(f"  {integ.counterfactual_note}")
     if out_dir is not None:
         print(f"Artifacts: {out_dir}")
         if forecast_hash:
@@ -191,9 +211,19 @@ def cmd_forecast(args: argparse.Namespace) -> int:
     as_of = datetime.fromisoformat(args.as_of)
     horizon = datetime.fromisoformat(args.horizon)
     out = Path(args.trace) if args.trace else None
+    if out is not None:
+        # A reused --trace directory holding an earlier run's forecast.json beside this
+        # run's refusal is a stale result wearing a fresh stamp. Clear and re-stamp it
+        # before anything can write.
+        prepare_run_dir(
+            out, question=args.question, as_of=as_of, horizon=horizon, mode=args.compiler
+        )
 
     config = ForecastConfig.live(
         seed=args.seed,
+        # The trace directory reaches the pipeline so each stage can checkpoint into it
+        # as it completes. A later stage that dies then destroys nothing earlier.
+        trace_dir=out,
         max_branches=args.max_branches,
         max_structures=args.max_structures,
         research_budget=ResearchBudget(
@@ -206,6 +236,7 @@ def cmd_forecast(args: argparse.Namespace) -> int:
             max_events=args.max_events,
             max_actor_calls=args.max_actor_calls,
         ),
+        compiler_mode=args.compiler,
     )
     if not config.is_live:  # the only gate: a "forecast" that is not live is not one
         print("forecast requires a live gateway and live research backend", file=sys.stderr)
@@ -228,6 +259,7 @@ def cmd_forecast(args: argparse.Namespace) -> int:
             failure_stage="interrupted",
             wall_seconds=wall,
             model_calls=config.gateway.call_count,
+            compiler_mode=config.compiler_mode,
         )
         if out is not None:
             out.mkdir(parents=True, exist_ok=True)
@@ -251,6 +283,7 @@ def cmd_forecast(args: argparse.Namespace) -> int:
             failure_stage=refusal.stage,
             wall_seconds=wall,
             model_calls=config.gateway.call_count,
+            compiler_mode=config.compiler_mode,
         )
         _write_diagnosis(out, diagnosis, refusal)
         print(f"REFUSED at {refusal.stage}: {refusal.__cause__ or refusal}", file=sys.stderr)
@@ -259,6 +292,27 @@ def cmd_forecast(args: argparse.Namespace) -> int:
         if out is not None:
             print(f"  diagnosis: {out / 'diagnosis.json'}", file=sys.stderr)
         return 1
+    except Exception as stopped:  # noqa: BLE001 — every ending owes a diagnosis
+        # The post-compile phase (structural assessment, the runtime, aggregation, the
+        # trace write) used to be unguarded: one provider hiccup after every actor call
+        # ended the run as a bare traceback with no artifacts. Whatever escapes now is
+        # written down as a simulation-stage failure before the process exits.
+        wall = time.monotonic() - start
+        diagnosis = RunDiagnosis(
+            question=args.question,
+            as_of=as_of,
+            horizon=horizon,
+            failure=stopped,
+            failure_stage="simulation",
+            wall_seconds=wall,
+            model_calls=config.gateway.call_count,
+            compiler_mode=config.compiler_mode,
+        )
+        if out is not None:
+            out.mkdir(parents=True, exist_ok=True)
+            (out / "diagnosis.json").write_text(canonical_json(diagnosis.as_dict()) + "\n")
+        print(f"FAILED in simulation after {wall:.0f}s: {stopped}", file=sys.stderr)
+        return 4
     wall = time.monotonic() - start
 
     forecast_hash = ""
@@ -275,8 +329,11 @@ def cmd_forecast(args: argparse.Namespace) -> int:
             run_result=ctx.run_result,
             repair_log=ctx.repair_log,
             world_review=ctx.world_review,
+            trajectory_audit=ctx.trajectory_audit,
+            forecast_integrity=result.integrity,
             wall_seconds=wall,
             model_calls=config.gateway.call_count,
+            compiler_mode=config.compiler_mode,
         )
         (out / "diagnosis.json").write_text(canonical_json(diagnosis.as_dict()) + "\n")
         # The same three artifacts a refusal writes. A completed run is the one whose
@@ -294,6 +351,12 @@ def cmd_forecast(args: argparse.Namespace) -> int:
             )
     _print_summary(result, forecast_hash, out)
     _print_audit(audit)
+    ta = ctx.trajectory_audit
+    if ta is not None:
+        print(f"\nTrajectory audit: {ta.classification}")
+        for f in ta.findings:
+            if f.severity in ("CRITICAL", "HIGH"):
+                print(f"  [{f.severity}] {f.key}: {f.finding}")
     return 0
 
 
@@ -430,6 +493,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=3,
         help="how many competing causal structures to simulate when the evidence "
         "leaves the structure open (1 takes the compiled structure as given)",
+    )
+    fc.add_argument(
+        "--compiler",
+        choices=("direct", "semantic"),
+        default="direct",
+        help="world compiler: 'direct' (one call authors the WorldSpec) or 'semantic' "
+        "(plan → independent review → deterministic lowering into the same WorldSpec)",
     )
     fc.add_argument("--max-queries", type=int, default=14)
     fc.add_argument("--research-rounds", type=int, default=3)

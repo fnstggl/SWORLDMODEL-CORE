@@ -132,7 +132,16 @@ def test_the_probability_is_exactly_the_weighted_yes_trajectories() -> None:
     assert forecast.simulation_probability == pytest.approx(yes / (yes + no))
     # The actors split the branches: this is not a degenerate all-one-way run.
     assert 0.0 < forecast.simulation_probability < 1.0
-    assert forecast.probability_source == "weighted_simulated_trajectories"
+    # This world's branch weights are a symmetric-ignorance split and the branches
+    # disagree, so the point estimate depends on arbitrary weights — the source says so
+    # rather than presenting the scenario average as a simulated frequency.
+    assert forecast.probability_source == "scenario_enumeration_ungrounded_weights"
+    assert forecast.integrity is not None
+    assert not forecast.integrity.point_estimate_is_calibrated
+    # The number is still exactly the weighted YES trajectories; only its label and
+    # bounds acknowledge what the weights are.
+    assert forecast.lower_bound == pytest.approx(0.0)
+    assert forecast.upper_bound == pytest.approx(1.0)
 
 
 def test_deleting_the_actor_decisions_destroys_the_forecast() -> None:
@@ -176,6 +185,38 @@ def test_unresolved_mass_is_reported_not_filled() -> None:
     assert forecast.lower_bound <= (forecast.simulation_probability or 0) <= forecast.upper_bound
     total = forecast.resolved_yes_mass + forecast.resolved_no_mass + forecast.unresolved_mass
     assert total == pytest.approx(1.0)
+
+
+def test_each_branch_records_its_pre_simulation_answer_and_weight_grounding() -> None:
+    """The engine, not a default, sets the forecast-integrity fields on every branch.
+
+    The pre-simulation evaluation runs right after ``_seed_branch``: conditions are in
+    world state, but no actor decision or process effect has executed yet.
+    """
+
+    gw = _gateway(_signal_sensitive)
+    contract, compiled = _compile(_split_world(), gw)
+    result = run(compiled, gw, seed=0)
+    forecast = _aggregate(contract, result)
+
+    for b in result.branch_outcomes:
+        # This world's weights are a symmetric-ignorance split: explicitly ungrounded.
+        assert b.weight_grounded is False
+        # Before anyone acted no positions were recorded, so the compiled
+        # unresolved_when held: the initialized world resolves nothing.
+        assert b.pre_resolved is False
+        assert b.pre_outcome is None
+        # The final outcomes exist and differ from the pre-simulation ones: the
+        # trajectories produced the answer instead of repeating the initialization.
+        assert b.resolved and b.outcome in ("YES", "NO")
+
+    integrity = forecast.integrity
+    assert integrity is not None
+    assert integrity.probability_before_simulation is None
+    assert integrity.pre_unresolved_mass == pytest.approx(1.0)
+    assert integrity.probability_after_simulation == forecast.simulation_probability
+    assert not integrity.weights_grounded_all
+    assert integrity.ungrounded_variables == ("external_signal",)
 
 
 def test_a_world_whose_outcome_is_an_input_is_refused() -> None:
@@ -703,3 +744,325 @@ def test_a_question_the_record_has_already_answered_compiles_from_its_citations(
     with pytest.raises(WorldIntegrityError) as exc:
         _compile(data, _gateway(_signal_sensitive))
     assert exc.value.details["failure"] == "terminal_has_no_producer"
+
+
+def test_the_settled_record_is_detected_for_the_exclusion_reviewer() -> None:
+    """The coverage gate's exclusion reviewer inverts its materiality test when the
+    world already resolves YES from the cited pre-cutoff record. The detector must fire
+    exactly on that state — YES at t0 with every terminal term evidence-cited — and
+    stay off for the normal open world, or future-dynamics claims would be waved
+    through on questions the record has not settled."""
+
+    from sworldmodel.world_compiler import _cited_factual_resolution
+
+    data = _split_world()
+    cited = data["claims"][0]["id"]
+    data["world_spec"]["documents"] = [
+        {
+            "document_id": "agreement",
+            "fields": {"signed": True},
+            "evidence_claim_ids": [cited],
+        }
+    ]
+    data["world_spec"]["terminal"]["yes_when"] = {
+        "op": "equals",
+        "args": [{"op": "document_field", "args": ["agreement", "signed"]}, True],
+    }
+    data["world_spec"]["terminal"]["unresolved_when"] = {"op": "const", "args": [False]}
+    data["uncertainties"] = []
+    _, compiled = _compile(data, _gateway(_signal_sensitive))
+    assert _cited_factual_resolution(compiled.spec, compiled.base_world)
+
+    # The same shape starting unsigned is the normal open state: no inversion.
+    data["world_spec"]["documents"][0]["fields"]["signed"] = False
+    _, open_world = _compile(data, _gateway(_signal_sensitive))
+    assert not _cited_factual_resolution(open_world.spec, open_world.base_world)
+
+
+def test_the_pre_rollout_review_is_told_when_the_record_already_answered() -> None:
+    """A live Bank of England run compiled the legitimate preresolved state — outcome
+    initial-true on cited pre-cutoff record — and the pre-rollout review attacked it
+    for lacking a production process, forcing a recompile whose world demanded the
+    already-made statement be made AGAIN inside the window: an absolute NO
+    manufactured by changing the question's meaning. Under a cited factual resolution
+    the review prompt must carry the settled-record basis and redirect the attack to
+    citation sufficiency; an open world must not get that block."""
+
+    from sworldmodel.world_review import _QUESTIONS, review_world
+
+    findings = {
+        "findings": [
+            {"key": k, "severity": "PASS", "finding": "ok", "evidence_basis": "the world"}
+            for k, _ in _QUESTIONS
+        ]
+    }
+
+    data = _split_world()
+    cited = data["claims"][0]["id"]
+    data["world_spec"]["documents"] = [
+        {"document_id": "agreement", "fields": {"signed": True}, "evidence_claim_ids": [cited]}
+    ]
+    data["world_spec"]["terminal"]["yes_when"] = {
+        "op": "equals",
+        "args": [{"op": "document_field", "args": ["agreement", "signed"]}, True],
+    }
+    data["world_spec"]["terminal"]["unresolved_when"] = {"op": "const", "args": [False]}
+    data["uncertainties"] = []
+    _, compiled = _compile(data, _gateway(_signal_sensitive))
+
+    gw = ProgrammableGateway({"world_review": findings})
+    review = review_world(compiled, None, gw, question="q?", evidence_render="the evidence")
+    assert not review.error and not review.should_repair
+    (req,) = [r for r in gw.seen if r.task_kind == "world_review"]
+    assert "CITED FACTUAL RESOLUTION" in req.prompt
+    assert "same subject, same act" in req.prompt
+
+    # The open world's review carries no settled-record basis.
+    data["world_spec"]["documents"][0]["fields"]["signed"] = False
+    _, open_world = _compile(data, _gateway(_signal_sensitive))
+    gw2 = ProgrammableGateway({"world_review": findings})
+    review_world(open_world, None, gw2, question="q?", evidence_render="the evidence")
+    (req2,) = [r for r in gw2.seen if r.task_kind == "world_review"]
+    assert "CITED FACTUAL RESOLUTION" not in req2.prompt
+
+    # Every review is told the system's standing legitimacy rules: a population run's
+    # honestly-labeled symmetric-ignorance uncertainty was called arbitrary and the
+    # forced recompile deleted it, leaving a world that could only end unresolved.
+    for r in (req, req2):
+        assert "WHAT IS ALREADY LEGAL HERE" in r.prompt
+        assert "symmetric_ignorance_assumption" in r.prompt
+
+
+def test_arbitrary_weights_cannot_block_a_world_of_labeled_ignorance() -> None:
+    """The prompt rule alone did not hold: a population review still filed CRITICAL
+    branch_weights_arbitrary against weights labeled symmetric ignorance, and the
+    forced recompile lost the cited downside alternative. When every weight in the
+    world already wears an ungrounded-provenance label, the deterministic backstop
+    downgrades that finding — the label IS the honest state, priced as bounds. The
+    reviewer must also be able to SEE the uncertainty's citations in the summary."""
+
+    from sworldmodel.world_review import _QUESTIONS, review_world, summarize_world
+
+    data = _split_world()
+    _, compiled = _compile(data, _gateway(_signal_sensitive))
+
+    for u in summarize_world(compiled)["uncertainties"]:
+        assert "cited" in u, "the citation count must be visible to the reviewer"
+
+    findings = {
+        "findings": [
+            {"key": k, "severity": "PASS", "finding": "ok", "evidence_basis": "the world"}
+            for k, _ in _QUESTIONS
+            if k != "branch_weights_arbitrary"
+        ]
+        + [
+            {
+                "key": "branch_weights_arbitrary",
+                "severity": "CRITICAL",
+                "finding": "weights are only symmetric ignorance",
+                "evidence_basis": "the compiled world's uncertainty outcomes",
+            }
+        ]
+    }
+    gw = ProgrammableGateway({"world_review": findings})
+    review = review_world(compiled, None, gw, question="q?", evidence_render="the evidence")
+    assert not review.error
+    assert "branch_weights_arbitrary" not in review.failed_blocking
+    assert not review.should_repair
+    downgraded = next(f for f in review.findings if f.key == "branch_weights_arbitrary")
+    assert downgraded.severity == "MEDIUM"
+    assert "not blocking" in downgraded.finding
+
+
+def test_a_world_whose_initial_values_already_answer_yes_uncited_is_refused() -> None:
+    """The OPEC+ shape: the answer baked into an uncited initial value.
+
+    A live run compiled `quota_increase_announced` with initial True and no citation,
+    plus an action that could also write it. The per-term gate passed — the action is a
+    producer — and the branch resolved YES without one event firing: the runtime lineage
+    showed the term was never written. YES at t0 is legitimate only as a factual
+    resolution the cited record establishes; uncited, it is the compiler asserting the
+    outcome and letting the simulation take credit.
+    """
+
+    from sworldmodel.errors import WorldIntegrityError
+
+    data = _split_world()
+    data["world_spec"]["fields"].append(
+        {"field_id": "quota_increase_announced", "value_type": "bool", "initial": True}
+    )
+    data["world_spec"]["terminal"]["yes_when"] = {
+        "op": "equals",
+        "args": [{"op": "field", "args": ["quota_increase_announced"]}, True],
+    }
+    data["world_spec"]["terminal"]["unresolved_when"] = {"op": "const", "args": [False]}
+    data["world_spec"]["actions"].append(
+        {
+            "action_id": "announce_quota_increase",
+            "meaning": "announce it",
+            "eligible_actors": ["*"],
+            "effects": [{"op": "set_field", "field": "quota_increase_announced", "value": True}],
+            "evidence_claim_ids": [],
+        }
+    )
+    data["uncertainties"] = []
+
+    with pytest.raises(WorldIntegrityError) as exc:
+        _compile(data, _gateway(_signal_sensitive))
+    assert exc.value.details["failure"] == "terminal_preresolved_without_evidence"
+    assert exc.value.details["uncited terminal terms"] == ["quota_increase_announced"]
+
+    # The same world starting neutral is the normal open state and compiles.
+    data["world_spec"]["fields"][-1]["initial"] = False
+    _compile(data, _gateway(_signal_sensitive))  # must not raise
+
+
+def test_a_terminal_copied_from_an_ungrounded_uncertainty_is_refused() -> None:
+    """The Tesla launder: an uncertainty draw copied one hop into the terminal term.
+
+    A live run declared `delivery_value_exogenous` as a 50/50 exogenous uncertainty and an
+    end-of-quarter node that set `actual_q3_deliveries = field(delivery_value_exogenous)` —
+    the terminal read the deliveries. The uncertainty did not write the terminal term
+    directly, so the earlier gate saw a node as the producer and passed it; the answer was
+    the branch weight all the same, laundered through a node that computed nothing.
+    """
+
+    from sworldmodel.errors import WorldIntegrityError
+
+    data = _split_world()
+    data["world_spec"]["fields"].append(
+        {"field_id": "delivery_value_exogenous", "value_type": "number", "initial": 0}
+    )
+    data["world_spec"]["fields"].append(
+        {"field_id": "actual_deliveries", "value_type": "number", "initial": 0}
+    )
+    data["world_spec"]["terminal"]["yes_when"] = {
+        "op": "greater_than",
+        "args": [{"op": "field", "args": ["actual_deliveries"]}, 400000],
+    }
+    data["world_spec"]["external_processes"] = [
+        {
+            "process_id": "q_end",
+            "description": "the quarter closes and the total is recorded",
+            "occurrences": [
+                {
+                    "at": "2026-06-20T00:00:00+00:00",
+                    "description": "quarter end",
+                    "effects": [
+                        {
+                            "op": "set_field",
+                            "field": "actual_deliveries",
+                            "value": {"op": "field", "args": ["delivery_value_exogenous"]},
+                        }
+                    ],
+                }
+            ],
+            "evidence_claim_ids": [],
+        }
+    ]
+    data["uncertainties"] = [
+        {
+            "variable": "delivery_value_exogenous",
+            "why_unknown": "the quarter is not over",
+            "reversal_capable": True,
+            "outcomes": [
+                {
+                    "value": "over",
+                    "weight": 0.5,
+                    "provenance": "symmetric_ignorance_assumption",
+                    "field_effects": [["delivery_value_exogenous", 400001]],
+                },
+                {
+                    "value": "under",
+                    "weight": 0.5,
+                    "provenance": "symmetric_ignorance_assumption",
+                    "field_effects": [["delivery_value_exogenous", 380000]],
+                },
+            ],
+        }
+    ]
+
+    with pytest.raises(WorldIntegrityError) as exc:
+        _compile(data, _gateway(_signal_sensitive))
+    assert exc.value.details["failure"] == "terminal_laundered_from_uncertainty"
+    assert exc.value.details["terminal terms copied from an uncertainty"] == ["actual_deliveries"]
+
+
+def test_a_total_computed_from_a_grounded_base_and_an_uncertain_rate_is_not_a_launder() -> None:
+    """The world the launder gate must permit: uncertainty on the driver, not the total.
+
+    A quarter's deliveries built from a grounded starting run-rate scaled by an uncertain
+    demand multiplier is production — the unknown sits on the rate, which is exactly where
+    the compiler is told to put it — and the terminal reads a total the world computed, not
+    a draw copied into it.
+    """
+
+    from sworldmodel.world_compiler import _laundered_terminal_terms, terminal_producers
+
+    data = _split_world()
+    data["world_spec"]["fields"].append(
+        {"field_id": "base_runrate", "value_type": "number", "initial": 350000}
+    )
+    data["world_spec"]["fields"].append(
+        {"field_id": "demand_multiplier", "value_type": "number", "initial": 1.0}
+    )
+    data["world_spec"]["fields"].append(
+        {"field_id": "actual_deliveries", "value_type": "number", "initial": 0}
+    )
+    data["world_spec"]["terminal"]["yes_when"] = {
+        "op": "greater_than",
+        "args": [{"op": "field", "args": ["actual_deliveries"]}, 400000],
+    }
+    data["world_spec"]["external_processes"] = [
+        {
+            "process_id": "q_end",
+            "description": "the quarter's output is the run-rate scaled by realised demand",
+            "occurrences": [
+                {
+                    "at": "2026-06-20T00:00:00+00:00",
+                    "description": "quarter end",
+                    "effects": [
+                        {
+                            "op": "set_field",
+                            "field": "actual_deliveries",
+                            "value": {
+                                "op": "multiply",
+                                "args": [
+                                    {"op": "field", "args": ["base_runrate"]},
+                                    {"op": "field", "args": ["demand_multiplier"]},
+                                ],
+                            },
+                        }
+                    ],
+                }
+            ],
+            "evidence_claim_ids": [],
+        }
+    ]
+    data["uncertainties"] = [
+        {
+            "variable": "demand_multiplier",
+            "why_unknown": "demand for the quarter is not yet observed",
+            "reversal_capable": True,
+            "outcomes": [
+                {
+                    "value": "strong",
+                    "weight": 0.5,
+                    "provenance": "symmetric_ignorance_assumption",
+                    "field_effects": [["demand_multiplier", 1.2]],
+                },
+                {
+                    "value": "weak",
+                    "weight": 0.5,
+                    "provenance": "symmetric_ignorance_assumption",
+                    "field_effects": [["demand_multiplier", 1.05]],
+                },
+            ],
+        }
+    ]
+
+    bundle = build_bundle(data)
+    producers = terminal_producers(bundle.spec)
+    # The value reads a grounded base as well as the uncertain rate, so it is production,
+    # not a bare copy of a draw — the launder gate leaves it alone.
+    assert _laundered_terminal_terms(bundle.spec, bundle.uncertainties, producers) == {}

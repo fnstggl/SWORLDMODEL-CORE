@@ -24,16 +24,19 @@ not branch on the kind of question.
 
 from __future__ import annotations
 
+import hashlib
 import time
 from dataclasses import replace
 from datetime import datetime
-from typing import Any
+from typing import Any, Protocol
 
 from .compiled import CompiledWorld
 from .config import ForecastConfig
 from .diagnosis import ForecastRefused
 from .engine import RunResult, run
 from .errors import GatewayError, RunInterrupted, SWorldModelError, WorldIntegrityError
+from .gateway import ModelGateway
+from .ids import canonical_json
 from .models import ForecastResult, ResolutionContract
 from .outcomes import aggregate
 from .repair import RepairLog, RepairPlan, plan_repair
@@ -45,6 +48,8 @@ from .structures import (
     assess_structure,
 )
 from .tracing import TraceContext
+from .trajectory_audit import audit_trajectory
+from .uncertainty import UNGROUNDED_PROVENANCES
 from .world_compiler import compile_world, compile_world_spec_live, render_evidence
 from .world_review import review_world
 
@@ -138,6 +143,24 @@ def _compile_with_repair(
                 )
                 raise
 
+            if time.monotonic() > deadline:
+                # Checked BEFORE starting an attempt as well as after one returns: a
+                # semantic-mode attempt costs several provider calls, and a deadline
+                # that only fires post-attempt lets a single repair overrun the whole
+                # compile budget before anyone looks at the clock.
+                log.record(
+                    plan,
+                    failure=failure,
+                    message=str(exc),
+                    claims_before=before,
+                    claims_after=before,
+                    outcome=(
+                        f"repair budget of {config.max_compile_seconds:.0f}s exhausted "
+                        "before the attempt; the last diagnosis stands"
+                    ),
+                )
+                raise
+
             repaired = _repair_once(question, as_of, horizon, bundle, config, plan)
             after = len(repaired.evidence_store.claims) if repaired else before
             if repaired is None:
@@ -164,7 +187,15 @@ def _compile_with_repair(
             # bailey_public_stance to bailey_vote. Same code, different world, and the
             # second attempt was never made. The ceiling above is what bounds a compiler
             # that cycles forever.
-            signature = f"{failure}|{_failure_signature(exc)}"
+            #
+            # The world that failed is part of the signature for the same reason. A live
+            # Tesla run was exhausted after two no_causal_producer refusals whose detail
+            # strings matched — but the compiler had emptied a different world each time,
+            # and the exception details cannot see that. Same code, same details, same
+            # WORLD is a reroll; the same refusal of a genuinely different world is the
+            # compiler exploring, and the ceiling and compile deadline bound it.
+            spec_hash = hashlib.sha256(repr(bundle.spec).encode()).hexdigest()[:16]
+            signature = f"{failure}|{_failure_signature(exc)}|world:{spec_hash}"
             new_evidence = after > before
             new_diagnosis = failure not in seen_failures or signature not in seen_signatures
             seen_failures.add(failure)
@@ -258,6 +289,225 @@ def _repair_once(
     return _recompile(question, as_of, horizon, bundle, config, plan.instruction)
 
 
+class CompileModeConfig(Protocol):
+    """The slice of the run configuration the compile-mode dispatch reads.
+
+    :class:`~sworldmodel.config.ForecastConfig` satisfies it; so does the minimal shim
+    the live research backend builds, so the *initial* live compilation dispatches
+    through this same entry point without importing the whole configuration.
+    """
+
+    @property
+    def gateway(self) -> ModelGateway: ...
+
+
+def _latest_semantic_plan(live_trace: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The most recent semantic plan this run produced, if any.
+
+    Repair rounds ride ``semantic_repair_rounds`` (newest last); the initial compile's
+    plan sits under ``semantic_compilation`` (both research backends store it there).
+    A repair that can see the previous plan revises it instead of re-rolling it —
+    re-rolls are how a cited downside alternative vanished from a recompiled world.
+    """
+
+    trace = live_trace or {}
+    rounds = trace.get("semantic_repair_rounds")
+    if isinstance(rounds, list) and rounds:
+        last = rounds[-1]
+        if isinstance(last, dict) and isinstance(last.get("plan"), dict):
+            return dict(last["plan"])
+    initial = trace.get("semantic_compilation")
+    if isinstance(initial, dict) and isinstance(initial.get("plan"), dict):
+        return dict(initial["plan"])
+    return None
+
+
+def compile_for_mode(
+    config: CompileModeConfig,
+    question: str,
+    as_of: datetime,
+    horizon: datetime,
+    view: Any,
+    *,
+    extra_instruction: str = "",
+    structure_id: str = "primary",
+    prior_plan: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """The one compile entry point both modes share, at every call site.
+
+    Four places compile a world from evidence — the initial live research compile, the
+    repair recompile, each structural alternative, and the frozen-store replay — and a
+    mode that exists at some of them is a silent mixed-mode run at the others. Routing
+    all of them here makes missing a site impossible, and stamps the mode into the
+    compilation so the trace can always say which compiler produced which structure.
+
+    The gateway response rides along under ``_compile_responses`` (the key
+    ``assemble_bundle`` already reads), so every call site keeps the compile-call
+    record without a second return channel.
+    """
+
+    if getattr(config, "compiler_mode", "direct") == "semantic":
+        from .semantic_compile import semantic_compile_live
+
+        data, resp = semantic_compile_live(
+            config.gateway,
+            question,
+            as_of,
+            horizon,
+            view,
+            extra_instruction=extra_instruction,
+            structure_id=structure_id,
+            prior_plan=prior_plan,
+        )
+    else:
+        data, resp = compile_world_spec_live(
+            config.gateway,
+            question,
+            as_of,
+            horizon,
+            view,
+            extra_instruction=extra_instruction,
+            structure_id=structure_id,
+        )
+    # Stamp a COPY: both live compilers can hand back the gateway response's own data
+    # dict, and writing the stamp (or the response object itself) into that shared dict
+    # would rewrite the recorded model output — and, under a scripted test gateway, the
+    # fixture it replays.
+    data = dict(data)
+    data["compiler_mode"] = getattr(config, "compiler_mode", "direct")
+    data["_compile_responses"] = [resp]
+    return data
+
+
+def _replan_initial_compile(
+    question: str,
+    as_of: datetime,
+    horizon: datetime,
+    config: ForecastConfig,
+    exc: SWorldModelError,
+    log: RepairLog,
+) -> ResearchBundle | None:
+    """Repair a compile refusal that fired inside ``research()``, before any bundle
+    existed.
+
+    The repair registry covers plan-stage failures — ``semantic_plan_invalid``,
+    ``lowering_gap`` — but the repair loop only wraps the world-level gates, so an
+    initial compile that refused with ``recompilable: True`` propagated straight to a
+    refusal whose diagnosis read ``repair_attempts: []``: the registered plan existed
+    and was never consulted. The research the refusal carries is complete (it rides on
+    the exception), so this re-reads that same store with the plan's instruction — the
+    identical discipline as :func:`_recompile` — and hands any resulting bundle back to
+    the normal gate-and-repair path, which decides everything else. Refusals repeat
+    with the same diagnosis, run out of plan, or run out of budget: then the refusal
+    stands, with the attempts on its record.
+    """
+
+    if not isinstance(exc, WorldIntegrityError) or exc.details.get("recompilable") is False:
+        return None
+    store = getattr(exc, "partial_evidence_store", None)
+    if store is None or not getattr(config.gateway, "is_live", False):
+        return None
+    deadline = time.monotonic() + max(0.0, config.max_compile_seconds)
+    failure_exc = exc
+    seen: set[str] = set()
+    claims = len(store.claims)
+    for _ in range(_REPAIR_CEILING):
+        failure = str(failure_exc.details.get("failure") or "unclassified")
+        plan = plan_repair(failure_exc, question, subject_entity="")
+        if plan is None:
+            log.record(
+                None,
+                failure=failure,
+                message=str(failure_exc),
+                claims_before=claims,
+                claims_after=claims,
+                outcome="no repair plan for this failure",
+            )
+            return None
+        signature = f"{failure}|{_failure_signature(failure_exc)}"
+        if signature in seen:
+            log.record(
+                plan,
+                failure=failure,
+                message=str(failure_exc),
+                claims_before=claims,
+                claims_after=claims,
+                outcome=(
+                    "the same refusal repeated with nothing new to read — a reroll, not a repair"
+                ),
+            )
+            return None
+        seen.add(signature)
+        if time.monotonic() > deadline:
+            log.record(
+                plan,
+                failure=failure,
+                message=str(failure_exc),
+                claims_before=claims,
+                claims_after=claims,
+                outcome=(
+                    f"repair budget of {config.max_compile_seconds:.0f}s exhausted "
+                    "before the attempt; the last diagnosis stands"
+                ),
+            )
+            return None
+        try:
+            data = compile_for_mode(
+                config,
+                question,
+                as_of,
+                horizon,
+                store.view(as_of),
+                extra_instruction=plan.instruction,
+                structure_id="primary",
+                prior_plan=_latest_semantic_plan(getattr(exc, "partial_live_trace", None)),
+            )
+        except WorldIntegrityError as retry_exc:
+            log.record(
+                plan,
+                failure=failure,
+                message=str(failure_exc),
+                claims_before=claims,
+                claims_after=claims,
+                outcome=(
+                    "the replanned compilation was refused again: "
+                    f"{retry_exc.details.get('failure') or retry_exc}"
+                ),
+            )
+            if retry_exc.details.get("recompilable") is False:
+                return None
+            failure_exc = retry_exc
+            continue
+        except (GatewayError, ValueError, KeyError, TypeError, IndexError):
+            log.record(
+                plan,
+                failure=failure,
+                message=str(failure_exc),
+                claims_before=claims,
+                claims_after=claims,
+                outcome=(
+                    "the replanned compilation could not be produced or read — a "
+                    "provider error, or a world the parser could not make sense of"
+                ),
+            )
+            return None
+        log.record(
+            plan,
+            failure=failure,
+            message=str(failure_exc),
+            claims_before=claims,
+            claims_after=claims,
+            outcome="replanned from the refusal's own research; the world gates decide next",
+        )
+        live_trace = dict(getattr(exc, "partial_live_trace", None) or {})
+        if "_semantic" in data:
+            rounds = list(live_trace.get("semantic_repair_rounds") or [])
+            rounds.append(data["_semantic"])
+            live_trace["semantic_repair_rounds"] = rounds
+        return replace(assemble_bundle(store, data), live_trace=live_trace)
+    return None
+
+
 def _recompile(
     question: str,
     as_of: datetime,
@@ -277,19 +527,28 @@ def _recompile(
     if not getattr(config.gateway, "is_live", False):
         return None
     try:
-        data, _ = compile_world_spec_live(
-            config.gateway,
+        instruction = (
+            "A previous compilation of this question was rejected. Fix exactly this "
+            "and change nothing else about how you read the evidence:\n"
+            f"{reason}\n"
+            "Do not invent support for anything."
+        )
+        # The same repair loop drives both compiler modes: the instruction names a
+        # world-meaning defect, and each mode re-reads the same evidence its own way —
+        # the direct compiler re-authors the WorldSpec, the semantic path re-plans and
+        # re-lowers. Neither mode gets a private repair mechanism, which keeps the A/B
+        # comparison honest.
+        data = compile_for_mode(
+            config,
             question,
             as_of,
             horizon,
             bundle.evidence_store.view(as_of),
-            extra_instruction=(
-                "A previous compilation of this question was rejected. Fix exactly this "
-                "and change nothing else about how you read the evidence:\n"
-                f"{reason}\n"
-                "Do not invent support for anything."
-            ),
+            extra_instruction=instruction,
             structure_id="primary",
+            # A repair that can see the plan it is repairing revises it; one that
+            # cannot re-rolls the whole world and can silently lose cited structure.
+            prior_plan=_latest_semantic_plan(bundle.live_trace),
         )
         # Carry the research record forward. A compiler-only repair does no new
         # research, so `assemble_bundle` has no trace to build — and without this the
@@ -298,13 +557,29 @@ def _recompile(
         # fetched, 0 claims" in its own diagnosis while its audit showed 38 extractions
         # and 399 HTTP requests.
         #
+        # A semantic repair round's plan and mapping ride the trace under a per-round
+        # key, so the artifact a simulated world is audited against is the plan that
+        # actually produced it, not the first round's.
+        live_trace = dict(bundle.live_trace or {})
+        if "_semantic" in data:
+            rounds = list(live_trace.get("semantic_repair_rounds") or [])
+            rounds.append(data["_semantic"])
+            live_trace["semantic_repair_rounds"] = rounds
+        #
         # Parsing is inside the try for a reason. A live OPEC+ run died on
         # `float(None)` in the resource parser *here*, during a repair recompile, where
         # nothing was catching it — past every gate that would have turned it into a
         # diagnosis, out through run_forecast, leaving a traceback and no artifacts at
         # all. A repair that cannot be read is a repair that did not happen.
-        return replace(assemble_bundle(bundle.evidence_store, data), live_trace=bundle.live_trace)
-    except (GatewayError, WorldIntegrityError, ValueError, KeyError, TypeError, IndexError):
+        return replace(assemble_bundle(bundle.evidence_store, data), live_trace=live_trace)
+    except WorldIntegrityError as exc:
+        if exc.details.get("recompilable") is False:
+            # A reasoned, final refusal — the review abstained, the evidence cannot
+            # support any faithful world — must propagate as itself, never be melted
+            # into "the repaired compilation could not be produced".
+            raise
+        return None
+    except (GatewayError, ValueError, KeyError, TypeError, IndexError):
         return None
 
 
@@ -363,8 +638,8 @@ def _compile_alternative(
     built from two different sets of facts.
     """
 
-    data, _ = compile_world_spec_live(
-        config.gateway,
+    data = compile_for_mode(
+        config,
         question,
         as_of,
         horizon,
@@ -387,12 +662,49 @@ def _compile_alternative(
     return alt_bundle, compiled
 
 
-def _merge(results: list[tuple[float, str, RunResult]]) -> RunResult:
+def _structure_weight_grounded(assessment: StructuralAssessment, structure_id: str) -> bool:
+    """Whether the *structural* weight scaling this structure's branches is anchored in
+    an identified distribution.
+
+    Structure weights come from the assess_structure call and are epistemic: an
+    alternative labeled symmetric-ignorance (or left unlabeled, which falls back to it)
+    is a guess about WHICH WORLD WE ARE IN, not a measured probability. Multiplying
+    such a weight into a branch makes the branch's mass a guess too. The primary's own
+    weight is the complement of the alternatives' (plus any undescribed mass), so it is
+    grounded only when every part of that complement is.
+    """
+
+    if not assessment.is_material:
+        return True
+    for alt in assessment.alternatives:
+        if alt.structure_id == structure_id:
+            return alt.provenance not in UNGROUNDED_PROVENANCES
+    # The primary structure: its weight is 1 minus everything else.
+    return assessment.undescribed_mass <= 0 and all(
+        a.provenance not in UNGROUNDED_PROVENANCES for a in assessment.alternatives
+    )
+
+
+# The key under which an ungrounded structure choice enters a branch's key_conditions,
+# so it surfaces in the aggregate's ungrounded_variables like any other arbitrary split.
+_STRUCTURE_CONDITION = "causal_structure"
+
+
+def _merge(results: list[tuple[float, str, bool, RunResult]]) -> RunResult:
     """Combine per-structure runs into one trajectory set.
 
     Every branch weight is scaled by the weight of the structure it happened in, and
     branch ids are namespaced by structure, so the branch table the report prints still
     reconstructs the probability by hand.
+
+    Each entry carries whether its structural weight is grounded. When it is not, every
+    scaled branch is marked weight_grounded=False and the structure choice is added to
+    its key_conditions: an unevidenced split over which causal structure decides the
+    question must reach the forecast-integrity machinery exactly as an unevidenced
+    split over a value would — widening the bounds and, when the structures disagree,
+    withdrawing the point estimate's calibration claim. Without this, a 0.6/0.4 guess
+    about which world we are in multiplied branch mass while weights_grounded_all
+    stayed True and the bounds collapsed onto the point.
     """
 
     outcomes: list[Any] = []
@@ -404,10 +716,17 @@ def _merge(results: list[tuple[float, str, RunResult]]) -> RunResult:
     truncated = 0.0
     reasons: list[str] = []
 
-    for weight, structure_id, res in results:
+    for weight, structure_id, structurally_grounded, res in results:
         prefix = f"{structure_id}/"
         for b in res.branch_outcomes:
-            outcomes.append(replace(b, branch_id=prefix + b.branch_id, weight=b.weight * weight))
+            scaled = replace(b, branch_id=prefix + b.branch_id, weight=b.weight * weight)
+            if not structurally_grounded:
+                scaled = replace(
+                    scaled,
+                    weight_grounded=False,
+                    key_conditions=scaled.key_conditions + ((_STRUCTURE_CONDITION, structure_id),),
+                )
+            outcomes.append(scaled)
         for s in res.trajectory_summaries:
             summaries.append(replace(s, branch_id=prefix + s.branch_id, weight=s.weight * weight))
         ledger.extend(res.event_ledger)
@@ -432,11 +751,108 @@ def _merge(results: list[tuple[float, str, RunResult]]) -> RunResult:
     )
 
 
+def _checkpoint_research(config: ForecastConfig, bundle: ResearchBundle) -> None:
+    """Persist what research produced, the moment it produces it.
+
+    Research is the expensive stage — minutes of network, dozens of model calls — and
+    for a long time its record only reached disk if everything after it also succeeded.
+    A live EU-Mercosur run spent twenty minutes gathering evidence and then died in a
+    truncated HTTP read, leaving an empty trace directory: there was nothing to diagnose
+    because nothing had been written. Checkpointing here means a later stage can fail,
+    crash or be killed and the research still survives.
+
+    Best effort by construction: a checkpoint that raised would itself become a way to
+    lose a run, which is the opposite of the point.
+    """
+
+    _write_research_files(config, bundle.live_trace or {}, bundle.evidence_store)
+
+
+def _write_research_files(config: ForecastConfig, live_trace: dict[str, Any], store: Any) -> None:
+    out = config.trace_dir
+    if out is None:
+        return
+    try:
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "research_trace.json").write_text(canonical_json(live_trace) + "\n")
+        (out / "evidence_store.json").write_text(
+            canonical_json([_claim_record(c) for c in store.all()]) + "\n"
+        )
+    except OSError:
+        pass
+
+
+def _claim_record(c: Any) -> dict[str, Any]:
+    """The COMPLETE evidence claim, exported stably (ISO datetimes, enum values).
+
+    The export used to write eight fields and drop authority_level, source_type,
+    published_at, valid_from/valid_until, source_id, confidence, retrieved_at and
+    lineage_event_id — so a store replayed from disk misranked authority and changed
+    which claims the compiler saw as decisive. Every dataclass field is written; the
+    original eight keep their exact names and encodings for backward compatibility.
+    """
+
+    def _iso(v: Any) -> str | None:
+        return v.isoformat() if isinstance(v, datetime) else None
+
+    return {
+        # -- the original eight, unchanged ---------------------------------------
+        "id": c.id,
+        "proposition": c.proposition,
+        "normalized_value": c.normalized_value,
+        "entities": list(c.entities),
+        "epistemic_type": c.epistemic_type.value,
+        "source_url": c.source_url,
+        "supporting_excerpt": c.supporting_excerpt,
+        "available_at": c.available_at.isoformat(),
+        # -- the rest of the record ----------------------------------------------
+        "valid_from": _iso(c.valid_from),
+        "valid_until": _iso(c.valid_until),
+        "published_at": c.published_at.isoformat(),
+        "source_id": c.source_id,
+        "source_title": c.source_title,
+        "source_type": c.source_type.value,
+        "authority_level": c.authority_level.value,
+        "lineage_event_id": c.lineage_event_id,
+        "confidence": c.confidence,
+        "retrieved_at": c.retrieved_at.isoformat(),
+        "contradiction_ids": list(c.contradiction_ids),
+        "retrieved_url": c.retrieved_url,
+        "archived_at": _iso(c.archived_at),
+        "content_sha256": c.content_sha256,
+        "extraction_prompt_sha256": c.extraction_prompt_sha256,
+    }
+
+
+def _checkpoint_partial(config: ForecastConfig, exc: BaseException) -> bool:
+    """Persist research carried by a refusal that fired before the bundle existed.
+
+    The initial compile runs inside ``research()``, so its refusal used to erase the
+    entire research record: no trace, no store, and a diagnosis that read the resulting
+    zeros as "no candidate URL was discovered at all". A compile-stage refusal now
+    carries the completed research on the exception, and it is written here exactly as
+    the successful path would have written it. Returns whether research was attached —
+    which is also the proof the run reached compilation, not a research failure.
+    """
+
+    live_trace = getattr(exc, "partial_live_trace", None)
+    store = getattr(exc, "partial_evidence_store", None)
+    if live_trace is None or store is None:
+        return False
+    _write_research_files(config, dict(live_trace), store)
+    return True
+
+
 def run_forecast(
     question: str, as_of: datetime, horizon: datetime, config: ForecastConfig
 ) -> tuple[ForecastResult, TraceContext]:
     """Run the full pipeline and return the result plus a trace context for writing."""
 
+    # The run's spend ceilings reach the gateway before the first call: research,
+    # compilation, assessment, actors and audit all share one budget, and exhaustion
+    # surfaces as a GatewayError the existing handlers turn into honest refusals or
+    # unresolved branches — never into a cheaper answer.
+    config.gateway.set_budget(max_calls=config.max_calls, max_tokens_total=config.max_tokens_total)
     log = RepairLog()
     try:
         bundle = config.research_backend.research(question, as_of, horizon)
@@ -446,11 +862,32 @@ def run_forecast(
         # had got, not why it ended.
         raise
     except SWorldModelError as exc:
-        raise ForecastRefused(exc, stage="research", repair_log=log) from exc
+        # The initial compile runs inside research(); when IT refuses, the research
+        # that preceded it is complete and rides on the exception. Writing it and
+        # naming the true stage keeps a compile refusal from erasing twenty minutes of
+        # retrieval and being misfiled as a discovery failure. And when the refusal is
+        # recompilable, the registered repair plan gets its chance here too — a
+        # plan-stage failure used to refuse outright with ``repair_attempts: []``
+        # because the repair loop only wrapped the world-level gates.
+        reached_compile = _checkpoint_partial(config, exc)
+        replanned = (
+            _replan_initial_compile(question, as_of, horizon, config, exc, log)
+            if reached_compile
+            else None
+        )
+        if replanned is None:
+            raise ForecastRefused(
+                exc, stage="compilation" if reached_compile else "research", repair_log=log
+            ) from exc
+        bundle = replanned
     except (TypeError, ValueError, KeyError) as exc:
         # A parser or provider shape nobody anticipated. It is still a run that stopped,
         # and it still owes a diagnosis rather than a traceback.
-        raise ForecastRefused(exc, stage="research", repair_log=log) from exc
+        reached_compile = _checkpoint_partial(config, exc)
+        raise ForecastRefused(
+            exc, stage="compilation" if reached_compile else "research", repair_log=log
+        ) from exc
+    _checkpoint_research(config, bundle)
     attempted: list[ResearchBundle] = []
     try:
         bundle, compiled = _compile_with_repair(
@@ -528,10 +965,11 @@ def run_forecast(
         evidence_render=render_evidence(bundle.evidence_store.view(as_of)),
     )
 
-    runs: list[tuple[float, str, RunResult]] = [
+    runs: list[tuple[float, str, bool, RunResult]] = [
         (
             assessment.primary_weight,
             compiled.spec.structure_id,
+            _structure_weight_grounded(assessment, compiled.spec.structure_id),
             run(compiled, config.gateway, seed=config.seed, budget=config.budget),
         )
     ]
@@ -548,6 +986,7 @@ def run_forecast(
             (
                 alt.weight,
                 alt.structure_id,
+                _structure_weight_grounded(assessment, alt.structure_id),
                 run(alt_compiled, config.gateway, seed=config.seed, budget=config.budget),
             )
         )
@@ -589,6 +1028,12 @@ def run_forecast(
     )
     ctx.repair_log = log
     ctx.world_review = review
+    # The second adversary: attack the trajectory the way the reality auditor attacked
+    # the world. Mechanical checks first (repeated calls, an unproduced YES, a forecast
+    # that merely repeats its initialization), then one model pass over the per-branch
+    # digest. Advisory and never raising — it classifies what happened, it does not
+    # decide whether the run was allowed.
+    ctx.trajectory_audit = audit_trajectory(compiled, run_result, config.gateway, question=question)
     return result, ctx
 
 
@@ -598,4 +1043,10 @@ def forecast(
     result, ctx = run_forecast(question, as_of, horizon, config)
     if config.trace_dir is not None:
         ctx.write(config.trace_dir, gateway_calls=config.gateway.calls)
+        # The research checkpoint wrote the INITIAL bundle's trace and store; a review
+        # or gate repair that recompiled replaced both (the simulated plan rides
+        # live_trace["semantic_repair_rounds"], targeted research extends the store).
+        # Rewrite from the bundle that was actually simulated, or every downstream
+        # audit reads a plan nobody executed beside claims nobody used.
+        _write_research_files(config, dict(ctx.bundle.live_trace or {}), ctx.bundle.evidence_store)
     return result

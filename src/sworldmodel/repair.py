@@ -144,6 +144,28 @@ def plan_repair(
     return builder(exc, subject)
 
 
+# The one sanctioned encoding of "the record already settles it", stated identically in
+# every repair whose failure the compiler tends to reach while trying to say exactly
+# that. A live Bank of England run cycled environment_presets_terminal →
+# nothing_can_act → terminal_reads_no_world_state across five repairs: each round
+# forbade one encoding of "already achieved" and the compiler invented another, because
+# no repair ever named the single admissible one. Every one of these repairs must point
+# at the same two targets or the loop oscillates instead of converging.
+_ALREADY_OR_OPEN = (
+    "\nDecide which of two worlds this is, and build that one completely:\n"
+    "(a) ALREADY SETTLED — verified claims available at the cutoff establish that the "
+    "outcome has already happened. Then put the established value in the very field or "
+    "document the terminal reads as its INITIAL value, cite those claim ids on that "
+    "field or document, and add no action and no process to re-produce it. The citation "
+    "is what makes this honest; asserting the value without it will be refused.\n"
+    "(b) STILL OPEN — the record does not establish it. Then start the terminal's terms "
+    "at their neutral value (false, zero, empty), compile the real actors and processes "
+    "with the actions their roles afford, place their real dated occasions on the "
+    "calendar, and let the outcome be produced inside the window. Never mix the two by "
+    "asserting the answer while also compiling people to produce it."
+)
+
+
 def _no_causal_producer(exc: WorldIntegrityError, subject: str) -> RepairPlan:
     return RepairPlan(
         failure="no_causal_producer",
@@ -165,7 +187,7 @@ def _no_causal_producer(exc: WorldIntegrityError, subject: str) -> RepairPlan:
             "quotation. If throughput or administration produces it, compile "
             "external_processes and operational process nodes instead. What you may not "
             "do is compile an empty world, and what you may never do is invent a person "
-            "who 'decides' a quantity that is really produced by operations."
+            "who 'decides' a quantity that is really produced by operations." + _ALREADY_OR_OPEN
         ),
     )
 
@@ -330,7 +352,7 @@ def _environment_presets_terminal(exc: WorldIntegrityError, subject: str) -> Rep
             "actor influences, so the answer is decided before anyone acts. Remove that "
             "effect. Model instead what the actors do that produces the outcome, and let "
             "the process node record or tally the result of their actions — gate it on a "
-            "field their actions write, rather than asserting the value itself."
+            "field their actions write, rather than asserting the value itself." + _ALREADY_OR_OPEN
         ),
     )
 
@@ -351,6 +373,26 @@ def _actors_cannot_reach_terminal(exc: WorldIntegrityError, subject: str) -> Rep
 
 
 def _nothing_can_act(exc: WorldIntegrityError, subject: str) -> RepairPlan:
+    idle = _strings(exc.details.get("actors_without_actions"))
+    if idle:
+        # The world is not empty — it has actors with nothing to do. This is the more
+        # common and more fixable case, and it needs no research: the actions are the
+        # things the actor's own role lets it do, which the compiler already knows.
+        return RepairPlan(
+            failure="nothing_can_act",
+            missing_element=f"actions for {idle}",
+            queries=(),
+            instruction=(
+                f"You compiled {idle} as actor(s) and gave them no actions, so they can "
+                "do nothing and the outcome cannot be produced. Do not empty the world "
+                "and do not add a process to declare the answer. Give each actor the "
+                "action its role lets it take toward this outcome — for a person whose "
+                "public statement is the question, an action whose effect sets the field "
+                "the terminal reads; for a body that decides, an action that records its "
+                "decision. The action's effect must write, by name, a term the terminal "
+                "reads, or it is a name and not a mechanism." + _ALREADY_OR_OPEN
+            ),
+        )
     return RepairPlan(
         failure="nothing_can_act",
         missing_element="actions or processes",
@@ -365,7 +407,7 @@ def _nothing_can_act(exc: WorldIntegrityError, subject: str) -> RepairPlan:
             "If you emptied the world to satisfy an earlier refusal, that was the wrong "
             "move: an actor the evidence cannot ground should become an uncertainty or "
             "an entity a process carries, not a deletion. Keep whoever the evidence does "
-            "establish and give them the actions their office lets them take."
+            "establish and give them the actions their office lets them take." + _ALREADY_OR_OPEN
         ),
     )
 
@@ -373,16 +415,28 @@ def _nothing_can_act(exc: WorldIntegrityError, subject: str) -> RepairPlan:
 def _nothing_scheduled(exc: WorldIntegrityError, subject: str) -> RepairPlan:
     return RepairPlan(
         failure="nothing_scheduled",
-        missing_element="a calendar of events",
+        missing_element="a scheduled occasion on which an actor acts",
         queries=(
-            f"{subject} scheduled dates calendar next meeting",
-            f"{subject} publication release schedule",
+            f"{subject} scheduled dates calendar next meeting speech testimony",
+            f"{subject} publication release schedule upcoming events",
         ),
         instruction=(
-            "Nothing in your world is scheduled to occur, so no actor will ever be in a "
-            "position to act. Place the real dated moments of this process on the "
-            "calendar as process nodes, and put scheduled releases and administrative "
-            "clocks in external_processes."
+            "You compiled an actor with an action but nothing scheduled to happen, so the "
+            "actor is never woken and the world is inert. 'The outcome is already "
+            "achieved' is not a licence to leave it unscheduled — decide which of two "
+            "worlds this is and build it fully:\n"
+            "(a) If the record ALREADY establishes the answer within the question's window "
+            "— the statement was made, the figure reported, the vote held — make it a "
+            "factual resolution: set the initial value of the term the terminal reads and "
+            "cite the claim ids that establish it, on that field, and add no action. That "
+            "is the honest 'already happened' world and it needs no calendar.\n"
+            "(b) Otherwise the outcome is still open, so place the real dated occasions on "
+            "which the actor could act — upcoming meetings, decisions, speeches, "
+            "testimony, publications — as process nodes with their real `at` dates before "
+            "the horizon, wake the actor at them, and add the material influences that "
+            "move the decision (the data releases, the colleagues' positions) as "
+            "external_processes and uncertainties on the inputs. Do not leave an actor in "
+            "a world where nothing ever gives them a turn."
         ),
     )
 
@@ -451,7 +505,7 @@ def _terminal_reads_no_world_state(exc: WorldIntegrityError, subject: str) -> Re
             "actually contains: a field an action sets, a collection actions append to, "
             "a document an action creates, a resource a transfer moves, an event type "
             "actions emit, or the process stage. Then make sure something in the world "
-            "actually writes whatever you chose."
+            "actually writes whatever you chose." + _ALREADY_OR_OPEN
         ),
     )
 
@@ -472,6 +526,109 @@ def _uncertainty_writes_terminal(exc: WorldIntegrityError, subject: str) -> Repa
             "So branch over the INPUT and let the decision follow from it. If the "
             "uncertainty is really about whether someone will act, delete it: that is "
             "precisely what the simulation is for."
+        ),
+    )
+
+
+def _terminal_preresolved_without_evidence(exc: WorldIntegrityError, subject: str) -> RepairPlan:
+    uncited = _strings(exc.details.get("uncited terminal terms"))
+    return RepairPlan(
+        failure="terminal_preresolved_without_evidence",
+        missing_element=f"citations establishing {uncited}, or a neutral starting state",
+        queries=(
+            f"{subject} official announcement confirmed date",
+            f"{subject} already happened record",
+        ),
+        instruction=(
+            f"Your world's initial values already satisfy the terminal — {uncited} starts "
+            "at the answer — and nothing cited establishes that. The simulation would "
+            "take credit for an outcome you asserted." + _ALREADY_OR_OPEN
+        ),
+    )
+
+
+def _terminal_laundered_from_uncertainty(exc: WorldIntegrityError, subject: str) -> RepairPlan:
+    copied = _strings(exc.details.get("terminal terms copied from an uncertainty"))
+    return RepairPlan(
+        failure="terminal_laundered_from_uncertainty",
+        missing_element=f"a produced quantity instead of a copied draw for {copied}",
+        queries=(
+            f"{subject} rate volume run-rate monthly figures",
+            f"{subject} drivers demand capacity constraints",
+        ),
+        instruction=(
+            f"A producer sets {copied} to a bare copy of an uncertainty, so the answer is "
+            "still the branch draw — now laundered through a node or action that computes "
+            "nothing. Copying an unknown into the field the terminal reads is the same "
+            "defect as an uncertainty writing it directly.\n"
+            "Model what PRODUCES the quantity. For a total accumulated over a period — "
+            "deliveries, output, volume, votes — compile the producing units and their "
+            "rate and accumulate across the window with adjust_field, so the terminal "
+            "reads a total the world built. Put the uncertainty on the RATE, the demand or "
+            "the disruption, each with grounded outcomes, never on the total itself.\n"
+            "For a decision the terminal reads, do not set it equal to a preference draw: "
+            "give the actor real alternative actions and let the choice follow from what "
+            "the actor knows, so the decision is produced, not rubber-stamped."
+        ),
+    )
+
+
+def _semantic_plan_invalid(exc: WorldIntegrityError, subject: str) -> RepairPlan:
+    errors = _strings(exc.details.get("semantic_errors"))
+    return RepairPlan(
+        failure="semantic_plan_invalid",
+        missing_element="a semantic plan whose references and producers all hold",
+        queries=(),
+        instruction=(
+            "Your previous semantic plan did not hold together mechanically: "
+            f"{errors[:8]}. Rebuild the plan fixing exactly these, keeping every "
+            "judgement about the world you already made that these errors do not touch."
+        ),
+    )
+
+
+def _lowering_gap(exc: WorldIntegrityError, subject: str) -> RepairPlan:
+    construct = str(exc.details.get("unsupported construct") or "the unsupported construct")
+    return RepairPlan(
+        failure="lowering_gap",
+        missing_element=f"a representable expression of {construct}",
+        queries=(),
+        instruction=(
+            f"The universal change mapping cannot represent {construct}: "
+            f"{exc.details.get('why existing universal changes cannot represent it')}. "
+            "Express the same causal meaning using the universal operations that do "
+            "exist — declared events, dated or chained process occurrences, state "
+            "changes with grounded inputs — without weakening what the world means."
+        ),
+    )
+
+
+def _semantic_lowering_error(exc: WorldIntegrityError, subject: str) -> RepairPlan:
+    return RepairPlan(
+        failure="semantic_lowering_error",
+        missing_element="a plan the lowerer can carry into the runtime",
+        queries=(),
+        instruction=(
+            "Lowering your previous plan failed mechanically: "
+            f"{exc.details.get('error')}. Re-emit the plan with every declaration "
+            "complete and every enum from the schema's own lists."
+        ),
+    )
+
+
+def _terminal_unset_fields_unguarded(exc: WorldIntegrityError, subject: str) -> RepairPlan:
+    fields = _strings(exc.details.get("unguarded fields") or exc.details.get("fields"))
+    return RepairPlan(
+        failure="terminal_unset_fields_unguarded",
+        missing_element=f"an honest unresolved guard for {fields}",
+        queries=(),
+        instruction=(
+            f"The terminal reads {fields}, which start with no value, and unresolved_when "
+            "never tests them — so a world that simply never produces them would resolve "
+            "a confident NO off a zero-coerced comparison. Either give each of these "
+            "fields a cited initial value the evidence establishes, or OR an is-unset "
+            "test (equals(field(<name>), None)) for each into terminal.unresolved_when "
+            "so an unproduced value reports honestly unresolved."
         ),
     )
 
@@ -534,6 +691,12 @@ _PLANS = {
     "nothing_scheduled": _nothing_scheduled,
     "orphan_actors": _orphan_actors,
     "uncertainty_writes_terminal": _uncertainty_writes_terminal,
+    "terminal_laundered_from_uncertainty": _terminal_laundered_from_uncertainty,
+    "terminal_preresolved_without_evidence": _terminal_preresolved_without_evidence,
+    "semantic_plan_invalid": _semantic_plan_invalid,
+    "lowering_gap": _lowering_gap,
+    "semantic_lowering_error": _semantic_lowering_error,
+    "terminal_unset_fields_unguarded": _terminal_unset_fields_unguarded,
     "terminal_reads_no_world_state": _terminal_reads_no_world_state,
     "decisive_evidence_contradiction": _decisive_evidence_contradiction,
     "unknown_expression_operator": _unknown_expression_operator,

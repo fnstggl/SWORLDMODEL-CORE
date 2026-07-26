@@ -95,11 +95,17 @@ class RunDiagnosis:
     run_result: RunResult | None = None
     repair_log: RepairLog | None = None
     world_review: Any = None
+    trajectory_audit: Any = None
+    forecast_integrity: Any = None
     failure: BaseException | None = None
     failure_stage: str = ""
     wall_seconds: float = 0.0
     model_calls: int = 0
     notes: list[str] = field(default_factory=list)
+    # Which compiler built (or failed to build) this run's world. A property of the
+    # run's configuration, recorded unconditionally — a refused semantic run and a
+    # direct run must never be indistinguishable in their artifacts.
+    compiler_mode: str = "direct"
 
     # -- sections ------------------------------------------------------------
 
@@ -343,9 +349,12 @@ class RunDiagnosis:
             "world_compilation": self.world_compilation(),
             "integrity_and_grounding": self.integrity_and_grounding(),
             "runtime": self.runtime(),
+            "forecast_integrity": _audit_dict(self.forecast_integrity),
+            "trajectory_audit": _audit_dict(self.trajectory_audit),
             "root_cause": self.root_cause(),
             "root_cause_vocabulary": list(ROOT_CAUSES),
             "notes": self.notes,
+            "compiler_mode": self.compiler_mode,
         }
 
     # -- classification ------------------------------------------------------
@@ -363,6 +372,17 @@ class RunDiagnosis:
         fetch = self.fetching()
         disc = self.discovery()
         gate = self.integrity_and_grounding().get("stopped_at_gate")
+
+        # Absence of a trace is not evidence about research. A compile-stage refusal
+        # that fires before the bundle is checkpointed leaves every research count at
+        # zero — reading those zeros as "no candidate URL was discovered at all" writes
+        # a fabricated discovery failure into the record of a run that issued a full
+        # research pass. Every other research-stage cause below requires a POSITIVE
+        # count and is safe; only the zero-URL check must distinguish "the record says
+        # zero" from "there is no record".
+        research_recorded = bool(self._trace()) or bool(
+            disc.get("urls_considered_count") or disc.get("queries_used")
+        )
 
         if ext["claims_stored"] == 0 and ext["claim_candidates"] > 0:
             out.append(
@@ -388,7 +408,20 @@ class RunDiagnosis:
                     f"{fetch['rejection_reasons']}",
                 }
             )
-        if disc["urls_considered_count"] == 0:
+        if ext["claims_stored"] > 0 and ext["claims_admissible_at_cutoff"] == 0:
+            # The cause was registered in ROOT_CAUSES and never emitted: a holdout run
+            # with a cutoff seconds in the past stored claims whose availability all
+            # postdated as_of, compiled from an empty admissible view, and was filed
+            # as compiler_omission — pointing at the compiler for a record it never saw.
+            out.append(
+                {
+                    "cause": "archive_coverage_failure",
+                    "why": f"{ext['claims_stored']} claim(s) stored, none admissible at "
+                    "the cutoff — everything retrieved postdates as_of, so the compiler "
+                    "saw an empty record (a past cutoff admits only archived captures)",
+                }
+            )
+        if research_recorded and disc["urls_considered_count"] == 0:
             out.append(
                 {"cause": "discovery_failure", "why": "no candidate URL was discovered at all"}
             )
@@ -430,6 +463,8 @@ class RunDiagnosis:
             "actors_cannot_reach_terminal",
             "environment_presets_terminal",
             "uncertainty_writes_terminal",
+            "terminal_laundered_from_uncertainty",
+            "terminal_preresolved_without_evidence",
             "terminal_reads_no_world_state",
         ):
             out.append(
@@ -453,6 +488,25 @@ class RunDiagnosis:
                     "why": "an actor was compiled with no entity behind it",
                 }
             )
+        if gate in ("semantic_plan_invalid", "lowering_gap", "semantic_lowering_error"):
+            # The semantic compiler's own refusals. An invalid plan after revision is
+            # the planner failing to describe a coherent world; a lowering gap is a
+            # meaning the universal change mapping cannot yet represent. Both are
+            # compile-boundary defects, not facts about the world.
+            out.append(
+                {
+                    "cause": "compiler_omission",
+                    "why": f"the semantic compiler stopped at the {gate} gate",
+                }
+            )
+        if gate == "semantic_review_abstained":
+            out.append(
+                {
+                    "cause": "authoritative_source_starvation",
+                    "why": "the independent reality review judged the evidence unable to "
+                    "support any faithful world for this question",
+                }
+            )
         if gate == "required_facts_unverified":
             out.append(
                 {
@@ -467,6 +521,15 @@ class RunDiagnosis:
                     "cause": "unexecutable_compilation",
                     "why": "the unresolved condition is true under every assignment, so "
                     "the world could not have resolved whatever happened in it",
+                }
+            )
+        if gate == "terminal_unset_fields_unguarded":
+            out.append(
+                {
+                    "cause": "unexecutable_compilation",
+                    "why": "the terminal reads fields the world never initializes and the "
+                    "unresolved condition does not test them for being unset, so an "
+                    "absent value would have resolved a confident answer",
                 }
             )
         if gate in ("malformed_compilation", "unknown_expression_operator"):
@@ -579,6 +642,13 @@ def _effect_terms(effect: Any) -> set[str]:
 
     produced: set[str] = _effect_produces(effect)
     return produced
+
+
+def _audit_dict(audit: Any) -> dict[str, Any] | None:
+    """An auditor's own serialization, or None when the stage never ran."""
+
+    as_dict = getattr(audit, "as_dict", None)
+    return as_dict() if callable(as_dict) else None
 
 
 def _counts(values: Any) -> dict[str, int]:

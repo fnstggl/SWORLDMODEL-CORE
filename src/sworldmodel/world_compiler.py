@@ -58,7 +58,7 @@ from .prompts import render_world_compile_prompt
 from .reality import verify_reality
 from .uncertainty import enumerate_scenarios
 from .world import WorldFact, WorldState
-from .worldspec import ActorSpec, Effect, EntitySpec, WorldSpec, as_objects
+from .worldspec import ActorSpec, Effect, EntitySpec, Expr, WorldSpec, as_objects
 
 _VALID_PROVENANCE = {p.value for p in WeightProvenance}
 
@@ -158,6 +158,16 @@ def compile_world(
     # Gate 4 — the outcome must be produced by what actors do, not supplied to them.
     enforce_outcome_is_produced(spec, uncertainties)
 
+    # Gate 4b — a world whose initial values already answer YES has decided the question
+    # before anything runs. That is legitimate exactly once: as a factual resolution the
+    # cited record establishes. Uncited, it is the compiler asserting the outcome.
+    enforce_terminal_not_preresolved(spec, base_world)
+
+    # Gate 4c — a terminal over a field the world never initializes must be guarded by
+    # an is-unset test, or an absent value would coerce to zero and resolve a confident
+    # answer about a quantity nobody produced.
+    enforce_terminal_unset_guarded(spec, base_world, uncertainties)
+
     # Gate 5 — evidence-to-world coverage against the exact compiled WorldSpec.
     view, signal_claim_ids = world_spec_view(spec, base_world, uncertainties, world_facts)
     inventory = build_candidate_inventory(
@@ -167,7 +177,13 @@ def compile_world(
         focal_identities=tuple(e.name for e in spec.entities) + (spec.title,),
     )
     coverage_report = assess_coverage(
-        inventory, view, exclusion_reviewer=exclusion_reviewer(gateway)
+        inventory,
+        view,
+        exclusion_reviewer=exclusion_reviewer(
+            gateway,
+            contract=contract,
+            cited_resolution=_cited_factual_resolution(spec, base_world),
+        ),
     )
     enforce_coverage(coverage_report)
 
@@ -1141,6 +1157,165 @@ def enforce_executable_expressions(spec: WorldSpec) -> None:
     )
 
 
+def _uncertainty_fields(uncertainties: tuple[UncertaintySpec, ...]) -> set[str]:
+    """Field names whose value IS a branch draw — the variable and any field_effects."""
+
+    return {u.variable for u in uncertainties} | {
+        name for u in uncertainties for o in u.outcomes for name, _ in o.field_effects
+    }
+
+
+def enforce_terminal_unset_guarded(
+    spec: WorldSpec,
+    base_world: WorldState,
+    uncertainties: tuple[UncertaintySpec, ...],
+) -> None:
+    """Refuse a terminal that would resolve confidently on fields nothing initializes.
+
+    The evaluator's comparison operators are total — an absent quantity coerces to
+    zero — so a terminal reading a field with no compiled initial value and no branch
+    draw writing it would resolve a confident NO (or YES) about a value the world
+    never produced. That is only honest when ``unresolved_when`` carries an is-unset
+    test (``equals(field(x), None)``-shaped) for each such field: then the branch
+    stays unresolved until something actually writes the value, and resolves on the
+    produced value once something does. The semantic lowerer already derives exactly
+    this guard for its UNKNOWN-initial states; this gate holds the direct compiler
+    (whose ``unresolved_when`` defaults to ``const(False)``) to the same standard.
+    """
+
+    initialized = set(base_world.fields_dict()) | _uncertainty_fields(uncertainties)
+    read = _expr_fields(spec.terminal.yes_when)
+    guarded = _unset_guarded_fields(spec.terminal.unresolved_when)
+    unguarded = sorted(read - initialized - guarded)
+    if not unguarded:
+        return
+    raise WorldIntegrityError(
+        "the terminal reads fields the compiled world never initializes, and the "
+        "unresolved condition does not test them for being unset: comparison treats "
+        "an absent quantity as zero, so a value nobody ever produced would resolve a "
+        f"confident answer instead of leaving the branch unresolved: {unguarded}",
+        details={
+            "failure": "terminal_unset_fields_unguarded",
+            "recompilable": True,
+            "unguarded fields": unguarded,
+            "fix": (
+                "either give each named field a cited initial value, or OR into "
+                "terminal.unresolved_when an is-unset test for it, shaped "
+                '{"op": "equals", "args": [{"op": "field", "args": ["<name>"]}, null]}'
+            ),
+        },
+    )
+
+
+def _unset_guarded_fields(expr: Any) -> set[str]:
+    """Fields for which ``expr`` contains an ``equals(field(x), None)`` test."""
+
+    if not isinstance(expr, Expr):
+        return set()
+    out: set[str] = set()
+    if expr.op == "equals" and len(expr.args) == 2:
+        for a, b in ((expr.args[0], expr.args[1]), (expr.args[1], expr.args[0])):
+            name = _field_read_name(a)
+            if name is not None and _is_const_none(b):
+                out.add(name)
+    for arg in expr.args:
+        out |= _unset_guarded_fields(arg)
+    return out
+
+
+def _field_read_name(expr: Any) -> str | None:
+    if isinstance(expr, Expr) and expr.op == "field" and expr.args:
+        first = expr.args[0]
+        if isinstance(first, str):
+            return first
+        if isinstance(first, Expr) and first.op == "const" and first.args:
+            return str(first.args[0])
+    return None
+
+
+def _is_const_none(expr: Any) -> bool:
+    if expr is None:
+        return True
+    return isinstance(expr, Expr) and expr.op == "const" and (not expr.args or expr.args[0] is None)
+
+
+def _labeled_effects(spec: WorldSpec) -> list[tuple[str, Any]]:
+    """(label, effect) for every effect an action, node or external occurrence applies."""
+
+    out: list[tuple[str, Any]] = []
+    for action in spec.actions:
+        out.extend((f"action:{action.action_id}", eff) for eff in action.effects)
+    for node in spec.process.nodes:
+        out.extend((f"process_node:{node.node_id}", eff) for eff in node.effects)
+    for proc in spec.external_processes:
+        for i, occ in enumerate(proc.occurrences):
+            out.extend((f"external_process:{proc.process_id}#{i}", eff) for eff in occ.effects)
+    return out
+
+
+def _laundered_terminal_terms(
+    spec: WorldSpec,
+    uncertainties: tuple[UncertaintySpec, ...],
+    producers: dict[str, tuple[str, ...]],
+) -> dict[str, list[str]]:
+    """Terminal fields whose value is nothing but a passthrough of an uncertainty draw.
+
+    The ``uncertainty_writes_terminal`` gate catches an uncertainty that writes the
+    terminal term directly. This catches the one-hop launder: a producer sets the terminal
+    field equal to a bare read of an uncertainty variable, so the answer is the branch draw
+    rubber-stamped through an action or node that computes nothing. A live Tesla run set
+    ``actual_q3_deliveries = field(delivery_value_exogenous)`` through an end-of-quarter
+    node — an ungrounded 50/50 coin flip copied into the term the terminal reads — and it
+    passed every gate because the copying node counts as a producer.
+
+    A value that reads a grounded base and scales it by an uncertain rate is production and
+    is deliberately left alone: the uncertainty on the rate or the demand is exactly where
+    it belongs, and only the total-as-a-bare-copy is refused.
+    """
+
+    uncertain = _uncertainty_fields(uncertainties)
+    if not uncertain:
+        return {}
+    laundered: dict[str, list[str]] = {}
+    for term in (t for t in producers if t.startswith("field:")):
+        fname = term.split(":", 1)[1]
+        launder_writers: list[str] = []
+        honest_writer = False
+        for label, eff in _labeled_effects(spec):
+            if term not in _effect_produces(eff):
+                continue
+            if eff.op == "set_field" and eff.params_dict.get("field") == fname:
+                reads = _value_field_reads(eff.params_dict.get("value"))
+                if reads and reads <= uncertain:
+                    launder_writers.append(label)
+                    continue
+            honest_writer = True  # accumulation, a computed value, or a grounded write
+        has_evidence = any(str(p).startswith("evidence:") for p in producers.get(term, ()))
+        if launder_writers and not honest_writer and not has_evidence:
+            laundered[term] = launder_writers
+    return laundered
+
+
+def _value_field_reads(val: Any) -> set[str]:
+    """The world fields an effect's value reads, whether it is a parsed Expr or raw JSON.
+
+    ``parse_effect`` leaves an effect parameter as the value the compiler emitted — a
+    literal, or a raw ``{"op": ..., "args": [...]}`` expression dict it never parsed — so
+    reading field references has to cope with both forms.
+    """
+
+    from .worldspec import Expr, parse_expr
+
+    if isinstance(val, Expr):
+        return _expr_fields(val)
+    if isinstance(val, dict) and "op" in val:
+        try:
+            return _expr_fields(parse_expr(val))
+        except (ValueError, KeyError, TypeError):
+            return set()
+    return set()
+
+
 def enforce_outcome_is_produced(
     spec: WorldSpec, uncertainties: tuple[UncertaintySpec, ...]
 ) -> None:
@@ -1157,13 +1332,58 @@ def enforce_outcome_is_produced(
     action must be able to move at least one term the terminal reads.
     """
 
-    terminal_fields = _expr_fields(spec.terminal.yes_when)
-    terminal_colls = _expr_collections(spec.terminal.yes_when)
-    if not spec.actions and not spec.external_processes:
+    # A question the record has already answered is the one legitimate world in which
+    # nothing acts and nothing runs: every term the terminal reads is established by
+    # cited evidence, and demanding a producer would force a future event to be
+    # invented for an outcome that already happened. This must be judged BEFORE the
+    # nothing-can-act refusal below, or the sanctioned encoding of "already settled" —
+    # a cited initial value and deliberately no mechanism — is refused for being
+    # exactly what it is. A live OPEC+ compilation was: two claims established the
+    # announcements had already been made, the world was one cited field, and the gate
+    # killed it for having no actions.
+    #
+    # Deliberately narrow: only the pure factual-resolution shape takes this path —
+    # no actions, no nodes, no external processes, every terminal term evidence-
+    # established, and no uncertainty touching any terminal term. A world with any
+    # mechanism, or any branch draw near the terminal, is judged by the full gate.
+    established = terminal_producers(spec)
+    pure_record = not spec.actions and not spec.external_processes and not spec.process.nodes
+    uncertainty_touched = {
+        f"field:{name}" for u in uncertainties for o in u.outcomes for name, _ in o.field_effects
+    } | {f"field:{u.variable}" for u in uncertainties}
+    if (
+        pure_record
+        and established
+        and not (uncertainty_touched & set(established))
+        and all(
+            who and all(str(w).startswith("evidence:") for w in who) for who in established.values()
+        )
+    ):
+        return
+
+    # Process nodes whose own effects change the world are producers in their own
+    # right: a purely operational chain — dated nodes and dependent nodes, no actors,
+    # no external processes — is a world in which things happen. Judged here once, so
+    # neither refusal below can call an executing chain "nothing".
+    productive_nodes = any(node.effects for node in spec.process.nodes)
+
+    if not spec.actions and not spec.external_processes and not productive_nodes:
+        # Whether the world has actors changes what is wrong and what the repair is. A
+        # world with actors but no actions compiled people and gave them nothing to do —
+        # a live Bank of England run put Andrew Bailey in the world with no way to make
+        # the very statement the question is about, and repair kept re-emptying the world
+        # rather than adding his one action. A world with neither is missing its
+        # producer entirely. The detail carries the distinction so the repair can act on
+        # the real defect.
+        has_actors = bool(spec.actors)
         raise WorldIntegrityError(
             "the compiled world has no actions and no external processes — nobody can "
             "do anything and nothing runs, so the outcome cannot be produced",
-            details={"failure": "nothing_can_act", "recompilable": True},
+            details={
+                "failure": "nothing_can_act",
+                "recompilable": True,
+                "actors_without_actions": [a.entity_id for a in spec.actors] if has_actors else [],
+            },
         )
     if not spec.process.nodes and not spec.external_processes:
         # A world may legitimately be driven entirely by external processes and wake
@@ -1230,6 +1450,29 @@ def enforce_outcome_is_produced(
             },
         )
 
+    # The same defect one indirection out: a producer that only copies a branch draw into
+    # the terminal term. This is what a live Tesla run did — an end-of-quarter node set the
+    # delivery total equal to an ungrounded exogenous uncertainty — and it defeated the
+    # check above because the launderer, not the uncertainty, is the named producer.
+    laundered = _laundered_terminal_terms(spec, uncertainties, producers)
+    if laundered:
+        raise WorldIntegrityError(
+            "the answer is a branch draw copied through a producer: "
+            f"{[_display(t) for t in laundered]} is set to a bare read of an uncertainty, "
+            "so the outcome is the branch weight laundered through something that computes "
+            "nothing — model what produces the quantity and put the uncertainty on its "
+            "drivers, not on the total",
+            details={
+                "failure": "terminal_laundered_from_uncertainty",
+                "recompilable": True,
+                "terminal terms copied from an uncertainty": [
+                    _display(t) for t in sorted(laundered)
+                ],
+                "copying producers": {_display(k): v for k, v in sorted(laundered.items())},
+                "uncertainties": [u.variable for u in uncertainties],
+            },
+        )
+
     orphans = sorted(term for term, who in producers.items() if not who)
     uncertain = {u.variable for u in uncertainties} | {
         name for u in uncertainties for o in u.outcomes for name, _ in o.field_effects
@@ -1284,10 +1527,18 @@ def enforce_outcome_is_produced(
         # node fires when enough have been recorded and writes the outcome. Their
         # influence runs through that node's gate, and demanding a direct write refused
         # exactly the world this gate's own docstring calls right.
-        reaches = (
-            (terminal_fields & written_fields)
-            or (terminal_colls & written_colls)
-            or _actions_gate_a_producer(spec, set(producers))
+        #
+        # Reach is judged over every namespaced term the terminal reads — fields,
+        # collections, events, documents, resources — not fields and collections alone.
+        # A terminal that asks whether an event exists, produced by the actor's own
+        # action emitting exactly that event, is the most direct causation there is,
+        # and the earlier field/collection-only test refused it.
+        action_terms: set[str] = set()
+        for action in spec.actions:
+            for eff in action.effects:
+                action_terms |= _effect_produces(eff)
+        reaches = bool(action_terms & set(producers)) or _actions_gate_a_producer(
+            spec, set(producers)
         )
         if spec.actors and not reaches:
             raise WorldIntegrityError(
@@ -1323,6 +1574,51 @@ def enforce_outcome_is_produced(
             "terminal terms supplied by uncertainty instead": sorted(
                 {_display(t) for t in orphans} & uncertain
             ),
+            "producers by terminal term": {
+                _display(k): list(v) for k, v in sorted(producers.items())
+            },
+        },
+    )
+
+
+def enforce_terminal_not_preresolved(spec: WorldSpec, base_world: Any) -> None:
+    """Refuse a world whose initial values already answer YES on nobody's authority.
+
+    A live OPEC+ run compiled ``quota_increase_announced`` with an uncited initial value
+    of True and an action that could also write it. Every per-term gate passed — the
+    action was a producer — and the branch then resolved YES without a single event
+    firing: the answer was in the world before anything ran. The runtime's own evaluator
+    is the authority here: build the world exactly as the engine would seed it and ask it
+    the terminal. YES at t0 is legitimate only as a factual resolution, and what makes a
+    factual resolution honest is the citation — every term the terminal reads must be
+    established by an ``evidence:`` producer. Anything else is the compiler asserting the
+    outcome and letting the simulation take credit.
+
+    A world that starts NO or unresolved is the normal open state and passes untouched.
+    """
+
+    from .engine import evaluate_terminal
+
+    ev = evaluate_terminal(base_world, spec.terminal)
+    if not (ev.resolved and ev.outcome == "YES"):
+        return
+    producers = terminal_producers(spec)
+    uncited = sorted(
+        term
+        for term, who in producers.items()
+        if not any(str(w).startswith("evidence:") for w in who)
+    )
+    if not uncited:
+        return
+    raise WorldIntegrityError(
+        "the initial world already answers YES: the terminal is satisfied before "
+        f"anything runs, and {[_display(t) for t in uncited]} carries no evidence "
+        "citation, so the compiled world asserts the outcome instead of establishing "
+        "or producing it",
+        details={
+            "failure": "terminal_preresolved_without_evidence",
+            "recompilable": True,
+            "uncited terminal terms": [_display(t) for t in uncited],
             "producers by terminal term": {
                 _display(k): list(v) for k, v in sorted(producers.items())
             },
@@ -1390,7 +1686,32 @@ _CHALLENGE_KINDS = frozenset(
 _MAX_CHALLENGES = 12
 
 
-def exclusion_reviewer(gateway: ModelGateway | None) -> ExclusionReviewer | None:
+def _cited_factual_resolution(spec: WorldSpec, base_world: Any) -> bool:
+    """True when the initial world already answers YES on the cited record's authority.
+
+    This is the one legitimate preresolved state Gate 4b admits: the runtime's own
+    evaluator says the terminal is satisfied at t0, and every term it reads is
+    established by an ``evidence:`` producer. The coverage gate's exclusion reviewer
+    needs to know this, because materiality inverts under a settled record: a claim
+    about the topic's future dynamics cannot change an outcome that cited pre-cutoff
+    events already established — only a claim contradicting that record can.
+    """
+
+    from .engine import evaluate_terminal
+
+    ev = evaluate_terminal(base_world, spec.terminal)
+    if not (ev.resolved and ev.outcome == "YES"):
+        return False
+    producers = terminal_producers(spec)
+    return all(any(str(w).startswith("evidence:") for w in who) for who in producers.values())
+
+
+def exclusion_reviewer(
+    gateway: ModelGateway | None,
+    *,
+    contract: ResolutionContract | None = None,
+    cited_resolution: bool = False,
+) -> ExclusionReviewer | None:
     """An independent LLM review of borderline exclusions (live gateways only).
 
     The compiler may not drop a candidate merely by deeming it irrelevant: for the
@@ -1398,11 +1719,37 @@ def exclusion_reviewer(gateway: ModelGateway | None) -> ExclusionReviewer | None
     plausibly change an actor's knowledge, authority, feasible actions, a constraint,
     a branch, timing, or the outcome. A "yes" invalidates the exclusion and blocks.
     Offline/deterministic gateways get no reviewer, so the gate stays deterministic.
+
+    The reviewer judges against the actual question, not in a vacuum: without the
+    contract, "could this item matter?" has no referent and every topical claim earns
+    a reflexive yes. And when the compiled world already resolves YES from the cited
+    pre-cutoff record (``cited_resolution``), the materiality test inverts — the item
+    matters only if it could contradict that record, not because it bears on future
+    dynamics the settled record has overtaken.
     """
 
     if gateway is None or not getattr(gateway, "is_live", False):
         return None
     budget = {"n": 0}
+
+    question_block = ""
+    if contract is not None:
+        question_block = (
+            f"\nThe world simulates this forecast question: {contract.question}\n"
+            f"Cutoff (facts before this are history): {contract.as_of.isoformat()}\n"
+            f"Horizon (outcome is judged by): {contract.horizon.isoformat()}\n"
+        )
+    resolution_block = ""
+    if cited_resolution:
+        resolution_block = (
+            "\nIMPORTANT: the compiled world already resolves this question YES at the "
+            "cutoff — every terminal term is established by cited, verified record of "
+            "events that occurred before the cutoff. Nothing that happens after the "
+            "cutoff can un-happen them. Answer true ONLY if this item could plausibly "
+            "contradict, retract, or invalidate that cited record itself. Claims about "
+            "the topic's ongoing pressures, negotiations, or future dynamics cannot "
+            "matter here: the settled record has already overtaken them.\n"
+        )
 
     def review(cand: EvidenceCandidate) -> bool:
         if cand.kind.value not in _CHALLENGE_KINDS or budget["n"] >= _MAX_CHALLENGES:
@@ -1410,14 +1757,16 @@ def exclusion_reviewer(gateway: ModelGateway | None) -> ExclusionReviewer | None
         budget["n"] += 1
         prompt = (
             "An automated compiler is about to EXCLUDE the following verified evidence "
-            "item from a simulated world as irrelevant. Challenge that decision.\n\n"
-            f"ITEM ({cand.kind.value}): {cand.canonical_identity}\n"
-            f"DESCRIPTION: {cand.description}\n\n"
+            "item from a simulated world as irrelevant. Challenge that decision.\n"
+            f"{question_block}"
+            f"\nITEM ({cand.kind.value}): {cand.canonical_identity}\n"
+            f"DESCRIPTION: {cand.description}\n"
+            f"{resolution_block}\n"
             "Would including or removing this item plausibly change an actor's "
             "knowledge, authority, feasible actions, a resource constraint, the causal "
             "pathway, an uncertainty branch, the timing of events, or the terminal "
-            'outcome? Reply JSON {"could_matter": true|false, "why": "..."}. '
-            "Answer true only if it plausibly could.\n\n"
+            'outcome of THIS question? Reply JSON {"could_matter": true|false, '
+            '"why": "..."}. Answer true only if it plausibly could.\n\n'
             "Facts about a SOURCE rather than about the world are always false here: "
             "when a page was published, who bylined it, what it is titled, where it "
             "lives. That is provenance, it is already recorded against every claim it "

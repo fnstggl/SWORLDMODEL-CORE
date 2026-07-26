@@ -13,6 +13,7 @@ runtime by having a stand-in reason plausibly on its behalf.
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -21,6 +22,7 @@ from typing import Any
 from sworldmodel.errors import GatewayError
 from sworldmodel.evidence import EvidenceClaim, EvidenceStore
 from sworldmodel.gateway import GatewayRequest, GatewayResponse, ModelGateway
+from sworldmodel.http import HttpCall, HttpError, HttpResponse
 from sworldmodel.ids import canonical_json, prompt_hash
 from sworldmodel.models import (
     AuthorityLevel,
@@ -203,3 +205,75 @@ def required(key: str, description: str, claims: tuple[str, ...]) -> RequiredRea
 
 
 DecisionFn = Callable[[dict[str, Any]], dict[str, Any]]
+
+
+# ---------------------------------------------------------------------------
+# HTTP transport double (relocated from sworldmodel.http — M-8: a canned-response
+# transport must not live in the production package)
+# ---------------------------------------------------------------------------
+
+Route = tuple[Callable[[str], bool], object]
+
+
+class FakeTransport:
+    """Deterministic transport for tests. Routes are matched in order; each route maps
+    a URL predicate to an ``HttpResponse`` or a callable ``(method, url, body)`` ->
+    ``HttpResponse``. Unmatched requests raise ``HttpError`` (a network failure).
+
+    It performs no DNS and enforces no fetch policy: policy belongs at the socket, and a
+    test double that resolved hostnames could not serve fixture domains.
+    """
+
+    def __init__(self) -> None:
+        self.routes: list[Route] = []
+        self.calls: list[HttpCall] = []
+        # Branches are simulated concurrently, so the call log is written from several
+        # threads. It is an audit record: losing an entry would understate what the run
+        # actually did on the wire.
+        self._lock = threading.Lock()
+
+    def add(self, predicate: Callable[[str], bool], response: object) -> FakeTransport:
+        self.routes.append((predicate, response))
+        return self
+
+    def add_url(self, url: str, response: HttpResponse) -> FakeTransport:
+        return self.add(lambda u: u == url, response)
+
+    def _dispatch(self, method: str, url: str, body: dict[str, object] | None) -> HttpResponse:
+        for predicate, response in self.routes:
+            if predicate(url):
+                resp = response(method, url, body) if callable(response) else response
+                assert isinstance(resp, HttpResponse)
+                self.calls.append(
+                    HttpCall(
+                        method, url, resp.final_url, resp.status, resp.elapsed_ms, len(resp.text)
+                    )
+                )
+                return resp
+        self.calls.append(HttpCall(method, url, url, 0, 0, 0, error="no route"))
+        raise HttpError(f"FakeTransport: no route for {method} {url}")
+
+    def get(
+        self, url: str, *, headers: dict[str, str] | None = None, timeout: float = 30.0
+    ) -> HttpResponse:
+        return self._dispatch("GET", url, None)
+
+    def post_json(
+        self,
+        url: str,
+        body: dict[str, object],
+        *,
+        headers: dict[str, str] | None = None,
+        timeout: float = 60.0,
+    ) -> HttpResponse:
+        return self._dispatch("POST", url, body)
+
+    def post_form(
+        self,
+        url: str,
+        form: str,
+        *,
+        headers: dict[str, str] | None = None,
+        timeout: float = 60.0,
+    ) -> HttpResponse:
+        return self._dispatch("POST", url, {"form": form})

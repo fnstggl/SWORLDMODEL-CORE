@@ -1,0 +1,27 @@
+{
+  "note": "Three cross-domain holdout questions for the compiler A/B, selected and frozen BEFORE any case-specific debugging of either compiler mode began (PART 11). Each gets ONE research pass to freeze an evidence store; both compiler modes then run compile-only from that identical store. No benchmark-specific runtime code may be added for these.",
+  "selected_at": "2026-07-25T21:10:00+00:00",
+  "holdouts": [
+    {
+      "case": "holdout_science_institution",
+      "domain": "scientific institution / scheduled announcement",
+      "question": "Will the Nobel Prize in Physiology or Medicine 2026 be announced on or before October 5, 2026?",
+      "mode": "nowcast",
+      "horizon": "2026-10-05T23:59:59+00:00"
+    },
+    {
+      "case": "holdout_sports_governance",
+      "domain": "sports governance / multi-body decision",
+      "question": "Will FIFA publicly confirm the match schedule for the 2030 World Cup before December 31, 2026?",
+      "mode": "nowcast",
+      "horizon": "2026-12-31T23:59:59+00:00"
+    },
+    {
+      "case": "holdout_space_operations",
+      "domain": "space operations / operational aggregate",
+      "question": "Will SpaceX complete more than 100 Falcon 9 launches in calendar year 2026 by October 1, 2026?",
+      "mode": "nowcast",
+      "horizon": "2026-10-01T23:59:59+00:00"
+    }
+  ]
+}

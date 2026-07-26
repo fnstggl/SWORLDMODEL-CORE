@@ -41,6 +41,9 @@ class TraceContext:
     repair_log: Any = None
     # The pre-rollout world audit: what it asked, and what it answered.
     world_review: Any = None
+    # The post-simulation trajectory audit: how the run actually unfolded, and the
+    # mechanical classification of what kind of result it was.
+    trajectory_audit: Any = None
     _calls_override: list[Any] = field(default_factory=list)
 
     # -- serializable payloads --------------------------------------------------
@@ -320,6 +323,13 @@ class TraceContext:
         (out_dir / "actor_decisions.jsonl").write_text(
             "\n".join(self.actor_decision_lines()) + "\n"
         )
+        for name, audit in (
+            ("world_review.json", self.world_review),
+            ("trajectory_audit.json", self.trajectory_audit),
+        ):
+            audit_dict = getattr(audit, "as_dict", None)
+            if callable(audit_dict):
+                (out_dir / name).write_text(canonical_json(audit_dict()) + "\n")
         (out_dir / report_name).write_text(self.render_report(forecast_hash))
         return forecast_hash
 
@@ -432,13 +442,7 @@ class TraceContext:
             "happened to them. Nothing here is scheduled.\n"
         )
         for d in self.run_result.actor_decisions:
-            c = d.intent
-            add(
-                f"- [{d.branch_id}] {d.branch_time} {d.actor_id} woken by "
-                f"*{d.wake_reason}* ({d.wake_detail}); plan: {d.plan_disposition}; "
-                f"intent {c['mode']} {c.get('action_id') or c.get('novel_description')} "
-                f"-> {d.validation_status} ({d.validation_reason})"
-            )
+            add(_invocation_line(d))
         add("")
 
         add("### 9b. Invocations per actor per branch")
@@ -504,6 +508,25 @@ class TraceContext:
             add(f"- {lim}")
 
         return "\n".join(lines) + "\n"
+
+
+def _invocation_line(d: Any) -> str:
+    """One actor invocation, rendered for the report — total over every record shape.
+
+    A no-feasible-action wake records ``intent={}``, and a hard ``c['mode']`` here
+    crashed the whole trace write of a COMPLETED direct-mode run 559 seconds in,
+    leaving an exit-4 diagnosis beside a finished forecast. A report line must not be
+    able to destroy the artifacts it reports on.
+    """
+
+    c = d.intent or {}
+    what = c.get("action_id") or c.get("novel_description") or ""
+    return (
+        f"- [{d.branch_id}] {d.branch_time} {d.actor_id} woken by "
+        f"*{d.wake_reason}* ({d.wake_detail}); plan: {d.plan_disposition}; "
+        f"intent {c.get('mode', 'none')} {what} "
+        f"-> {d.validation_status} ({d.validation_reason})"
+    )
 
 
 def _expr_repr(expr: Any) -> str:

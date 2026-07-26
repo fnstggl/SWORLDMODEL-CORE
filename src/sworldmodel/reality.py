@@ -52,11 +52,30 @@ def verify_reality(
     #    how many cars get built, which is a less faithful world than one with no
     #    individuals in it at all. What may never be missing is a causal pathway: some
     #    modeled thing whose operation produces the answer.
-    if not actors and not spec.external_processes:
+    #
+    #    The verified record is the fourth kind of producer, and this gate must know it
+    #    too. A question the record has already settled — the EU and Mercosur signed
+    #    their agreement four months before the cutoff, established by cited claims — has
+    #    a world that is a document and its citations, with no actor and no process,
+    #    because nothing remains to happen. That is a faithful factual resolution, not an
+    #    empty world. This gate ran before the producer-lineage gate that already knows
+    #    this, and refused the honest world first; it now defers to the same rule.
+    # Process NODES that carry effects are producers too: an operational chain lowered
+    # entirely to dated-and-dependent nodes — no actors, no external processes — is a
+    # world in which things happen and the outcome is produced. Counting only actors
+    # and externals refused exactly that world.
+    productive_nodes = any(getattr(n, "effects", ()) for n in spec.process.nodes)
+    if (
+        not actors
+        and not spec.external_processes
+        and not productive_nodes
+        and not _terminal_established_by_evidence(spec)
+    ):
         raise WorldIntegrityError(
             "the compiled world has no causal producer — no actor whose decisions and "
             "no external or operational process whose behavior could produce this "
-            "outcome, so there is nothing to simulate",
+            "outcome, and the record does not already establish it, so there is nothing "
+            "to simulate",
             details={
                 "failure": "no_causal_producer",
                 "verified and represented participants": 0,
@@ -171,7 +190,8 @@ def verify_reality(
     #    participants — they are the rest of the world. Only a shortfall means the
     #    compiler declared a roster it did not populate.
     declared = contract.expected_participants
-    if declared is not None and declared > len(spec.entities):
+    represented_members = represented_member_count(spec)
+    if declared is not None and declared > represented_members:
         # This is the compiler contradicting itself, not evidence contradicting the
         # compiler. It is a defect in one compilation, and the caller may recompile;
         # the detail says so, so a bounded retry can act on it.
@@ -180,9 +200,10 @@ def verify_reality(
             details={
                 "failure": "declared_participants_not_represented",
                 "declared by the compiled world": declared,
-                "represented in the world": len(spec.entities),
+                "represented in the world": represented_members,
+                "simulation objects": len(spec.entities),
                 "of which deliberating actors": represented,
-                "difference": (declared - len(spec.entities)),
+                "difference": (declared - represented_members),
                 "recompilable": True,
             },
         )
@@ -270,6 +291,44 @@ def verify_reality(
             },
         )
     return manifest
+
+
+def _terminal_established_by_evidence(spec: WorldSpec) -> bool:
+    """Whether every term the terminal reads is already established by cited evidence.
+
+    A world can be a faithful factual resolution: the record settled the question before
+    the window opened, so nothing acts and nothing runs, and the terminal reads a field
+    or document whose initial value carries the claim ids that establish it. The
+    producer-lineage gate (``world_compiler.terminal_producers``) is the authority on
+    what counts as a producer; this asks it the same question, so the two gates cannot
+    disagree about whether a producerless world is honest or empty.
+    """
+
+    from .world_compiler import terminal_producers
+
+    producers = terminal_producers(spec)
+    if not producers:
+        return False
+    return all(
+        who and all(str(w).startswith("evidence:") for w in who) for who in producers.values()
+    )
+
+
+def represented_member_count(spec: WorldSpec) -> int:
+    """How many real-world members this world stands for, not how many objects it has.
+
+    An aggregate is a compression, not a reduction: ``represents_count=7`` on a single
+    coalition entity means seven countries are in this world, and a gate asking how many
+    participants there are must see seven. A live OPEC+ run compiled exactly that — the
+    seven producers as one deliberating coalition, which is the faithful representation
+    of a body that decides as a unit — and was refused for "declaring more participants
+    than it contains" by a check counting rows.
+
+    An entity with no count stands for itself, so the floor is one per entity and the
+    total can only ever be larger than the object count, never smaller.
+    """
+
+    return sum(max(1, e.represents_count or 1) for e in spec.entities)
 
 
 def _single_subject_world(spec: WorldSpec, contract: ResolutionContract) -> bool:

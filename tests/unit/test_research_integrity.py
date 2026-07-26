@@ -14,9 +14,8 @@ from typing import Any
 
 import pytest
 
-from _fakes import ProgrammableGateway
+from _fakes import FakeTransport, ProgrammableGateway
 from sworldmodel.http import (
-    FakeTransport,
     UrllibTransport,
     UrlRejected,
     html_response,

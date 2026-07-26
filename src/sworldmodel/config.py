@@ -39,6 +39,19 @@ class ForecastConfig:
     # from outside with nothing written. Reaching this stops repairing and refuses with
     # the last gate's own diagnosis, which is a result; being killed is not.
     max_compile_seconds: float = 900.0
+    # Which compiler builds the world from the evidence. "direct": one model call
+    # authors the executable WorldSpec. "semantic": the model authors a semantic causal
+    # plan, an independent call reviews it, and deterministic code lowers it into the
+    # same WorldSpec. Both feed the identical gates and runtime; the mode is recorded in
+    # every trace.
+    compiler_mode: str = "direct"
+    # Per-run spend ceilings, enforced at the gateway (see ModelGateway.set_budget):
+    # wall clocks alone cannot stop a run whose calls are cheap and fast. Exhaustion
+    # raises GatewayError, which existing handlers convert into an honest refusal or an
+    # unresolved branch. None disables a ceiling. Directly constructed gateways
+    # (tests) stay unbounded until run_forecast threads these in.
+    max_calls: int | None = 400
+    max_tokens_total: int | None = 2_000_000
 
     @classmethod
     def live(
@@ -54,6 +67,9 @@ class ForecastConfig:
         now: datetime | None = None,
         model: str | None = None,
         budget: RunBudget | None = None,
+        compiler_mode: str = "direct",
+        max_calls: int | None = 400,
+        max_tokens_total: int | None = 2_000_000,
     ) -> ForecastConfig:
         """The production configuration: live DeepSeek + live research, one transport."""
 
@@ -68,6 +84,7 @@ class ForecastConfig:
             shared_transport,  # type: ignore[arg-type]
             budget=research_budget or ResearchBudget(),  # type: ignore[arg-type]
             now=now,
+            compiler_mode=compiler_mode,
         )
         return cls(
             gateway=gateway,
@@ -78,6 +95,9 @@ class ForecastConfig:
             max_structures=max_structures,
             max_compile_seconds=max_compile_seconds,
             budget=budget or RunBudget(),
+            compiler_mode=compiler_mode,
+            max_calls=max_calls,
+            max_tokens_total=max_tokens_total,
         )
 
     @property

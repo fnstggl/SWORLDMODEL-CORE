@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sworldmodel.http import FakeTransport, html_response
+import pytest
+
+from _fakes import FakeTransport
+from sworldmodel.http import html_response
 from sworldmodel.source_fetch import fetch_source
 
 _NAIVE_DATE_PAGE = (
@@ -31,3 +34,41 @@ def test_last_modified_header_dates_an_undated_page() -> None:
     fs = fetch_source(t, "u", now=datetime.now(UTC))
     assert fs.published_at is not None
     assert fs.published_at.year == 2024 and fs.published_at.month == 2
+
+
+def test_a_truncated_chunked_body_is_a_document_failure_not_a_dead_run() -> None:
+    """A live EU-Mercosur run died twenty minutes in when one page's chunked response
+    ended 15 bytes short: http.client.IncompleteRead is not an OSError, so the
+    transport's catch missed it and the raw exception destroyed the run with no
+    artifacts. One bad page is a rejected page."""
+
+    import socket
+    import threading
+
+    from sworldmodel.http import FetchPolicy, HttpError, UrllibTransport
+
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    port = srv.getsockname()[1]
+
+    def serve() -> None:
+        conn, _ = srv.accept()
+        conn.recv(4096)
+        conn.sendall(
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n"
+            b"Transfer-Encoding: chunked\r\n\r\nf\r\ntruncated body!"
+        )
+        conn.close()  # closes mid-chunk -> IncompleteRead inside the body read
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    transport = UrllibTransport(policy=FetchPolicy(allow_private_addresses=True))
+    try:
+        with pytest.raises(HttpError, match="mid-body"):
+            transport.get(f"http://127.0.0.1:{port}/doc")
+    finally:
+        thread.join(timeout=5)
+        srv.close()
+    # The failure is preserved in diagnostics, with the received byte count.
+    assert transport.calls and "IncompleteRead" in (transport.calls[-1].error or "")

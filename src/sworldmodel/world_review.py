@@ -3,25 +3,29 @@
 The integrity gates are mechanical and they are the ones that can refuse a run: they
 check that participants the evidence names are present, that actors are grounded, that
 every terminal term has a producer, that nothing verified was dropped. What they cannot
-check is whether the world is *plausible as a description of reality* — whether the
-resolution contract matches the question asked, whether a detail arrived from evidence or
-from the compiler's imagination, whether an event was placed on a date because a source
-gave that date or because it seemed about right.
+check is whether the world is *plausible as a description of reality* — whether the real
+process that produces the outcome is actually in the world, whether an actor is present
+only as decoration, whether an uncertainty variable is the final answer wearing a
+costume, whether the world models the production of the outcome or merely the event
+that reports it.
 
-This is one model call against the compiled world, made before any actor is invoked. It
-is not a gate and it cannot pass a world the gates refuse; it is a way to notice that we
-are about to spend several minutes and a hundred provider calls simulating something
-obviously wrong, and to send that finding into targeted repair instead.
+This is one model call against the compiled world, made before any actor is invoked,
+and it is adversarial by instruction: the model is told to attack the world, not to
+praise it. Each of the fourteen questions comes back as an :class:`AuditFinding` with a
+severity; CRITICAL and HIGH findings are blocking and route the world into targeted
+repair. A finding that cannot state an evidence basis from the provided material is
+LOW by rule — an unsupported attack is worth no more than an unsupported world.
 
-The questions it asks are the ones the mechanical checks do not cover. The ones they do
-cover are left to them, because a model's opinion about whether a roster is complete is
-worth less than a comparison against the evidence store.
+It is not a gate and it cannot pass a world the gates refuse; it is a way to notice
+that we are about to spend several minutes and a hundred provider calls simulating
+something obviously wrong, and to send that finding into targeted repair instead.
 """
 
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from collections.abc import Iterable
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any
 
@@ -30,20 +34,39 @@ from .errors import GatewayError
 from .evidence import EvidenceView
 from .gateway import GatewayRequest, ModelGateway
 from .ids import prompt_hash
+from .uncertainty import UNGROUNDED_PROVENANCES
 from .world_compiler import terminal_producers
 
-__all__ = ["WorldReview", "review_world"]
+__all__ = ["AuditFinding", "WorldReview", "review_world"]
 
-# The questions worth a model's judgement, with whether a "no" should stop the rollout
-# and go to repair. Completeness, grounding, producer lineage and coverage are absent on
-# purpose: those are decided against the evidence store, not by asking.
-_QUESTIONS: tuple[tuple[str, str, bool], ...] = (
+SEVERITIES = ("CRITICAL", "HIGH", "MEDIUM", "LOW", "PASS")
+
+# Severities that warrant stopping for targeted repair before any rollout is paid for.
+_BLOCKING = frozenset({"CRITICAL", "HIGH"})
+
+# The fourteen attacks. Completeness against the evidence store, grounding, producer
+# lineage and coverage are absent on purpose: those are decided mechanically against
+# the evidence store, not by asking a model's opinion of them.
+_QUESTIONS: tuple[tuple[str, str], ...] = (
     (
-        "contract_is_exact",
-        "Does the compiled resolution condition state exactly what the question asks — "
-        "same subject, same threshold, same units, same window? A condition that is "
-        "close but not the same resolves a different question.",
-        True,
+        "what_process_produces_outcome",
+        "What real process produces this outcome, in one sentence?",
+    ),
+    (
+        "process_is_represented",
+        "Is that process actually represented in the compiled world?",
+    ),
+    (
+        "material_components_missing",
+        "Which material people, organizations, populations or external systems are missing?",
+    ),
+    (
+        "decorative_actors",
+        "Is any actor included only decoratively (its decisions cannot move the outcome)?",
+    ),
+    (
+        "material_actor_compressed_away",
+        "Is any material actor compressed away?",
     ),
     (
         "representation_scale_is_right",
@@ -51,40 +74,77 @@ _QUESTIONS: tuple[tuple[str, str, bool], ...] = (
         "outcome — an individual where a person decides, an organization where a body "
         "acts as one, an operational or population process where the outcome is "
         "throughput or aggregate behavior rather than anyone's choice?",
-        True,
     ),
     (
-        "nothing_unsupported_was_added",
-        "Does the world contain any specific detail — a meeting, a position, a "
-        "relationship, a quantity, a date — that the evidence does not support and that "
-        "is not declared as an uncertainty? Answer no if any such detail is present.",
-        True,
+        "counts_and_thresholds_preserved",
+        "Are real participant counts, authority and decision thresholds preserved?",
     ),
     (
-        "private_and_future_states_are_labeled",
-        "Are unobservable things — private preferences, intentions, future data, "
-        "responses — represented as uncertainty or marked inference, rather than "
-        "asserted as established fact?",
-        False,
+        "production_not_reporting",
+        "Is the world modeling the production of the outcome, or merely the event that reports it?",
     ),
     (
-        "event_timing_is_evidence_grounded",
-        "Is each dated event on the calendar there because a source gives that date, "
-        "rather than because the date seems plausible?",
-        False,
+        "numbers_have_evidence",
+        "Does every numerical starting value, rate or capacity carry evidence citations?",
     ),
     (
-        "important_parts_are_present",
-        "Is any organization, process or population that materially affects this "
-        "outcome missing from the world entirely?",
-        False,
+        "uncertainty_is_answer_in_disguise",
+        "Is any uncertainty variable simply the final answer wearing a costume?",
+    ),
+    (
+        "branch_weights_arbitrary",
+        "Is any branch weight arbitrary (not grounded in frequencies, reference cases, "
+        "market/survey evidence or documented base rates)?",
+    ),
+    (
+        "actors_get_realistic_information",
+        "Does each actor receive realistic local information rather than omniscient state?",
+    ),
+    (
+        "terminal_preresolved",
+        "Could the terminal already resolve before simulation begins?",
+    ),
+    (
+        "expert_would_call_incomplete",
+        "Would a reasonable domain expert call this world materially incomplete for this question?",
     ),
 )
 
 
 @dataclass(frozen=True)
+class AuditFinding:
+    """One audit question's verdict: how badly the world fails it, and on what basis.
+
+    ``severity`` is one of :data:`SEVERITIES`. ``finding`` is one sentence saying what
+    is wrong (or, for PASS, why the world survives the attack); ``evidence_basis`` is
+    one sentence citing what in the provided material decided it.
+    """
+
+    key: str
+    severity: str
+    finding: str
+    evidence_basis: str
+
+    @property
+    def is_blocking(self) -> bool:
+        return self.severity in _BLOCKING
+
+    def as_dict(self) -> dict[str, str]:
+        return {
+            "key": self.key,
+            "severity": self.severity,
+            "finding": self.finding,
+            "evidence_basis": self.evidence_basis,
+        }
+
+
+@dataclass(frozen=True)
 class WorldReview:
-    """The review's answers, and whether they warrant repair before rollout."""
+    """The review's findings, and whether they warrant repair before rollout.
+
+    ``answers`` is kept for existing consumers and is synthesized from ``findings``:
+    a question is "ok" only when its finding is PASS.
+    """
 
     answers: tuple[tuple[str, bool, str], ...] = ()  # (key, ok, why)
     failed_blocking: tuple[str, ...] = ()
@@ -94,6 +154,7 @@ class WorldReview:
     # world that was then recompiled describes a world nobody simulated, and reads as a
     # run that ignored its own review.
     disposition: str = "not acted on"
+    findings: tuple[AuditFinding, ...] = ()
 
     @property
     def should_repair(self) -> bool:
@@ -102,6 +163,7 @@ class WorldReview:
     def as_dict(self) -> dict[str, Any]:
         return {
             "answers": [{"question": k, "ok": ok, "why": why} for k, ok, why in self.answers],
+            "findings": [f.as_dict() for f in self.findings],
             "blocking_failures": list(self.failed_blocking),
             "concerns": list(self.concerns),
             "error": self.error,
@@ -110,11 +172,19 @@ class WorldReview:
 
     def repair_instruction(self) -> str:
         lines = [
-            "A review of your compiled world before simulation found these problems. "
-            "Fix exactly these and change nothing else:"
+            "An adversarial review of your compiled world before simulation found these "
+            "problems. Fix exactly these and change nothing else:"
         ]
-        by_key = {k: why for k, ok, why in self.answers if not ok}
-        lines.extend(f"- {k}: {by_key.get(k, '')}" for k in self.failed_blocking)
+        by_key = {f.key: f for f in self.findings}
+        fallback = {k: why for k, ok, why in self.answers if not ok}
+        for key in self.failed_blocking:
+            f = by_key.get(key)
+            if f is not None:
+                lines.append(
+                    f"- {key} [{f.severity}]: {f.finding} (evidence basis: {f.evidence_basis})"
+                )
+            else:
+                lines.append(f"- {key}: {fallback.get(key, '')}")
         lines.append(
             "Do not invent support for anything. If the evidence does not establish "
             "something, represent it as an uncertainty or leave it out."
@@ -164,6 +234,15 @@ def summarize_world(compiled: CompiledWorld) -> dict[str, Any]:
             {"id": a.action_id, "meaning": a.meaning, "cited": len(a.evidence_claim_ids)}
             for a in spec.actions
         ],
+        "fields": [
+            {
+                "id": f.field_id,
+                "type": f.value_type,
+                "initial": f.initial,
+                "cited": len(f.evidence_claim_ids),
+            }
+            for f in spec.fields
+        ],
         "calendar": [
             {"node": n.node_id, "at": _when(n.at), "what": n.description}
             for n in spec.process.nodes
@@ -177,11 +256,72 @@ def summarize_world(compiled: CompiledWorld) -> dict[str, Any]:
             for p in spec.external_processes
         ],
         "uncertainties": [
-            {"variable": u.variable_id, "why_unknown": u.why_unknown}
+            {
+                "variable": u.variable_id,
+                "why_unknown": u.why_unknown,
+                # The citation count was invisible here while every other section
+                # showed one — so for a world whose numbers live in its uncertainty,
+                # "do the numbers have evidence?" could only ever be answered no,
+                # against alternatives that in fact cited the constraint claims.
+                "cited": len(u.constraining_evidence_ids),
+                "outcomes": [
+                    {
+                        "value": o.value,
+                        "weight": o.weight.value,
+                        "weight_provenance": o.weight.provenance.value,
+                        "weight_source": o.weight.source_detail,
+                    }
+                    for o in u.outcomes
+                ],
+            }
             for u in compiled.uncertainty_variables
         ],
         "terminal_producers": {k: list(v) for k, v in sorted(terminal_producers(spec).items())},
     }
+
+
+def _parse_findings(data: Any, known: Iterable[str] | None = None) -> tuple[AuditFinding, ...]:
+    """Model output -> findings. Pure: no gateway, no world, no side effects.
+
+    Tolerant of the shapes a model actually produces (``question`` for ``key``, ``why``
+    for ``finding``, lower-case severities), and it enforces the rule the prompt
+    states: a CRITICAL or HIGH finding that states no evidence basis is demoted to LOW,
+    because an unsupported attack must not block a world the gates passed. An unknown
+    severity is read as MEDIUM — visible, never blocking. One finding per known key;
+    unknown keys and repeats are dropped.
+    """
+
+    keys = frozenset(known) if known is not None else frozenset(k for k, _ in _QUESTIONS)
+    items = data.get("findings", []) if isinstance(data, dict) else []
+    out: dict[str, AuditFinding] = {}
+    for item in items if isinstance(items, list) else []:
+        if not isinstance(item, dict):
+            continue
+        key = str(item.get("key") or item.get("question") or "").strip()
+        if key not in keys or key in out:
+            continue
+        severity = str(item.get("severity", "")).strip().upper()
+        if severity not in SEVERITIES:
+            severity = "MEDIUM"
+        finding = str(item.get("finding") or item.get("why") or "").strip()
+        basis = str(item.get("evidence_basis", "")).strip()
+        if severity in _BLOCKING and not basis:
+            severity = "LOW"
+        out[key] = AuditFinding(key=key, severity=severity, finding=finding, evidence_basis=basis)
+    return tuple(out.values())
+
+
+def _from_findings(findings: tuple[AuditFinding, ...]) -> WorldReview:
+    """Assemble the review from parsed findings. Pure, so it can be tested as such."""
+
+    return WorldReview(
+        answers=tuple((f.key, f.severity == "PASS", f.finding) for f in findings),
+        failed_blocking=tuple(f.key for f in findings if f.is_blocking),
+        concerns=tuple(
+            f"{f.key}: {f.finding}" for f in findings if f.severity in ("MEDIUM", "LOW")
+        ),
+        findings=findings,
+    )
 
 
 def review_world(
@@ -208,6 +348,40 @@ def review_world(
         return WorldReview(error=f"the review could not run: {type(exc).__name__}: {exc}")
 
 
+def _settled_record_block(compiled: CompiledWorld) -> str:
+    """The resolution-basis paragraph for a world that already answers from citations.
+
+    A live Bank of England run compiled the one legitimate preresolved state — the
+    outcome state initial-true on cited pre-cutoff record, endorsed by the plan's own
+    independent review — and this review then attacked it for lacking a production
+    process, forcing a recompile whose world demanded the already-made statement be
+    made AGAIN inside the window. That recompile changed the question's meaning and
+    manufactured an absolute NO. The audit's classifier already knows this state
+    (``factual_resolution``); the reviewer has to know it too, and aim its attack at
+    the only thing still attackable: whether the cited record establishes the outcome
+    as the question means it.
+    """
+
+    from .world_compiler import _cited_factual_resolution
+
+    if not _cited_factual_resolution(compiled.spec, compiled.base_world):
+        return ""
+    return (
+        "## THE WORLD CLAIMS A CITED FACTUAL RESOLUTION\n"
+        "The terminal already resolves YES at the cutoff, and every term it reads is "
+        "established by cited verified record of pre-cutoff events. That is the one "
+        "legitimate preresolved state: a question the record has already answered is "
+        "not re-produced inside the window, and a repair that demands the outcome be "
+        "performed again after the cutoff changes the question's meaning. Do NOT fail "
+        "this world for a preresolved terminal, an unrepresented production process, "
+        "or decorative actors on that basis alone. Attack the citation instead: does "
+        "the cited record establish the outcome exactly as the question means it — "
+        "same subject, same act, same specificity, same instrument and degree? If it "
+        "does not, fail terminal_preresolved and name the precise gap between what "
+        "the record says and what the question asks."
+    )
+
+
 def _review(
     compiled: CompiledWorld,
     gateway: ModelGateway,
@@ -215,21 +389,53 @@ def _review(
     question: str,
     evidence_render: str,
 ) -> WorldReview:
-    body = "\n".join(f"{key}: {text}" for key, text, _ in _QUESTIONS)
+    body = "\n".join(f"{key}: {text}" for key, text in _QUESTIONS)
     prompt = "\n\n".join(
-        [
-            "You are auditing a compiled simulation world BEFORE it is run, to catch a "
-            "world that is obviously not the one the question is about. Be concrete and "
-            "be willing to say no.",
+        segment
+        for segment in [
+            "You are the adversarial reality auditor of a compiled simulation world, "
+            "run BEFORE any rollout budget is spent. Your job is to ATTACK this world, "
+            "not to praise it: find where it fails as a description of the real process "
+            "that produces this outcome. Assume the compiler flattered itself; make it "
+            "prove otherwise. Be concrete, and ground every attack in the material "
+            "below.",
             f"QUESTION THE WORLD MUST RESOLVE: {question}",
             "## THE COMPILED WORLD\n"
             + json.dumps(summarize_world(compiled), indent=2, sort_keys=True, default=str),
+            # The review fights the system's own legitimacy rules unless told them: a
+            # population run declared an input uncertainty with honestly-labeled
+            # symmetric weights over cited anchors, this review called the weights
+            # arbitrary and the uncertainty an answer in disguise, and the forced
+            # recompile deleted it — leaving a single-branch world that could only end
+            # unresolved. What the mechanical gates already permit and police is not
+            # for this review to re-litigate.
+            "## WHAT IS ALREADY LEGAL HERE\n"
+            "Branch weights labeled symmetric_ignorance_assumption are not arbitrary: "
+            "the label is the honest state of knowledge, and the runtime reports "
+            "bounds instead of a calibrated point wherever such weights matter. Fail "
+            "branch_weights_arbitrary only for a weight wearing a GROUNDED provenance "
+            "its citations do not support. Likewise an uncertainty is the answer in "
+            "disguise only when the terminal reads its drawn value through no real "
+            "computation — a mechanical gate upstream already refuses that. An "
+            "uncertainty over an input the terminal computes from via cited anchors "
+            "is the honest shape of not knowing; demanding its removal produces a "
+            "world that can only end unresolved.",
+            _settled_record_block(compiled),
             "## THE VERIFIED EVIDENCE IT WAS BUILT FROM\n" + evidence_render,
             "## ANSWER EACH\n" + body,
-            'Reply with JSON {"answers": [{"question": "<key>", "ok": true|false, '
-            '"why": "<one sentence, citing what in the world or the evidence decided it>"}]}. '
-            "ok=true means the world is satisfactory on that question.",
+            "For every question return exactly one finding object: "
+            '{"key": "<key>", "severity": "CRITICAL"|"HIGH"|"MEDIUM"|"LOW"|"PASS", '
+            '"finding": "<one sentence: what is wrong, or why the world survives>", '
+            '"evidence_basis": "<one sentence citing what in the compiled world or the '
+            'evidence above decided it>"}. '
+            "CRITICAL means the simulation would be meaningless; HIGH means materially "
+            "wrong and must be repaired before simulating; MEDIUM is a real concern; "
+            "LOW is minor; PASS means the world survives your attack on that question. "
+            "A finding without a stated evidence basis from the provided material must "
+            "be severity LOW. "
+            'Reply with JSON {"findings": [<one object per key, all 14 keys>]}.',
         ]
+        if segment
     )
     try:
         resp = gateway.generate(
@@ -238,33 +444,36 @@ def _review(
                 prompt=prompt,
                 context={"question": question},
                 seed=int(prompt_hash("review" + question)[:8], 16),
-                expected_keys=("answers",),
+                expected_keys=("findings",),
             )
         )
     except GatewayError as exc:
         return WorldReview(error=f"the review could not run: {exc}")
 
-    blocking = {key for key, _, is_blocking in _QUESTIONS if is_blocking}
-    known = {key for key, _, _ in _QUESTIONS}
-    answers: list[tuple[str, bool, str]] = []
-    failed: list[str] = []
-    concerns: list[str] = []
-    for item in resp.data.get("answers", []):
-        if not isinstance(item, dict):
-            continue
-        key = str(item.get("question", "")).strip()
-        if key not in known:
-            continue
-        ok = item.get("ok")
-        ok_bool = ok if isinstance(ok, bool) else str(ok).strip().lower() in ("true", "yes", "1")
-        why = str(item.get("why", "")).strip()
-        answers.append((key, ok_bool, why))
-        if not ok_bool:
-            (failed if key in blocking else concerns).append(
-                key if key in blocking else f"{key}: {why}"
+    findings = _parse_findings(resp.data)
+    if _every_weight_wears_an_ignorance_label(compiled):
+        # A deterministic backstop for the legitimacy rule the prompt states: when
+        # every branch weight in the world already carries an ungrounded-provenance
+        # label, "the weights are arbitrary" cannot block — the label IS the honest
+        # state, and the runtime prices it as bounds rather than a calibrated point.
+        # A weight CLAIMING a grounded provenance stays fully attackable.
+        findings = tuple(
+            replace(
+                f,
+                severity="MEDIUM",
+                finding=f.finding
+                + " [not blocking: every weight already wears an ungrounded-provenance "
+                "label, which the runtime prices as bounds]",
             )
-    return WorldReview(
-        answers=tuple(answers),
-        failed_blocking=tuple(failed),
-        concerns=tuple(concerns),
-    )
+            if f.key == "branch_weights_arbitrary" and f.is_blocking
+            else f
+            for f in findings
+        )
+    return _from_findings(findings)
+
+
+def _every_weight_wears_an_ignorance_label(compiled: CompiledWorld) -> bool:
+    """True when every uncertainty-outcome weight is honestly labeled ungrounded."""
+
+    outcomes = [o for u in compiled.uncertainty_variables for o in u.outcomes]
+    return bool(outcomes) and all(o.weight.provenance in UNGROUNDED_PROVENANCES for o in outcomes)

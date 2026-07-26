@@ -54,7 +54,7 @@ from .schedule import (
     ScheduledEntry,
     make_entry,
 )
-from .uncertainty import Scenario
+from .uncertainty import Scenario, weights_grounded
 from .world import Delivery, WorldState
 from .worldspec import Effect, ProcessNode, TerminalExpression, WakeRule, WorldSpec
 
@@ -184,6 +184,9 @@ class _BranchRun:
     decisions: list[ActorDecisionRecord]
     diagnostics: BranchDiagnostics
     failure: str = ""
+    # The terminal's answer for the initialized world, before anything simulated ran.
+    pre_resolved: bool = False
+    pre_outcome: str | None = None
 
 
 def run(
@@ -218,8 +221,32 @@ def run(
         diag = BranchDiagnostics()
         weight = BranchWeight(scenario.weight, scenario.provenance, scenario.provenance_detail)
         world = compiled.base_world.clone(new_branch_id=scenario.scenario_id, weight=weight)
+        pre_resolved = False
+        pre_outcome: str | None = None
         try:
             world = _seed_branch(world, compiled.spec, scenario, effects, ledger)
+            # PRE-SIMULATION OUTCOME. This is the exact point where the branch world is
+            # initialized but nothing has run. ``_seed_branch`` has (a) pushed the
+            # compiled calendar — process entry nodes, external occurrences, plan and
+            # commitment entries — onto the schedule *without firing any of it* (those
+            # only execute inside ``_event_loop``), and (b) applied this branch's
+            # hypothesis about its uncertain values inline: the scenario's
+            # ``release_data`` event is built and applied via ``world.apply`` right
+            # there, not queued through the event loop, so the branch condition fields
+            # are already in world state even when their public release date lies in
+            # the future. What follows from that release — deliveries, notices, actor
+            # decisions — is only *scheduled* at this point. So this evaluation sees
+            # exactly what the task requires: the branch condition values, and not one
+            # actor or process consequence. The clock of the evaluated copy is moved to
+            # the horizon (the copy is then discarded) so the evaluation answers the
+            # same question ``_finalize`` will answer — "what does the terminal say if
+            # nothing further happens before the horizon?" — instead of tripping
+            # time-window guards at ``as_of``.
+            pre_eval = evaluate_terminal(
+                world.with_time(world.contract.horizon), compiled.spec.terminal
+            )
+            pre_resolved = pre_eval.resolved
+            pre_outcome = pre_eval.outcome if pre_eval.resolved else None
             world = _event_loop(
                 world,
                 compiled.spec,
@@ -235,8 +262,25 @@ def run(
             world = _finalize(world, compiled.spec.terminal, effects, ledger, diag)
         except GatewayError as exc:
             diag.stop_reason = f"provider_failure: {exc}"
-            return _BranchRun(scenario, world, ledger, decisions, diag, f"provider_failure: {exc}")
-        return _BranchRun(scenario, world, ledger, decisions, diag)
+            return _BranchRun(
+                scenario,
+                world,
+                ledger,
+                decisions,
+                diag,
+                f"provider_failure: {exc}",
+                pre_resolved=pre_resolved,
+                pre_outcome=pre_outcome,
+            )
+        return _BranchRun(
+            scenario,
+            world,
+            ledger,
+            decisions,
+            diag,
+            pre_resolved=pre_resolved,
+            pre_outcome=pre_outcome,
+        )
 
     if workers == 1:
         runs = [run_one(s) for s in scenarios]
@@ -257,10 +301,24 @@ def run(
         ledger.extend(br.ledger)
         decisions.extend(br.decisions)
         if br.failure:
-            branch_outcomes.append(_unresolved_outcome(br.scenario, br.failure))
+            branch_outcomes.append(
+                _unresolved_outcome(
+                    br.scenario,
+                    br.failure,
+                    pre_resolved=br.pre_resolved,
+                    pre_outcome=br.pre_outcome,
+                )
+            )
             summaries.append(_unresolved_summary(br.scenario, br.failure))
         else:
-            branch_outcomes.append(_branch_outcome(br.world, br.scenario))
+            branch_outcomes.append(
+                _branch_outcome(
+                    br.world,
+                    br.scenario,
+                    pre_resolved=br.pre_resolved,
+                    pre_outcome=br.pre_outcome,
+                )
+            )
             summaries.append(_summary(br.world, br.scenario))
 
     return RunResult(
@@ -978,6 +1036,72 @@ def _wake_from_entry(
 
 # -- the actor invocation ----------------------------------------------------
 
+# The validation_status recorded when a wake finds nothing the actor could do. It is a
+# statement about the world's offer, not about a decision — no model was called.
+NO_FEASIBLE_ACTION = "no_feasible_action"
+
+
+def _no_feasible_action_record(
+    world: WorldState,
+    spec: WorldSpec,
+    node: ProcessNode | None,
+    actor: ActorState,
+    action_exec: ActionExecutor,
+    entry: ScheduledEntry,
+) -> ActorDecisionRecord:
+    """The record of a wake at which nothing was feasible and nothing novel allowed.
+
+    Without it, the turn vanished: actor_decisions.jsonl showed no trace of the wake,
+    and a world in which the only offered action's authority token mismatched looked
+    inert for no stated reason. The record names each offered action and the exact
+    reason it was infeasible, using the same availability check that refused them.
+    """
+
+    p = entry.payload_dict
+    offered = node.action_ids if node is not None else ("*",)
+    candidates = [
+        a for a in spec.actions if offered == ("*",) or not offered or a.action_id in offered
+    ]
+    # The private check is the SAME one feasible_actions used to exclude these
+    # actions; asking it again is what makes the recorded reason the true reason.
+    reasons = [
+        f"{a.action_id}: {action_exec._check_availability(world, actor, a)[1]}" for a in candidates
+    ]
+    why = (
+        "; ".join(reasons)
+        if reasons
+        else "this node offers no actions at all, and novel actions are not allowed"
+    )
+    state = actor.state_dict()
+    return ActorDecisionRecord(
+        branch_id=world.branch_id,
+        actor_id=actor.actor_id,
+        branch_time=world.time.isoformat(),
+        stage=world.stage,
+        wake_reason=str(p.get("wake_reason", "")),
+        wake_detail=str(p.get("wake_detail", "")),
+        trigger_event_ids=list(entry.causal_parents),
+        delivered_observation_ids=[
+            d.event_id for d in world.deliveries if d.actor_id == actor.actor_id
+        ],
+        noticed_observation_ids=[],
+        retrieved_memory_ids=[],
+        plan_before=None,
+        plan_after=None,
+        plan_disposition="not consulted: the wake offered nothing to decide",
+        state_before=state,
+        state_after=state,
+        decision_context={},
+        intent={},
+        validation_status=NO_FEASIBLE_ACTION,
+        validation_reason=f"no feasible action and novel actions not allowed here — {why}",
+        event_ids=[],
+        world_version_at_decision=world.version,
+        prompt_hash="",
+        model="",
+        tokens_out=0,
+    )
+
 
 def _invoke_actor(
     world: WorldState,
@@ -1009,6 +1133,11 @@ def _invoke_actor(
     feasible = action_exec.feasible_actions(world, node, actor, spec)
     allow_novel = node.allow_novel if node is not None else True
     if not feasible and not allow_novel:
+        # A wake the actor could do nothing with is still a wake, and it goes on the
+        # record: skipping it silently made the world look inert for no stated reason.
+        # The record carries WHY each offered action was infeasible, so the ledger
+        # shows "the officer woke and lacked the authority", not nothing at all.
+        decisions.append(_no_feasible_action_record(world, spec, node, actor, action_exec, entry))
         return world, []
 
     base_view = world.view_for(aid)
@@ -1626,7 +1755,13 @@ def _find(world: WorldState, event_id: str) -> Event:
     raise KeyError(event_id)
 
 
-def _branch_outcome(world: WorldState, scenario: Scenario) -> BranchOutcome:
+def _branch_outcome(
+    world: WorldState,
+    scenario: Scenario,
+    *,
+    pre_resolved: bool,
+    pre_outcome: str | None,
+) -> BranchOutcome:
     term = world.terminal_state
     resolved = bool(term and term.resolved)
     outcome = term.outcome if (term and term.resolved) else None
@@ -1642,10 +1777,19 @@ def _branch_outcome(world: WorldState, scenario: Scenario) -> BranchOutcome:
         key_conditions=scenario.conditions,
         records=term.highlights if term else (),
         event_count=len(world.event_history),
+        pre_outcome=pre_outcome,
+        pre_resolved=pre_resolved,
+        weight_grounded=weights_grounded(scenario),
     )
 
 
-def _unresolved_outcome(scenario: Scenario, reason: str) -> BranchOutcome:
+def _unresolved_outcome(
+    scenario: Scenario,
+    reason: str,
+    *,
+    pre_resolved: bool = False,
+    pre_outcome: str | None = None,
+) -> BranchOutcome:
     return BranchOutcome(
         branch_id=scenario.scenario_id,
         parent_lineage=("root",),
@@ -1657,6 +1801,9 @@ def _unresolved_outcome(scenario: Scenario, reason: str) -> BranchOutcome:
         key_conditions=scenario.conditions,
         records=(),
         event_count=0,
+        pre_outcome=pre_outcome,
+        pre_resolved=pre_resolved,
+        weight_grounded=weights_grounded(scenario),
     )
 
 

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import time
 from typing import Any
 
@@ -33,9 +34,12 @@ DEFAULT_TEMPERATURES: dict[str, float] = {
     "extract_claims": 0.1,
     "contradiction": 0.1,
     "compile_world_spec": 0.3,
+    "semantic_plan": 0.3,
+    "semantic_review": 0.2,
     "interpret_novel": 0.2,
     "exclusion_challenge": 0.1,
     "world_review": 0.2,
+    "trajectory_audit": 0.2,
     "actor_decision": 0.7,
     "reflect": 0.5,
 }
@@ -48,15 +52,61 @@ DEFAULT_MAX_TOKENS: dict[str, int] = {
     # plans, actions with timing and effects, a dated process graph, external
     # processes, wake rules, uncertainties and a terminal expression.
     "compile_world_spec": 16000,
+    # The semantic plan is meaning without syntax — smaller than a WorldSpec, but it
+    # still enumerates entities, states, affordances, processes and uncertainties, and
+    # the provider's reasoning tokens count against the same budget.
+    "semantic_plan": 12000,
+    # One verdict plus per-finding reasons and exact corrections.
+    "semantic_review": 4000,
     "interpret_novel": 2000,
     "exclusion_challenge": 800,
-    # Six judgements with a sentence of reasoning each, plus the model's own thinking.
-    "world_review": 3000,
+    # Fourteen adversarial findings with a sentence of attack and a sentence of
+    # evidence basis each, plus the model's own thinking.
+    "world_review": 6000,
+    # Six trajectory judgements over a per-branch event digest, plus thinking.
+    "trajectory_audit": 4000,
     # An actor returns its plan disposition, plan update, intention, information needs,
     # commitments and revisit conditions — considerably more than a bare action.
     "actor_decision": 3000,
     "reflect": 2000,
 }
+
+
+# Failures that mean the ENDPOINT is unreachable rather than one request failing.
+_OUTAGE_MARKERS = (
+    "connection refused",
+    "connection reset",
+    "name or service not known",
+    "temporary failure in name resolution",
+    "network is unreachable",
+    "no route to host",
+)
+
+
+def _is_outage(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return any(marker in text for marker in _OUTAGE_MARKERS)
+
+
+def _failure_kind(exc: Exception) -> str:
+    """Name the failure class so the record distinguishes what actually went wrong."""
+
+    text = str(exc).lower()
+    if _is_outage(exc):
+        return "endpoint unreachable"
+    if "timed out" in text or "timeout" in text:
+        return "timeout"
+    return "transport failure"
+
+
+def _retry_after(headers: dict[str, str]) -> float:
+    """A server that says when to come back is answered on its schedule, capped."""
+
+    raw = next((v for k, v in headers.items() if k.lower() == "retry-after"), "")
+    try:
+        return min(float(raw), 60.0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 class DeepSeekGateway(ModelGateway):
@@ -75,6 +125,7 @@ class DeepSeekGateway(ModelGateway):
         default_max_tokens: int = 3000,
         max_output_tokens: int = 32000,
         backoff_base: float = 0.5,
+        outage_patience_seconds: float = 180.0,
     ) -> None:
         super().__init__()
         self.transport = transport or UrllibTransport()
@@ -89,6 +140,12 @@ class DeepSeekGateway(ModelGateway):
         self.default_max_tokens = default_max_tokens
         self.max_output_tokens = max_output_tokens
         self.backoff_base = backoff_base
+        # How long to keep retrying when the *endpoint* is down (connection refused,
+        # reset, DNS failure) rather than a single request failing. A live Banxico run
+        # met a refused connection, spent 7.5 seconds of backoff, and reported failed
+        # research — for an outage that had passed by the time anyone read the log.
+        # Outages are minutes-shaped; per-request failures are seconds-shaped.
+        self.outage_patience_seconds = outage_patience_seconds
         if not self.api_key:
             raise GatewayError("DEEPSEEK_API_KEY is not set; cannot run a live forecast")
 
@@ -127,7 +184,10 @@ class DeepSeekGateway(ModelGateway):
         last_error = ""
         retries = 0
         validation_failures: list[str] = []
-        for attempt in range(self.max_retries + 1):
+        outage_deadline: float | None = None
+        attempt = -1
+        while True:
+            attempt += 1
             start = time.monotonic()
             try:
                 resp = self.transport.post_json(
@@ -136,27 +196,41 @@ class DeepSeekGateway(ModelGateway):
                     headers={"Authorization": f"Bearer {self.api_key}"},
                     timeout=self.timeout,
                 )
-            except HttpError as exc:  # transport-level failure: retry transient
-                last_error = str(exc)
+            except HttpError as exc:  # transport-level failure
+                last_error = f"{_failure_kind(exc)}: {exc}"
                 retries += 1
-                if attempt < self.max_retries:
+                if _is_outage(exc):
+                    # The endpoint is down, not this request failing. Outages last
+                    # minutes; keep retrying with capped backoff until the patience
+                    # budget is spent, so a two-minute blip does not end a forty-minute
+                    # run.
+                    if outage_deadline is None:
+                        outage_deadline = time.monotonic() + self.outage_patience_seconds
+                    if time.monotonic() < outage_deadline:
+                        self._sleep(attempt, ceiling=30.0)
+                        continue
+                elif attempt < self.max_retries:
                     self._sleep(attempt)
                     continue
                 break
             latency = int((time.monotonic() - start) * 1000)
 
             if resp.status in (429, 500, 502, 503, 504):
-                last_error = f"HTTP {resp.status}: {resp.text[:200]}"
+                kind = "rate limited" if resp.status == 429 else f"server error {resp.status}"
+                last_error = f"{kind}: {resp.text[:200]}"
                 retries += 1
                 if attempt < self.max_retries:
-                    self._sleep(attempt)
+                    self._sleep(attempt, floor=_retry_after(resp.headers))
                     continue
                 break
             if not resp.ok:
-                # 4xx (bad request / auth): non-transient, surface immediately.
-                raise GatewayError(
-                    f"DeepSeek {resp.status} for {request.task_kind}: {resp.text[:300]}"
+                # 4xx (bad request / auth): non-transient, surface immediately, named.
+                kind = (
+                    "authentication failure"
+                    if resp.status in (401, 403)
+                    else f"client error {resp.status}"
                 )
+                raise GatewayError(f"DeepSeek {kind} for {request.task_kind}: {resp.text[:300]}")
 
             data, tokens_in, tokens_out, content = self._parse(resp.text)
             if data is None or not self._schema_ok(data, request.expected_keys):
@@ -268,8 +342,15 @@ class DeepSeekGateway(ModelGateway):
         stripped = content.strip()
         return bool(stripped) and not stripped.endswith(("}", "]"))
 
-    def _sleep(self, attempt: int) -> None:
-        time.sleep(min(self.backoff_base * (2**attempt), 8.0))
+    def _sleep(self, attempt: int, *, ceiling: float = 8.0, floor: float = 0.0) -> None:
+        """Exponential backoff with full jitter.
+
+        Jitter is not decoration: four branches retrying in lockstep re-arrive
+        together, and a rate limit met by a synchronized retry is met again.
+        """
+
+        base = min(self.backoff_base * (2**attempt), ceiling)
+        time.sleep(max(floor, base * (0.5 + random.random() / 2)))
 
     @staticmethod
     def _parse(text: str) -> tuple[dict[str, Any] | None, int, int, str]:

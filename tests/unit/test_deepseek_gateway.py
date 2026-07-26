@@ -6,10 +6,11 @@ import json
 
 import pytest
 
+from _fakes import FakeTransport
 from sworldmodel.deepseek_gateway import DeepSeekGateway
 from sworldmodel.errors import GatewayError
 from sworldmodel.gateway import GatewayRequest
-from sworldmodel.http import FakeTransport, HttpResponse
+from sworldmodel.http import HttpResponse
 
 
 def _envelope(content: dict | str, *, tokens_in: int = 10, tokens_out: int = 5) -> str:
