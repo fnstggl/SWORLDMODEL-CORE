@@ -10,6 +10,8 @@ MEDIUM, LOW.
 
 | ID | Sev | Defect (observed, with artifact) | Earliest stage | Owner / Reviewer | Req |
 | --- | --- | --- | --- | --- | --- |
+| FD-17 | CRITICAL | Live run artifacts/phase2/geopolitical2 (commit bc20aa0) published `probability: 1.0000` labeled `weighted_simulated_trajectories` with only 0.25 of mass resolved (1 branch YES, 3 UNRESOLVED, 0.75 unresolved). The point estimate is conditional on a MINORITY of branch mass over ungrounded symmetric-ignorance weights; bounds [0,1] and status partially_resolved are honest but the headline number is not. FI-2's "ungrounded weights that DISAGREE" test does not fire when the others are unresolved rather than opposed. | aggregation/publication | forecast-integrity / forensic auditor | FI-2, FI-3 |
+| FD-18 | HIGH | Same run: 8 of 12 actor wake-ups flagged repeated_without_new_information (67%) — the ACT-8 measurement now works and is reporting a real behavioral defect: actors re-woken with nothing new to read. | scheduling/wake rules | runtime-impl / realism-adversary | ACT-8, TMP-3 |
 | FD-1 | CRITICAL | Tesla world = cited Q2 × invented factor, zero actors, one set_field; published 0.50 was branch construction (artifacts/forensics/population) | semantic planning | world-compiler-impl / causal-adversary | CWF-2,3 |
 | FD-2 | CRITICAL | Ungrounded disagreeing weights published their average as headline (BoE 0.25, Tesla 0.50) | aggregation/publication | forecast-integrity / forensic auditor | FI-2 |
 | FD-3 | CRITICAL | Threshold-straddling invented alternatives (0.8/1.05 vs break-even 0.8331) undetected end-to-end | semantic validation | world-compiler-impl / causal-adversary | CWF-4, FI-5 |
