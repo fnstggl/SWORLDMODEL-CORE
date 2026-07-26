@@ -679,6 +679,14 @@ def validate_semantic_plan(
         for role, who in ev.participants:
             if who not in entity_names:
                 errors.append(f"event {ev.name!r}: participant {who!r} ({role}) is not declared")
+        if ev.visibility == "private" and not ev.participants:
+            # A private occurrence is defined by who it reaches: with nobody named,
+            # its audience is empty and the runtime delivers it to no one — an event
+            # that happens to nobody is not a meaning the world can carry.
+            errors.append(
+                f"event {ev.name!r}: a private event with no participants cannot mean "
+                "anything — name the participants it reaches, or make it public"
+            )
 
     def check_value(v: SemanticValue | None, where: str) -> None:
         if v is None:

@@ -257,20 +257,28 @@ def _lower_change(c: SemanticChange, t: SymbolTable, plan: SemanticPlan) -> list
         # the payload — a private briefing must not become a public broadcast because
         # lowering forgot to say otherwise.
         data: dict[str, Any] = {"detail": c.detail}
+        create: dict[str, Any] = {
+            "op": "create_event",
+            "event_type": sym,
+            "text": ev.meaning,
+            "visibility": ev.visibility,
+            "data": data,
+        }
         if ev.participants:
             data["participants"] = {
                 role: t.resolve("entity", who) for role, who in ev.participants
             }
+            # The runtime's audience resolver reads only the effect's "to"/"audience"
+            # keys — participants riding in the payload are invisible to delivery. A
+            # private event whose participants lived only in `data` had an empty
+            # audience, so visible_to returned False for everyone and the briefing
+            # reached nobody, including its own participants. The participants ARE the
+            # audience, so they are emitted where delivery actually looks.
+            create["to"] = sorted({t.resolve("entity", who) for _, who in ev.participants})
         if ev.information_created:
             data["information_created"] = ev.information_created
         return [
-            {
-                "op": "create_event",
-                "event_type": sym,
-                "text": ev.meaning,
-                "visibility": ev.visibility,
-                "data": data,
-            },
+            create,
             {"op": "append_record", "collection": sym, "key": "$actor", "value": c.detail or ev.meaning},
         ]
     if c.op == "send":

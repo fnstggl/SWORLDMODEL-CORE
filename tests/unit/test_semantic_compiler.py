@@ -955,6 +955,59 @@ def test_wake_rules_are_derived_so_the_world_is_not_inert_between_moments() -> N
     assert record_rules and all(set(r["wakes"]) == entity_ids for r in record_rules)
 
 
+def test_a_private_event_reaches_its_own_participants() -> None:
+    """H-4: the runtime's audience resolver reads only the effect's "to"/"audience"
+    keys, so a private event whose participants rode only in `data` had an empty
+    audience — visible_to returned False for everyone and the briefing reached nobody,
+    including its own participants. Lowering must emit the participants where delivery
+    actually looks."""
+
+    from sworldmodel.effects import _audience
+
+    data = harbor_plan()
+    data["entities"].append(
+        {
+            "name": "Night pilots guild",
+            "structural_type": "organization",
+            "role": "guild whose pilots perform night approaches",
+            "representation_scale": "organization",
+            "decides": False,
+            "authority": "operates night pilotage",
+            "why_material": "the authorization is addressed to its pilots",
+            "evidence_claim_ids": ["c-r1"],
+        }
+    )
+    data["events"][0]["visibility"] = "private"
+    data["events"][0]["participants"] = {
+        "speaker": "Harbormaster of Port Solent",
+        "briefed": "Night pilots guild",
+    }
+    assert _valid(data) == []
+    compilation, _ = lower_plan(parse_semantic_plan(data))
+    spec = compilation["world_spec"]
+    id_by_name = {e["name"]: e["entity_id"] for e in spec["entities"]}
+    both = {id_by_name["Harbormaster of Port Solent"], id_by_name["Night pilots guild"]}
+    creates = [
+        eff
+        for a in spec["actions"]
+        for eff in a["effects"]
+        if eff["op"] == "create_event"
+    ]
+    assert creates
+    for eff in creates:
+        assert set(eff["to"]) == both, "a private event's participants are its audience"
+        # Proven against the runtime's own audience resolver, not a re-implementation.
+        assert set(_audience("create_event", eff)) == both
+
+
+def test_a_participantless_private_event_is_refused() -> None:
+    data = harbor_plan()
+    data["events"][0]["visibility"] = "private"
+    data["events"][0]["participants"] = {}
+    errors = _valid(data)
+    assert any("private event with no participants" in e for e in errors)
+
+
 def test_an_occurrence_at_or_before_the_cutoff_is_refused() -> None:
     """The simulation cannot re-perform history: a t0 occurrence that records the
     resolving event let a branch resolve YES off a re-enactment nobody produced."""
