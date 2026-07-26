@@ -187,8 +187,7 @@ def _no_causal_producer(exc: WorldIntegrityError, subject: str) -> RepairPlan:
             "quotation. If throughput or administration produces it, compile "
             "external_processes and operational process nodes instead. What you may not "
             "do is compile an empty world, and what you may never do is invent a person "
-            "who 'decides' a quantity that is really produced by operations."
-            + _ALREADY_OR_OPEN
+            "who 'decides' a quantity that is really produced by operations." + _ALREADY_OR_OPEN
         ),
     )
 
@@ -353,8 +352,7 @@ def _environment_presets_terminal(exc: WorldIntegrityError, subject: str) -> Rep
             "actor influences, so the answer is decided before anyone acts. Remove that "
             "effect. Model instead what the actors do that produces the outcome, and let "
             "the process node record or tally the result of their actions — gate it on a "
-            "field their actions write, rather than asserting the value itself."
-            + _ALREADY_OR_OPEN
+            "field their actions write, rather than asserting the value itself." + _ALREADY_OR_OPEN
         ),
     )
 
@@ -392,8 +390,7 @@ def _nothing_can_act(exc: WorldIntegrityError, subject: str) -> RepairPlan:
                 "public statement is the question, an action whose effect sets the field "
                 "the terminal reads; for a body that decides, an action that records its "
                 "decision. The action's effect must write, by name, a term the terminal "
-                "reads, or it is a name and not a mechanism."
-                + _ALREADY_OR_OPEN
+                "reads, or it is a name and not a mechanism." + _ALREADY_OR_OPEN
             ),
         )
     return RepairPlan(
@@ -410,8 +407,7 @@ def _nothing_can_act(exc: WorldIntegrityError, subject: str) -> RepairPlan:
             "If you emptied the world to satisfy an earlier refusal, that was the wrong "
             "move: an actor the evidence cannot ground should become an uncertainty or "
             "an entity a process carries, not a deletion. Keep whoever the evidence does "
-            "establish and give them the actions their office lets them take."
-            + _ALREADY_OR_OPEN
+            "establish and give them the actions their office lets them take." + _ALREADY_OR_OPEN
         ),
     )
 
@@ -509,8 +505,7 @@ def _terminal_reads_no_world_state(exc: WorldIntegrityError, subject: str) -> Re
             "actually contains: a field an action sets, a collection actions append to, "
             "a document an action creates, a resource a transfer moves, an event type "
             "actions emit, or the process stage. Then make sure something in the world "
-            "actually writes whatever you chose."
-            + _ALREADY_OR_OPEN
+            "actually writes whatever you chose." + _ALREADY_OR_OPEN
         ),
     )
 
@@ -535,9 +530,7 @@ def _uncertainty_writes_terminal(exc: WorldIntegrityError, subject: str) -> Repa
     )
 
 
-def _terminal_preresolved_without_evidence(
-    exc: WorldIntegrityError, subject: str
-) -> RepairPlan:
+def _terminal_preresolved_without_evidence(exc: WorldIntegrityError, subject: str) -> RepairPlan:
     uncited = _strings(exc.details.get("uncited terminal terms"))
     return RepairPlan(
         failure="terminal_preresolved_without_evidence",
@@ -549,8 +542,7 @@ def _terminal_preresolved_without_evidence(
         instruction=(
             f"Your world's initial values already satisfy the terminal — {uncited} starts "
             "at the answer — and nothing cited establishes that. The simulation would "
-            "take credit for an outcome you asserted."
-            + _ALREADY_OR_OPEN
+            "take credit for an outcome you asserted." + _ALREADY_OR_OPEN
         ),
     )
 

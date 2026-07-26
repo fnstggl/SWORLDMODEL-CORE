@@ -138,7 +138,9 @@ class SymbolTable:
 def build_symbols(plan: SemanticPlan) -> SymbolTable:
     t = SymbolTable()
     for e in plan.entities:
-        t.mint("entity", e.name, rule="entity → entities[].entity_id", evidence=e.evidence_claim_ids)
+        t.mint(
+            "entity", e.name, rule="entity → entities[].entity_id", evidence=e.evidence_claim_ids
+        )
     for s in plan.states:
         t.mint("field", s.name, rule="state → fields[].field_id", evidence=s.evidence_claim_ids)
     for ev in plan.events:
@@ -149,7 +151,9 @@ def build_symbols(plan: SemanticPlan) -> SymbolTable:
             evidence=ev.evidence_claim_ids,
         )
     for a in plan.affordances:
-        t.mint("action", a.name, rule="affordance → actions[].action_id", evidence=a.evidence_claim_ids)
+        t.mint(
+            "action", a.name, rule="affordance → actions[].action_id", evidence=a.evidence_claim_ids
+        )
         t.mint(
             "authority",
             a.name,
@@ -238,7 +242,11 @@ def _lower_change(c: SemanticChange, t: SymbolTable, plan: SemanticPlan) -> list
     if c.op == "set":
         assert c.value is not None  # validator guarantees
         return [
-            {"op": "set_field", "field": t.resolve("field", c.target), "value": _lower_value(c.value, t)}
+            {
+                "op": "set_field",
+                "field": t.resolve("field", c.target),
+                "value": _lower_value(c.value, t),
+            }
         ]
     if c.op in ("increase", "decrease"):
         assert c.amount is not None
@@ -275,9 +283,7 @@ def _lower_change(c: SemanticChange, t: SymbolTable, plan: SemanticPlan) -> list
             "data": data,
         }
         if ev.participants:
-            data["participants"] = {
-                role: t.resolve("entity", who) for role, who in ev.participants
-            }
+            data["participants"] = {role: t.resolve("entity", who) for role, who in ev.participants}
             # The runtime's audience resolver reads only the effect's "to"/"audience"
             # keys — participants riding in the payload are invisible to delivery. A
             # private event whose participants lived only in `data` had an empty
@@ -289,7 +295,12 @@ def _lower_change(c: SemanticChange, t: SymbolTable, plan: SemanticPlan) -> list
             data["information_created"] = ev.information_created
         return [
             create,
-            {"op": "append_record", "collection": sym, "key": "$actor", "value": c.detail or ev.meaning},
+            {
+                "op": "append_record",
+                "collection": sym,
+                "key": "$actor",
+                "value": c.detail or ev.meaning,
+            },
         ]
     if c.op == "send":
         return [
@@ -353,8 +364,7 @@ def _lookup(table: dict[str, str], key: Any, what: str) -> str:
         return table[key]
     raise LoweringGap(
         f"{what} {key!r}",
-        why=f"no universal mapping exists for this {what}; the legal values are "
-        f"{sorted(table)}",
+        why=f"no universal mapping exists for this {what}; the legal values are {sorted(table)}",
         composable=False,
         smallest_missing=f"a universal runtime meaning for {what} {key!r}",
     )
@@ -510,8 +520,7 @@ def _wake_rules(plan: SemanticPlan, t: SymbolTable) -> list[dict[str, Any]]:
                 reason=f"{inp!r} is an input to {p.name!r}: {p.meaning}",
                 trigger_key="on_field_change",
                 trigger=t.resolve("field", inp),
-                rule="process input → wake_rules[].on_field_change waking every "
-                "deciding entity",
+                rule="process input → wake_rules[].on_field_change waking every deciding entity",
                 evidence=p.evidence_claim_ids,
                 dropped_why="no deciding entity exists to wake when this input changes",
             )
@@ -545,8 +554,7 @@ def _wake_rules(plan: SemanticPlan, t: SymbolTable) -> list[dict[str, Any]]:
             reason=f"the terminal counts records of {name!r}: {meaning}",
             trigger_key="on_record_in",
             trigger=t.resolve("event", name),
-            rule="terminal-counted event → wake_rules[].on_record_in waking every "
-            "deciding entity",
+            rule="terminal-counted event → wake_rules[].on_record_in waking every deciding entity",
             evidence=evidence,
             dropped_why="no deciding entity exists to wake when this record is appended",
         )
@@ -571,9 +579,7 @@ def lower_plan(
 
     entities: list[dict[str, Any]] = []
     for e in plan.entities:
-        auth = sorted(
-            t.resolve("authority", a.name) for a in plan.affordances if a.actor == e.name
-        )
+        auth = sorted(t.resolve("authority", a.name) for a in plan.affordances if a.actor == e.name)
         attributes: dict[str, Any] = {}
         if e.authority:
             # The minted tokens are what the executor checks; the ordinary-language
@@ -687,8 +693,7 @@ def lower_plan(
             for o in p.occurrences:
                 if o.after_process is not None:
                     raise LoweringGap(
-                        f"actor_moment {p.name!r} occurrence chained on "
-                        f"{o.after_process!r}",
+                        f"actor_moment {p.name!r} occurrence chained on {o.after_process!r}",
                         why="an actor moment is one dated occasion; a dependent "
                         "occurrence inside it has no universal meaning yet",
                         composable=True,
@@ -912,8 +917,7 @@ def lower_plan(
                     "key": t.mint(
                         "reality_fact",
                         f"initial {s.name}",
-                        rule="citation-established initial state → "
-                        "required_reality_facts[].key",
+                        rule="citation-established initial state → required_reality_facts[].key",
                         evidence=s.evidence_claim_ids,
                     ),
                     "description": f"initial value of {s.name} is {s.initial!r}, "

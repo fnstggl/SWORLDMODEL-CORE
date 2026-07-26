@@ -239,8 +239,7 @@ def observatory_plan() -> dict:
 
     return {
         "resolution": {
-            "question": "Will the observatory log more than 400 clear-sky hours this "
-            "quarter?",
+            "question": "Will the observatory log more than 400 clear-sky hours this quarter?",
             "yes_condition": "Logged clear-sky hours exceed 400 at quarter end.",
             "subject_entity": "Mount Aster Observatory",
             "resolution_units": "clear-sky hours",
@@ -457,9 +456,7 @@ def test_a_bare_copy_of_an_uncertain_state_is_refused_at_the_semantic_level() ->
 
 def test_unsupported_meaning_returns_a_named_lowering_gap() -> None:
     data = harbor_plan()
-    data["affordances"][0]["changes"].append(
-        {"op": "schedule", "target": "harbor board session"}
-    )
+    data["affordances"][0]["changes"].append({"op": "schedule", "target": "harbor board session"})
     plan = parse_semantic_plan(data)
     with pytest.raises(LoweringGap) as exc:
         lower_plan(plan)
@@ -921,9 +918,7 @@ def test_wake_rules_are_derived_so_the_world_is_not_inert_between_moments() -> N
                 {
                     "description": "weekly ledger update",
                     "at": "2026-01-20T00:00:00+00:00",
-                    "changes": [
-                        {"op": "increase", "target": "queued night arrivals", "amount": 2}
-                    ],
+                    "changes": [{"op": "increase", "target": "queued night arrivals", "amount": 2}],
                 }
             ],
             "evidence_claim_ids": ["c-r1"],
@@ -987,12 +982,7 @@ def test_a_private_event_reaches_its_own_participants() -> None:
     spec = compilation["world_spec"]
     id_by_name = {e["name"]: e["entity_id"] for e in spec["entities"]}
     both = {id_by_name["Harbormaster of Port Solent"], id_by_name["Night pilots guild"]}
-    creates = [
-        eff
-        for a in spec["actions"]
-        for eff in a["effects"]
-        if eff["op"] == "create_event"
-    ]
+    creates = [eff for a in spec["actions"] for eff in a["effects"] if eff["op"] == "create_event"]
     assert creates
     for eff in creates:
         assert set(eff["to"]) == both, "a private event's participants are its audience"
@@ -1101,9 +1091,7 @@ def test_no_validated_field_vanishes_without_lowering_or_a_dropped_record() -> N
     comp2, mapping2 = lower_plan(parse_semantic_plan(data2))
     nodes = {n["node_id"]: n for n in comp2["world_spec"]["process"]["nodes"]}
     assert nodes["february_observing_runs"]["deadline"] == "2026-02-27T00:00:00+00:00"
-    assert not any(
-        r["namespace"] == "dropped" and "deadline" in r["semantic"] for r in mapping2
-    )
+    assert not any(r["namespace"] == "dropped" and "deadline" in r["semantic"] for r in mapping2)
 
 
 def test_must_refuse_false_gaps_skip_the_revision_round(

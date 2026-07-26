@@ -352,7 +352,10 @@ def _terminal(obj: Any, where: str, errors: list[str]) -> TerminalQuery:
         errors.append(f"{where}: unknown terminal form {form!r} (forms: {list(TERMINAL_FORMS)})")
         return bad
     if form in ("all_of", "any_of", "not"):
-        parts = [_terminal(p, f"{where}.parts[{i}]", errors) for i, p in enumerate(obj.get("parts") or [])]
+        parts = [
+            _terminal(p, f"{where}.parts[{i}]", errors)
+            for i, p in enumerate(obj.get("parts") or [])
+        ]
         need = 1 if form == "not" else 2
         if len(parts) < need:
             errors.append(f"{where}: {form} needs at least {need} part(s)")
@@ -392,7 +395,9 @@ def parse_semantic_plan(data: dict[str, Any]) -> SemanticPlan:
         if st not in STRUCTURAL_TYPES:
             errors.append(f"{w}: structural_type {st!r} not in {list(STRUCTURAL_TYPES)}")
         if scale not in REPRESENTATION_SCALES:
-            errors.append(f"{w}: representation_scale {scale!r} not in {list(REPRESENTATION_SCALES)}")
+            errors.append(
+                f"{w}: representation_scale {scale!r} not in {list(REPRESENTATION_SCALES)}"
+            )
         rc = e.get("represents_count")
         entities.append(
             SemanticEntity(
@@ -947,6 +952,7 @@ def validate_semantic_plan(
                 "branch weights would be the answer. Put the uncertainty on a driver "
                 "and let the world produce the resolving state"
             )
+
         # The launder, at the semantic level: a producer whose value for the terminal
         # state reads nothing but uncertainty draws. A bare copy is the one-hop form; a
         # product of two draws is the same defect in arithmetic clothing — a live Tesla
