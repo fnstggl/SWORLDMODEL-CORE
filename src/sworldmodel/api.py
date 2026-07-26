@@ -48,6 +48,7 @@ from .structures import (
 )
 from .tracing import TraceContext
 from .trajectory_audit import audit_trajectory
+from .uncertainty import UNGROUNDED_PROVENANCES
 from .world_compiler import compile_world, compile_world_spec_live, render_evidence
 from .world_review import review_world
 
@@ -483,12 +484,49 @@ def _compile_alternative(
     return alt_bundle, compiled
 
 
-def _merge(results: list[tuple[float, str, RunResult]]) -> RunResult:
+def _structure_weight_grounded(assessment: StructuralAssessment, structure_id: str) -> bool:
+    """Whether the *structural* weight scaling this structure's branches is anchored in
+    an identified distribution.
+
+    Structure weights come from the assess_structure call and are epistemic: an
+    alternative labeled symmetric-ignorance (or left unlabeled, which falls back to it)
+    is a guess about WHICH WORLD WE ARE IN, not a measured probability. Multiplying
+    such a weight into a branch makes the branch's mass a guess too. The primary's own
+    weight is the complement of the alternatives' (plus any undescribed mass), so it is
+    grounded only when every part of that complement is.
+    """
+
+    if not assessment.is_material:
+        return True
+    for alt in assessment.alternatives:
+        if alt.structure_id == structure_id:
+            return alt.provenance not in UNGROUNDED_PROVENANCES
+    # The primary structure: its weight is 1 minus everything else.
+    return assessment.undescribed_mass <= 0 and all(
+        a.provenance not in UNGROUNDED_PROVENANCES for a in assessment.alternatives
+    )
+
+
+# The key under which an ungrounded structure choice enters a branch's key_conditions,
+# so it surfaces in the aggregate's ungrounded_variables like any other arbitrary split.
+_STRUCTURE_CONDITION = "causal_structure"
+
+
+def _merge(results: list[tuple[float, str, bool, RunResult]]) -> RunResult:
     """Combine per-structure runs into one trajectory set.
 
     Every branch weight is scaled by the weight of the structure it happened in, and
     branch ids are namespaced by structure, so the branch table the report prints still
     reconstructs the probability by hand.
+
+    Each entry carries whether its structural weight is grounded. When it is not, every
+    scaled branch is marked weight_grounded=False and the structure choice is added to
+    its key_conditions: an unevidenced split over which causal structure decides the
+    question must reach the forecast-integrity machinery exactly as an unevidenced
+    split over a value would — widening the bounds and, when the structures disagree,
+    withdrawing the point estimate's calibration claim. Without this, a 0.6/0.4 guess
+    about which world we are in multiplied branch mass while weights_grounded_all
+    stayed True and the bounds collapsed onto the point.
     """
 
     outcomes: list[Any] = []
@@ -500,10 +538,18 @@ def _merge(results: list[tuple[float, str, RunResult]]) -> RunResult:
     truncated = 0.0
     reasons: list[str] = []
 
-    for weight, structure_id, res in results:
+    for weight, structure_id, structurally_grounded, res in results:
         prefix = f"{structure_id}/"
         for b in res.branch_outcomes:
-            outcomes.append(replace(b, branch_id=prefix + b.branch_id, weight=b.weight * weight))
+            scaled = replace(b, branch_id=prefix + b.branch_id, weight=b.weight * weight)
+            if not structurally_grounded:
+                scaled = replace(
+                    scaled,
+                    weight_grounded=False,
+                    key_conditions=scaled.key_conditions
+                    + ((_STRUCTURE_CONDITION, structure_id),),
+                )
+            outcomes.append(scaled)
         for s in res.trajectory_summaries:
             summaries.append(replace(s, branch_id=prefix + s.branch_id, weight=s.weight * weight))
         ledger.extend(res.event_ledger)
@@ -700,10 +746,11 @@ def run_forecast(
         evidence_render=render_evidence(bundle.evidence_store.view(as_of)),
     )
 
-    runs: list[tuple[float, str, RunResult]] = [
+    runs: list[tuple[float, str, bool, RunResult]] = [
         (
             assessment.primary_weight,
             compiled.spec.structure_id,
+            _structure_weight_grounded(assessment, compiled.spec.structure_id),
             run(compiled, config.gateway, seed=config.seed, budget=config.budget),
         )
     ]
@@ -720,6 +767,7 @@ def run_forecast(
             (
                 alt.weight,
                 alt.structure_id,
+                _structure_weight_grounded(assessment, alt.structure_id),
                 run(alt_compiled, config.gateway, seed=config.seed, budget=config.budget),
             )
         )
