@@ -26,15 +26,18 @@ from .gateway import GatewayRequest, ModelGateway
 from .ids import prompt_hash
 from .semantic_lowering import LoweringGap, lower_plan
 from .semantic_plan import (
+    ALTERNATIVE_CHANGE_KINDS,
     COMPARISONS,
     PROCESS_KINDS,
     REPRESENTATION_SCALES,
     STATE_TYPES,
     STRUCTURAL_TYPES,
     TERMINAL_FORMS,
+    TERMINAL_SENSITIVITIES,
     WEIGHT_PROVENANCES,
     SemanticPlan,
     SemanticPlanError,
+    defects_in,
     parse_semantic_plan,
     validate_semantic_plan,
 )
@@ -62,6 +65,18 @@ SEMANTIC_SCHEMA = f"""Return a SINGLE JSON object with exactly these keys:
    "decides": <true if its own decisions can move the outcome>,
    "authority": "<what it may do, in ordinary language>",
    "why_material": "<why it could change the answer>",
+   "terminal_state_it_can_change": "<which state the terminal reads, or is computed
+     from, this entity can move — and through what act or mechanism>",
+   "information_received": "<what this entity learns during the window, through which
+     declared events, releases or messages>",
+   "if_removed": "<what the world loses, and how the answer could differ, if this
+     entity were deleted>",
+   "evidence_claim_ids": ["..."]
+ }}],
+ "excluded_candidates": [{{
+   "name": "<a person, organization, population or process the evidence names that you
+     deliberately did NOT put in the world>",
+   "why_immaterial": "<why its removal cannot materially change the answer>",
    "evidence_claim_ids": ["..."]
  }}],
  "states": [{{
@@ -123,7 +138,12 @@ SEMANTIC_SCHEMA = f"""Return a SINGLE JSON object with exactly these keys:
      "weight": <float or null — null when nothing supports a split>,
      "provenance": "<one of {list(WEIGHT_PROVENANCES)}>",
      "grounding": "<what supports this alternative>",
-     "evidence_claim_ids": ["..."]
+     "meaning": "<what is true about the world if this alternative holds>",
+     "why_unresolved": "<why the record does not settle whether it holds>",
+     "changes": [<one or more of {list(ALTERNATIVE_CHANGE_KINDS)} — what differs under
+       it: the world's structure, an actor's state, or a process's state>],
+     "terminal_sensitivity": "<one of {list(TERMINAL_SENSITIVITIES)}>",
+     "evidence_claim_ids": ["<the claims that establish this as a real possibility>"]
    }}]
  }}],
  "terminal": {{
@@ -139,6 +159,19 @@ SEMANTIC_SCHEMA = f"""Return a SINGLE JSON object with exactly these keys:
  "terminal_producer_note": "<what produces the resolving state, through which causal
    path, and why initialization or an uncertainty draw does not already write the
    answer>",
+ "zero_actor_justification": {{
+   "no_material_decision": "<REQUIRED ONLY when no entity has decides=true: which human
+     or population decisions could bear on this outcome, and why the record shows none
+     of them can move it inside the window>",
+   "process_sufficiency": "<why the non-agent process alone is causally sufficient>",
+   "evidence_claim_ids": ["<the claims that establish both>"]
+ }},
+ "single_multiplier_exemption": {{
+   "empirical_model": "<REQUIRED ONLY when one multiplier genuinely stands for a whole
+     operating system: the documented empirical model that licenses it>",
+   "parameter_uncertainty": "<how the parameter's uncertainty is grounded>",
+   "evidence_claim_ids": ["<the claims documenting the model>"]
+ }},
  "world_facts": [{{"text": "...", "evidence_claim_ids": ["..."]}}]
 }}
 
@@ -173,6 +206,21 @@ CONSISTENCY REQUIREMENTS (checked mechanically; a violation costs a revision rou
 - every occurrence and every actor_moment is dated STRICTLY AFTER the cutoff:
   anything already done by the cutoff is a cited initial state value or a world_facts
   entry, never a simulated occurrence — the simulation cannot re-perform history;
+- every entity answers all five representation questions (why_material,
+  terminal_state_it_can_change, information_received, authority, if_removed), and every
+  candidate you deliberately left out is listed in excluded_candidates with why its
+  removal cannot matter;
+- every uncertainty alternative states meaning, why_unresolved, changes and
+  terminal_sensitivity — an alternative that cannot say what it means is filler, and an
+  alternative that decides the terminal while citing nothing is refused;
+- a terminal quantity may not be produced by a single non-agent change reading only
+  inputs nothing else in the world produces (one set / one multiplier is a reported
+  figure, not a process) unless single_multiplier_exemption is declared and cited;
+- alternatives of one uncertainty may not land on opposite sides of the terminal
+  threshold unless their VALUES are grounded in cited evidence: two invented numbers
+  either side of the break-even ARE the answer, and the plan is refused;
+- a world with no deciding entity needs zero_actor_justification with citations, and
+  every deciding entity needs a path by which its decisions reach the terminal;
 - every causally material item the EVIDENCE contains must appear somewhere in the plan:
   as an entity, a state, a process, an uncertainty — or, when it is verified context
   that shapes the world without being part of the mechanism, as a world_facts entry
@@ -185,12 +233,23 @@ WHO COULD CHANGE THE ANSWER, NOT ONLY WHO PERFORMS THE FINAL ACT. Ask of every m
 party: absent from the world, could the answer differ? Include exactly those, at the
 representation scale that is causally faithful, with represents_count when one object
 stands for many real members. Never turn independent decision-makers into one actor,
-and never expand an aggregate that genuinely decides as one unit.
+and never expand an aggregate that genuinely decides as one unit. For each one you
+include, answer the five representation questions in its fields; for each one you leave
+out, say in excluded_candidates why removing it cannot change the answer. A world with
+NO deciding entity is legitimate only when the evidence shows no material human or
+population decision can move this outcome and the non-agent process is sufficient on its
+own — say that, with citations, in zero_actor_justification. An entity whose decisions
+cannot reach anything the terminal reads is decoration: give it its real causal path or
+leave it out.
 
 PRODUCTION, NOT REPORTING. A reported figure is produced by operations — throughput,
 demand, constraints — not by the report. Model the producing mechanism as operational
 processes whose occurrences increase the quantity across the window, with uncertainty
-on the drivers (rate, demand, disruption), never on the total itself.
+on the drivers (rate, demand, disruption), never on the total itself. One final
+set-the-total, or one cited base times one invented factor, is a forecast wearing a
+world's clothes: it has no intermediate state, spans no time, and its answer is decided
+by the factor you chose. Give the quantity grounded inputs, at least one intermediate
+state the mechanism updates, and occurrences across the real causal period.
 
 ALREADY SETTLED vs STILL OPEN. If verified claims available at the cutoff establish
 that the outcome has already happened, say so: give the resolving state its established
@@ -203,6 +262,11 @@ the actors — incoming data, demand, a release, an interpretation. It never set
 state the terminal reads, and no affordance or process may set the terminal state to a
 bare copy of an uncertain state. Weights need grounding; when nothing supports a split,
 set weight null with provenance symmetric_ignorance_assumption — never invent 50/50.
+Every alternative must say what it MEANS, why the record leaves it open, what it changes
+and how the terminal responds under it: an alternative you cannot describe is filler
+carrying mass it has not earned. Above all, never place invented numbers either side of
+the threshold the question turns on — if the values are not in the record, the answer
+would be your choice of numbers rather than anything the world does.
 
 EVERY NUMBER NEEDS A SOURCE. A precise initial quantity cites claim ids or is UNKNOWN.
 UNKNOWN stays UNKNOWN — the runtime treats reading it as honestly unresolved.
@@ -276,7 +340,13 @@ _REVIEW_CHECKLIST = """Check, against the evidence only:
    cited established initial value)?
 10. Does an uncertainty or an initial value already determine the answer?
 11. Is the evidence sufficient for this world at all?
-12. Is the world causally complete without unnecessary breadth?"""
+12. Is the world causally complete without unnecessary breadth?
+13. Does each included entity's representation record hold up — can it really alter the
+    terminal-relevant state it claims, does it really receive that information, and
+    would removing it really change what it says it would?
+14. Is any excluded candidate's "why_immaterial" actually false on this evidence?
+15. Does any uncertainty alternative carry mass without carrying meaning — a filler
+    value, a residual label, a value the record never names?"""
 
 
 def _review_prompt(
@@ -506,6 +576,9 @@ def semantic_compile_live(
                 "failure": "semantic_plan_invalid",
                 "recompilable": True,
                 "semantic_errors": errors,
+                # Which named causal-world defects fired, so a refused run is readable
+                # without parsing prose and a reviewer can see the rule by name.
+                "semantic_defects": defects_in(errors),
             },
         )
 
@@ -543,6 +616,7 @@ def semantic_compile_live(
                     "failure": "semantic_plan_invalid",
                     "recompilable": True,
                     "semantic_errors": errors,
+                    "semantic_defects": defects_in(errors),
                     "review_reasons": reasons,
                 },
             )
@@ -591,6 +665,7 @@ def semantic_compile_live(
                     "failure": "semantic_plan_invalid",
                     "recompilable": True,
                     "semantic_errors": errors,
+                    "semantic_defects": defects_in(errors),
                 },
             ) from gap
         compilation, mapping = lower_guarded(plan)

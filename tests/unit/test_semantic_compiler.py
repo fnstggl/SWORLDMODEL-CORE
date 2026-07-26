@@ -51,6 +51,20 @@ def harbor_plan() -> dict:
                 "decides": True,
                 "authority": "may authorize or refuse night docking",
                 "why_material": "the outcome is their own public act",
+                "terminal_state_it_can_change": "records the authorization event the "
+                "terminal counts",
+                "information_received": "the harbor board's dated session and what is said there",
+                "if_removed": "nobody can authorize night docking and the question "
+                "cannot resolve YES at all",
+                "evidence_claim_ids": ["c-r1"],
+            }
+        ],
+        "excluded_candidates": [
+            {
+                "name": "Port Solent pilots' association",
+                "why_immaterial": "it may advise on night docking but holds no authority "
+                "to authorize it, so removing it cannot change whether the "
+                "authorization is issued",
                 "evidence_claim_ids": ["c-r1"],
             }
         ],
@@ -145,6 +159,10 @@ def council_plan() -> dict:
                 "decides": True,
                 "authority": "casts one vote",
                 "why_material": "one of nine votes",
+                "terminal_state_it_can_change": "appends an adoption vote to the record "
+                "the terminal counts",
+                "information_received": "the dated session and the votes cast in it",
+                "if_removed": "one of the five votes needed becomes unavailable",
                 "evidence_claim_ids": ["c-c1"],
             },
             {
@@ -155,6 +173,10 @@ def council_plan() -> dict:
                 "decides": True,
                 "authority": "casts one vote",
                 "why_material": "one of nine votes",
+                "terminal_state_it_can_change": "appends an adoption vote to the record "
+                "the terminal counts",
+                "information_received": "the dated session and the votes cast in it",
+                "if_removed": "one of the five votes needed becomes unavailable",
                 "evidence_claim_ids": ["c-c1"],
             },
             {
@@ -166,6 +188,10 @@ def council_plan() -> dict:
                 "decides": True,
                 "authority": "casts seven bloc votes",
                 "why_material": "seven of nine votes",
+                "terminal_state_it_can_change": "appends its seven bloc votes to the "
+                "record the terminal counts",
+                "information_received": "the dated session and the votes cast in it",
+                "if_removed": "seven of the nine votes vanish and five is unreachable",
                 "evidence_claim_ids": ["c-c2"],
             },
         ],
@@ -234,16 +260,25 @@ def council_plan() -> dict:
 
 
 def observatory_plan() -> dict:
-    """An operational aggregate: the total is produced by accumulation, uncertainty
-    sits on the driver, and the report merely observes."""
+    """An operational aggregate: the total is produced by accumulation across the real
+    period, the uncertainty sits on the driver with its values anchored in the record,
+    and nobody's decision can move the weather.
+
+    This is the shape the causal-world gates are meant to ADMIT, so it carries every
+    thing they demand: two dated accumulations rather than one final figure, a cited
+    anchor and a cited driver range, and the D5 justification for a world in which no
+    human decision is material. The driver still decides the answer — that is what makes
+    it a forecast — but its values are the record's, not the planner's, so the run
+    reports honest bounds instead of being refused.
+    """
 
     return {
         "resolution": {
-            "question": "Will the observatory log more than 400 clear-sky hours this quarter?",
-            "yes_condition": "Logged clear-sky hours exceed 400 at quarter end.",
+            "question": "Will the observatory log more than 500 clear-sky hours this quarter?",
+            "yes_condition": "Logged clear-sky hours exceed 500 at quarter end.",
             "subject_entity": "Mount Aster Observatory",
             "resolution_units": "clear-sky hours",
-            "target_outcome": "more than 400 clear-sky hours logged",
+            "target_outcome": "more than 500 clear-sky hours logged",
             "expected_participants": None,
             "evidence_claim_ids": ["c-o1"],
         },
@@ -256,9 +291,29 @@ def observatory_plan() -> dict:
                 "decides": False,
                 "authority": "maintains the official log",
                 "why_material": "its log is the resolution source",
+                "terminal_state_it_can_change": "its instruments and schedule produce the "
+                "logged clear-sky hours the terminal reads",
+                "information_received": "nightly sky conditions from its own instruments",
+                "if_removed": "no log exists and no hours are recorded at all",
                 "evidence_claim_ids": ["c-o1"],
             }
         ],
+        "excluded_candidates": [
+            {
+                "name": "visiting research teams",
+                "why_immaterial": "they book time on the instruments but do not decide "
+                "how many hours are clear, which is what the log counts",
+                "evidence_claim_ids": ["c-o1"],
+            }
+        ],
+        "zero_actor_justification": {
+            "no_material_decision": "clear-sky hours are produced by weather over a fixed "
+            "published observing schedule; the record shows no person or body can add or "
+            "remove clear hours inside the window",
+            "process_sufficiency": "the scheduled observing runs and the realised clear "
+            "fraction fully determine the logged total",
+            "evidence_claim_ids": ["c-o1", "c-o2"],
+        },
         "states": [
             {
                 "name": "logged clear-sky hours",
@@ -268,6 +323,15 @@ def observatory_plan() -> dict:
                 "initial": 210,
                 "why_material": "the terminal reads it",
                 "evidence_claim_ids": ["c-o1"],
+            },
+            {
+                "name": "january remaining observing hours",
+                "owner": "world",
+                "state_type": "quantity",
+                "unit": "hours",
+                "initial": 120,
+                "why_material": "January's scheduled nights still to run add to the total",
+                "evidence_claim_ids": ["c-o2"],
             },
             {
                 "name": "february clear fraction",
@@ -284,10 +348,24 @@ def observatory_plan() -> dict:
         "processes": [
             {
                 "name": "february observing runs",
-                "meaning": "February nights add clear-sky hours at the realised rate",
+                "meaning": "the scheduled nights add clear-sky hours at the realised rate",
                 "kind": "operational",
                 "inputs": ["february clear fraction"],
                 "occurrences": [
+                    {
+                        "description": "January's remaining scheduled nights",
+                        "at": "2026-01-31T23:00:00+00:00",
+                        "changes": [
+                            {
+                                "op": "increase",
+                                "target": "logged clear-sky hours",
+                                "amount": {
+                                    "kind": "state",
+                                    "state": "january remaining observing hours",
+                                },
+                            }
+                        ],
+                    },
                     {
                         "description": "February's accumulation",
                         "at": "2026-02-28T23:00:00+00:00",
@@ -304,7 +382,7 @@ def observatory_plan() -> dict:
                                 },
                             }
                         ],
-                    }
+                    },
                 ],
                 "evidence_claim_ids": ["c-o2"],
             }
@@ -321,13 +399,25 @@ def observatory_plan() -> dict:
                         "value": 0.9,
                         "weight": None,
                         "provenance": "symmetric_ignorance_assumption",
-                        "grounding": "clear winter scenario",
+                        "grounding": "the cited climatology's clear-winter decile",
+                        "meaning": "February runs at the clear end of the recorded range",
+                        "why_unresolved": "the month has not happened and no forecast in "
+                        "the record picks between the deciles",
+                        "changes": ["process_state"],
+                        "terminal_sensitivity": "decides_the_terminal",
+                        "evidence_claim_ids": ["c-o3"],
                     },
                     {
                         "value": 0.5,
                         "weight": None,
                         "provenance": "symmetric_ignorance_assumption",
-                        "grounding": "cloudy winter scenario",
+                        "grounding": "the cited climatology's cloudy-winter decile",
+                        "meaning": "February runs at the cloudy end of the recorded range",
+                        "why_unresolved": "the month has not happened and no forecast in "
+                        "the record picks between the deciles",
+                        "changes": ["process_state"],
+                        "terminal_sensitivity": "decides_the_terminal",
+                        "evidence_claim_ids": ["c-o3"],
                     },
                 ],
             }
@@ -336,11 +426,11 @@ def observatory_plan() -> dict:
             "form": "quantity_comparison",
             "state": "logged clear-sky hours",
             "comparison": "greater_than",
-            "threshold": 400,
+            "threshold": 500,
         },
-        "terminal_producer_note": "The total starts at the cited 210 and is produced by "
-        "the February accumulation at an uncertain rate; the uncertainty drives the "
-        "rate, never the total.",
+        "terminal_producer_note": "The total starts at the cited 210, is advanced by "
+        "January's scheduled nights, and then by February's accumulation at the realised "
+        "rate; the uncertainty drives the rate, never the total.",
         "world_facts": [],
     }
 
@@ -351,8 +441,42 @@ def _valid(data: dict) -> list[str]:
         plan,
         as_of=AS_OF,
         horizon=HORIZON,
-        known_claim_ids=frozenset({"c-r1", "c-c1", "c-c2", "c-o1", "c-o2"}),
+        known_claim_ids=frozenset({"c-r1", "c-c1", "c-c2", "c-o1", "c-o2", "c-o3"}),
     )
+
+
+def complete_record(plan: dict) -> dict:
+    """Fill the CWF-1 representation fields (and the D5 zero-actor claim) on a fixture
+    whose subject is something else.
+
+    The fields are enforced for real in ``tests/unit/test_causal_world_fidelity.py`` and
+    written out longhand in the three domain fixtures above; repeating five sentences
+    per entity inside a test about wake rules or private events would bury what that
+    test is actually about.
+    """
+
+    for entity in plan.get("entities") or []:
+        entity.setdefault("terminal_state_it_can_change", "moves the state the terminal reads")
+        entity.setdefault("information_received", "what the declared events and releases carry")
+        entity.setdefault("if_removed", "the outcome it produces would have no producer")
+    if not any(e.get("decides") for e in plan.get("entities") or []):
+        plan.setdefault(
+            "zero_actor_justification",
+            {
+                "no_material_decision": "the record establishes no human or population "
+                "decision that can move this outcome inside the window",
+                "process_sufficiency": "the declared non-agent process determines the "
+                "outcome on its own",
+                "evidence_claim_ids": sorted(
+                    {
+                        i
+                        for e in plan.get("entities") or []
+                        for i in e.get("evidence_claim_ids") or []
+                    }
+                ),
+            },
+        )
+    return plan
 
 
 def test_three_unseen_domains_validate_and_lower_without_domain_code() -> None:
@@ -764,7 +888,7 @@ def test_a_pure_factual_resolution_lowers_and_clears_the_gates() -> None:
         "window opened; nothing needs to act and nothing does.",
         "world_facts": [],
     }
-    assert _valid_with(plan, {"c-f1"}) == []
+    assert _valid_with(complete_record(plan), {"c-f1"}) == []
     compilation, _ = lower_plan(parse_semantic_plan(plan))
     data = {
         "world_spec": compilation["world_spec"],
@@ -977,7 +1101,7 @@ def test_a_private_event_reaches_its_own_participants() -> None:
         "speaker": "Harbormaster of Port Solent",
         "briefed": "Night pilots guild",
     }
-    assert _valid(data) == []
+    assert _valid(complete_record(data)) == []
     compilation, _ = lower_plan(parse_semantic_plan(data))
     spec = compilation["world_spec"]
     id_by_name = {e["name"]: e["entity_id"] for e in spec["entities"]}

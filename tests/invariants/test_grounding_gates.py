@@ -994,3 +994,226 @@ def test_the_exclusion_reviewer_is_shown_the_question_and_the_settled_record() -
     (open_prompt,) = gw2.prompts
     assert contract.question in open_prompt
     assert "contradict, retract, or invalidate" not in open_prompt
+
+
+# ---------------------------------------------------------------------------
+# Causal-world fidelity: a refusal the loop can act on (Phase 3)
+# ---------------------------------------------------------------------------
+
+
+def _grain_plan(*, factors: tuple[float, float] = (0.7, 1.2)) -> dict:
+    """An invented one-step world: a cited base times one invented factor.
+
+    Deliberately the shape that published a probability made of nothing but two numbers,
+    in a domain no acceptance question touches, so the refusal is proven to be about
+    structure rather than subject.
+    """
+
+    return {
+        "resolution": {
+            "question": "Will the Ostmark grain elevator ship more than 90000 tonnes this quarter?",
+            "yes_condition": "Shipped tonnage exceeds 90000 at quarter end.",
+            "subject_entity": "Ostmark Grain Elevator",
+            "resolution_units": "tonnes shipped",
+            "target_outcome": "more than 90000 tonnes shipped",
+            "expected_participants": None,
+            "evidence_claim_ids": ["g-1"],
+        },
+        "entities": [
+            {
+                "name": "Ostmark Grain Elevator",
+                "structural_type": "institution",
+                "role": "loads and ships the grain",
+                "representation_scale": "organization",
+                "decides": False,
+                "authority": "operates the loading berths",
+                "why_material": "its loadings are what the tally counts",
+                "terminal_state_it_can_change": "its loadings produce the shipped tonnage",
+                "information_received": "its own berth records",
+                "if_removed": "nothing is loaded and nothing ships",
+                "evidence_claim_ids": ["g-1"],
+            }
+        ],
+        "zero_actor_justification": {
+            "no_material_decision": "the shipping schedule is contracted for the quarter "
+            "and the record names no decision that could change it",
+            "process_sufficiency": "the contracted schedule and the realised demand factor "
+            "determine the tonnage",
+            "evidence_claim_ids": ["g-1"],
+        },
+        "states": [
+            {
+                "name": "last quarter tonnage",
+                "owner": "world",
+                "state_type": "quantity",
+                "unit": "tonnes",
+                "initial": 100000,
+                "why_material": "the cited base the tally is scaled from",
+                "evidence_claim_ids": ["g-1"],
+            },
+            {
+                "name": "shipped tonnage",
+                "owner": "world",
+                "state_type": "quantity",
+                "unit": "tonnes",
+                "initial": "UNKNOWN",
+                "why_material": "the terminal reads it",
+                "evidence_claim_ids": [],
+            },
+            {
+                "name": "quarterly shipping factor",
+                "owner": "world",
+                "state_type": "quantity",
+                "unit": "ratio",
+                "initial": "UNKNOWN",
+                "why_material": "scales last quarter's tonnage into this quarter's",
+                "evidence_claim_ids": [],
+            },
+        ],
+        "events": [],
+        "affordances": [],
+        "processes": [
+            {
+                "name": "quarterly shipping tally",
+                "meaning": "the quarter's shipments are totalled",
+                "kind": "operational",
+                "inputs": ["quarterly shipping factor"],
+                "occurrences": [
+                    {
+                        "description": "the tally is computed",
+                        "at": "2026-06-01T00:00:00+00:00",
+                        "changes": [
+                            {
+                                "op": "set",
+                                "target": "shipped tonnage",
+                                "value": {
+                                    "kind": "product",
+                                    "parts": [
+                                        {"kind": "state", "state": "last quarter tonnage"},
+                                        {"kind": "state", "state": "quarterly shipping factor"},
+                                    ],
+                                },
+                            }
+                        ],
+                    }
+                ],
+                "evidence_claim_ids": ["g-1"],
+            }
+        ],
+        "uncertainties": [
+            {
+                "name": "quarterly demand",
+                "what_unknown": "how this quarter's demand compares with last",
+                "why_unknown": "the quarter is not over",
+                "affects_state": "quarterly shipping factor",
+                "release_at": None,
+                "alternatives": [
+                    {
+                        "value": value,
+                        "weight": None,
+                        "provenance": "symmetric_ignorance_assumption",
+                        "grounding": f"demand at {value} of last quarter",
+                        "meaning": f"demand runs at {value} of last quarter",
+                        "why_unresolved": "the quarter is still running",
+                        "changes": ["process_state"],
+                        "terminal_sensitivity": "moves_the_terminal",
+                        "evidence_claim_ids": [],
+                    }
+                    for value in factors
+                ],
+            }
+        ],
+        "terminal": {
+            "form": "quantity_comparison",
+            "state": "shipped tonnage",
+            "comparison": "greater_than",
+            "threshold": 90000,
+        },
+        "terminal_producer_note": "The tally scales the cited base by the demand factor.",
+        "world_facts": [],
+    }
+
+
+def _one_claim_view(cid: str) -> EvidenceView:
+    store = EvidenceStore()
+    store.add(_claim(cid, "the Ostmark grain elevator shipped 100000 tonnes last quarter", ()))
+    return store.view(AS_OF)
+
+
+def test_a_causal_world_refusal_is_recompilable_and_names_its_defect() -> None:
+    """Phase 3's gates refuse at the earliest stage, and the loop can act on it.
+
+    The refusal has to arrive as the pipeline's own recompilable failure, carrying the
+    named defects and the per-error correction boundaries — not as a bare validation
+    error, and not as a dead end. `semantic_plan_invalid` already has a repair plan, so
+    naming the defects inside it is what turns "this world is wrong" into "change these
+    alternatives".
+    """
+
+    from _fakes import ProgrammableGateway
+    from sworldmodel.repair import plan_repair
+    from sworldmodel.semantic_compile import semantic_compile_live
+
+    gw = ProgrammableGateway(
+        {
+            "semantic_plan": _grain_plan(),
+            "semantic_review": {"verdict": "APPROVE", "reasons": [], "corrections": []},
+        }
+    )
+    with pytest.raises(WorldIntegrityError) as exc:
+        semantic_compile_live(gw, "q?", AS_OF, HORIZON, _one_claim_view("g-1"))
+
+    details = exc.value.details
+    assert details["failure"] == "semantic_plan_invalid"
+    assert details["recompilable"] is True
+    assert "THRESHOLD_STRADDLING_UNGROUNDED_SCENARIOS" in details["semantic_defects"]
+    assert "ONE_STEP_OPERATIONAL_WORLD" in details["semantic_defects"]
+    # Every named defect states where the correction belongs, so a revision round is
+    # told what to change and — just as importantly — what not to.
+    for error in details["semantic_errors"]:
+        assert "Correction boundary" in error, error
+
+    plan = plan_repair(exc.value, question="q?", subject_entity="the elevator")
+    assert plan is not None and plan.instruction
+
+    # The planner was given two bounded rounds naming the same defects before refusing.
+    validator_prompts = [
+        r.prompt for r in gw.seen if r.task_kind == "semantic_plan" and "validator:" in r.prompt
+    ]
+    assert len(validator_prompts) == 2
+    assert "THRESHOLD_STRADDLING_UNGROUNDED_SCENARIOS" in validator_prompts[0]
+
+
+def test_the_representation_record_reaches_the_persisted_compilation() -> None:
+    """CWF-1's artifact is carried by the seam that writes compiled_world.json.
+
+    `assemble_bundle` keeps the executed compilation verbatim, and the trace writes it —
+    so a record that survives assembly is a record a reviewer can read beside the world
+    it justifies, rather than one that lived only in the planner's reasoning.
+    """
+
+    from sworldmodel.research import assemble_bundle
+    from sworldmodel.semantic_lowering import lower_plan
+    from sworldmodel.semantic_plan import parse_semantic_plan
+
+    compilation, _ = lower_plan(parse_semantic_plan(_grain_plan()))
+    compilation["reality"] = {
+        "as_of": AS_OF.isoformat(),
+        "horizon": HORIZON.isoformat(),
+        "subject_entity": compilation["subject_entity"],
+        "resolution_units": compilation["resolution_units"],
+        "target_outcome": compilation["target_outcome"],
+    }
+    store = EvidenceStore()
+    store.add(_claim("g-1", "the Ostmark grain elevator shipped 100000 tonnes last quarter", ()))
+
+    bundle = assemble_bundle(store, compilation)
+    record = bundle.executed_compilation["representation_record"]
+    assert record["included"][0]["entity"] == "Ostmark Grain Elevator"
+    assert record["included"][0]["runtime_id"] == "ostmark_grain_elevator"
+    assert record["zero_actor_justification"]["evidence_claim_ids"] == ["g-1"]
+    assert record["terminal_relevant_states"] == [
+        "last quarter tonnage",
+        "quarterly shipping factor",
+        "shipped tonnage",
+    ]

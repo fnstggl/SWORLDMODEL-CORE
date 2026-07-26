@@ -29,6 +29,7 @@ from .semantic_plan import (
     SemanticProcess,
     SemanticValue,
     TerminalQuery,
+    terminal_relevant_states,
 )
 
 
@@ -578,6 +579,68 @@ def _wake_rules(plan: SemanticPlan, t: SymbolTable) -> list[dict[str, Any]]:
     return rules
 
 
+def representation_record(plan: SemanticPlan, t: SymbolTable) -> dict[str, Any]:
+    """The representation-scale record (§7 / CWF-1), as an artifact rather than prose.
+
+    Who is in this world and why, who was left out and why that cannot matter, at what
+    scale each thing is represented, and — where the plan claimed one — the standing
+    exemptions it is relying on. It rides in the compilation, so it lands in
+    ``compiled_world.json`` and can be read beside the world it justifies instead of
+    living only in the planner's reasoning, which nobody keeps.
+
+    Every entry carries the runtime id its semantic name minted, so a reviewer reading
+    the executable can join a compiled entity back to the argument for its existence.
+    """
+
+    relevant = sorted(terminal_relevant_states(plan))
+    included = [
+        {
+            "entity": e.name,
+            "runtime_id": t.resolve("entity", e.name),
+            "structural_type": e.structural_type,
+            "representation_scale": e.representation_scale,
+            "represents_count": e.represents_count,
+            "decides": e.decides,
+            "why_it_can_change_the_answer": e.why_material,
+            "terminal_relevant_state_it_can_alter": e.terminal_state_it_can_change,
+            "information_it_receives": e.information_received,
+            "authority_it_holds": e.authority,
+            "if_removed": e.if_removed,
+            "affordances": sorted(a.name for a in plan.affordances if a.actor == e.name),
+            "evidence_claim_ids": list(e.evidence_claim_ids),
+        }
+        for e in plan.entities
+    ]
+    record: dict[str, Any] = {
+        "terminal_relevant_states": relevant,
+        "included": included,
+        "excluded": [
+            {
+                "candidate": x.name,
+                "why_removal_cannot_change_the_answer": x.why_immaterial,
+                "evidence_claim_ids": list(x.evidence_claim_ids),
+            }
+            for x in plan.excluded_candidates
+        ],
+        "deciding_entities": sorted(e.name for e in plan.entities if e.decides),
+        "zero_actor_justification": None,
+        "single_multiplier_exemption": None,
+    }
+    if plan.zero_actor_claim is not None:
+        record["zero_actor_justification"] = {
+            "no_material_decision": plan.zero_actor_claim.no_material_decision,
+            "process_sufficiency": plan.zero_actor_claim.process_sufficiency,
+            "evidence_claim_ids": list(plan.zero_actor_claim.evidence_claim_ids),
+        }
+    if plan.single_driver_exemption is not None:
+        record["single_multiplier_exemption"] = {
+            "empirical_model": plan.single_driver_exemption.empirical_model,
+            "parameter_uncertainty": plan.single_driver_exemption.parameter_uncertainty,
+            "evidence_claim_ids": list(plan.single_driver_exemption.evidence_claim_ids),
+        }
+    return record
+
+
 def lower_plan(
     plan: SemanticPlan, *, structure_id: str = "primary"
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -964,6 +1027,10 @@ def lower_plan(
         "resolution_units": plan.resolution_units,
         "target_outcome": plan.target_outcome,
         "expected_participants": plan.expected_participants,
+        # A first-class section of the compilation, not a note: it is written with the
+        # executable, so every run's own artifacts carry the argument for who is in its
+        # world and who is not.
+        "representation_record": representation_record(plan, t),
         "world_spec": world_spec,
         "uncertainties": uncertainties,
         "world_facts": [

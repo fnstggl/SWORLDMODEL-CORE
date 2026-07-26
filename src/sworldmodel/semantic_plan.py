@@ -80,6 +80,51 @@ WEIGHT_PROVENANCES = (
     "sensitivity_only_branch",
 )
 
+# The provenances that name no distribution at all. Mirrors
+# ``uncertainty.UNGROUNDED_PROVENANCES`` deliberately in string form: this module has no
+# package imports, so the semantic layer stays readable without dragging the runtime
+# model types into it.
+UNGROUNDED_WEIGHT_PROVENANCES = ("symmetric_ignorance_assumption", "sensitivity_only_branch")
+
+# What an alternative changes about the world. An alternative that changes nothing under
+# any of these headings is a probability sink, not a possibility.
+ALTERNATIVE_CHANGE_KINDS = ("structure", "actor_state", "process_state")
+
+# How the terminal responds if this alternative is the one that holds. A closed
+# vocabulary so the declaration can be checked against the plan's own arithmetic instead
+# of being read as prose.
+TERMINAL_SENSITIVITIES = (
+    "decides_the_terminal",
+    "moves_the_terminal",
+    "immaterial_to_the_terminal",
+)
+
+# The state-writing operations. A change with one of these ops is production; anything
+# else moves information rather than state.
+WRITE_OPS = ("set", "increase", "decrease")
+
+# Every defect this module can refuse by name. A refusal must name its defect so the
+# repair instruction can state the correction boundary, and so a reader of a refused run
+# can tell which rule fired without parsing prose.
+SEMANTIC_DEFECTS = (
+    "THRESHOLD_STRADDLING_UNGROUNDED_SCENARIOS",
+    "ONE_STEP_OPERATIONAL_WORLD",
+    "SINGLE_DRIVER_EXEMPTION_UNGROUNDED",
+    "ZERO_ACTOR_WORLD_UNJUSTIFIED",
+    "ZERO_ACTOR_CLAIM_CONTRADICTED",
+    "DECORATIVE_ACTOR",
+    "REPRESENTATION_RECORD_INCOMPLETE",
+    "UNCERTAINTY_ALTERNATIVE_UNDESCRIBED",
+    "DEGENERATE_FILLER_ALTERNATIVE",
+    "TERMINAL_SENSITIVITY_MISDECLARED",
+)
+
+
+def defects_in(errors: list[str]) -> list[str]:
+    """Which named defects a validation result contains, for the refusal's details."""
+
+    return sorted({d for d in SEMANTIC_DEFECTS if any(e.startswith(d) for e in errors)})
+
 
 class SemanticPlanError(ValueError):
     """A semantic plan that cannot be read or does not hold together.
@@ -129,6 +174,15 @@ class SemanticChange:
 
 @dataclass(frozen=True)
 class SemanticEntity:
+    """One occupant of the world, with the record of why it is represented at all.
+
+    The five representation-scale questions (§7 / CWF-1) are fields rather than prose:
+    why it can change the answer, what terminal-relevant state it can alter, what
+    information it receives, what authority it holds, and what happens if it is removed.
+    A world that cannot answer them for an entity has not decided what that entity is
+    doing there.
+    """
+
     name: str  # canonical real-world name
     structural_type: str
     role: str
@@ -137,6 +191,51 @@ class SemanticEntity:
     authority: str  # ordinary language description of what it may do
     why_material: str  # why it could change the answer
     represents_count: int | None = None
+    evidence_claim_ids: tuple[str, ...] = ()
+    terminal_state_it_can_change: str = ""  # which terminal-relevant state it can move
+    information_received: str = ""  # what this occupant learns, and through what
+    if_removed: str = ""  # what the world loses if it is deleted
+
+
+@dataclass(frozen=True)
+class ExcludedCandidate:
+    """Someone or something the evidence names that the world deliberately leaves out.
+
+    The exclusion half of the representation-scale record: an omission nobody had to
+    justify is indistinguishable from an omission nobody noticed.
+    """
+
+    name: str
+    why_immaterial: str  # why removing it cannot materially change the answer
+    evidence_claim_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class ZeroActorClaim:
+    """The D5 admissibility claim for a world with no deciding entity.
+
+    Both halves are required and both are evidence-bearing: that no material human or
+    population decision can change the answer, and that the non-agent process is
+    causally sufficient on its own.
+    """
+
+    no_material_decision: str
+    process_sufficiency: str
+    evidence_claim_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class SingleDriverExemption:
+    """The D4 exemption a plan must claim explicitly to stand on one multiplier.
+
+    A single multiplier may stand in for a whole operating system only when a documented
+    empirical model says it may, the parameter's uncertainty is grounded, and the
+    threshold-straddling gate is clear. Recording the claim in the plan is the point: a
+    reviewer can see that the exemption was taken, and on what basis.
+    """
+
+    empirical_model: str
+    parameter_uncertainty: str
     evidence_claim_ids: tuple[str, ...] = ()
 
 
@@ -215,11 +314,30 @@ class SemanticProcess:
 
 @dataclass(frozen=True)
 class SemanticAlternative:
+    """One way an unknown could turn out — with what it means, not only what it is.
+
+    A live run's decisive alternative was the filler label ``"other"`` whose own
+    grounding read "No specific alternative in evidence", and it carried half the branch
+    mass and all of the YES mass. An alternative therefore has to say what state of the
+    world it is, why the record does not settle it, what it changes, and how the terminal
+    responds under it. Mass follows meaning; an alternative that cannot state its meaning
+    is not a possibility the world contains.
+    """
+
     value: Any
     provenance: str
     weight: float | None = None  # None with symmetric_ignorance — never invented
     grounding: str = ""  # what supports this alternative
     evidence_claim_ids: tuple[str, ...] = ()
+    meaning: str = ""  # what is true about the world if this alternative holds
+    why_unresolved: str = ""  # why the record does not settle whether it holds
+    changes: tuple[str, ...] = ()  # subset of ALTERNATIVE_CHANGE_KINDS
+    terminal_sensitivity: str = ""  # one of TERMINAL_SENSITIVITIES
+
+    def weight_is_ungrounded(self) -> bool:
+        """True when nothing supports this alternative's probability."""
+
+        return self.weight is None or self.provenance in UNGROUNDED_WEIGHT_PROVENANCES
 
 
 @dataclass(frozen=True)
@@ -264,6 +382,9 @@ class SemanticPlan:
     expected_participants: int | None = None
     resolution_evidence_ids: tuple[str, ...] = ()
     world_facts: tuple[tuple[str, tuple[str, ...]], ...] = ()  # (text, claim ids)
+    excluded_candidates: tuple[ExcludedCandidate, ...] = ()
+    zero_actor_claim: ZeroActorClaim | None = None
+    single_driver_exemption: SingleDriverExemption | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -282,6 +403,12 @@ def _s(d: dict[str, Any], key: str, where: str, errors: list[str], default: str 
 def _ids(d: dict[str, Any], key: str = "evidence_claim_ids") -> tuple[str, ...]:
     v = d.get(key) or []
     return tuple(str(x) for x in v) if isinstance(v, list) else ()
+
+
+def _any_content(d: dict[str, Any]) -> bool:
+    """Whether an optional block was actually filled in, or merely echoed empty."""
+
+    return any(v for v in d.values() if not isinstance(v, (dict, list)) or v)
 
 
 def _value(obj: Any, where: str, errors: list[str]) -> SemanticValue | None:
@@ -410,6 +537,9 @@ def parse_semantic_plan(data: dict[str, Any]) -> SemanticPlan:
                 why_material=_s(e, "why_material", w, errors),
                 represents_count=int(rc) if isinstance(rc, (int, float)) and rc else None,
                 evidence_claim_ids=_ids(e),
+                terminal_state_it_can_change=_s(e, "terminal_state_it_can_change", w, errors),
+                information_received=_s(e, "information_received", w, errors),
+                if_removed=_s(e, "if_removed", w, errors),
             )
         )
 
@@ -553,6 +683,19 @@ def parse_semantic_plan(data: dict[str, Any]) -> SemanticPlan:
             if prov not in WEIGHT_PROVENANCES:
                 errors.append(f"{wa}: provenance {prov!r} not in {list(WEIGHT_PROVENANCES)}")
             wt = alt.get("weight")
+            raw_changes = alt.get("changes") or []
+            change_kinds = (
+                tuple(str(x) for x in raw_changes) if isinstance(raw_changes, list) else ()
+            )
+            for kind in change_kinds:
+                if kind not in ALTERNATIVE_CHANGE_KINDS:
+                    errors.append(f"{wa}: changes {kind!r} not in {list(ALTERNATIVE_CHANGE_KINDS)}")
+            sensitivity = _s(alt, "terminal_sensitivity", wa, errors)
+            if sensitivity and sensitivity not in TERMINAL_SENSITIVITIES:
+                errors.append(
+                    f"{wa}: terminal_sensitivity {sensitivity!r} not in "
+                    f"{list(TERMINAL_SENSITIVITIES)}"
+                )
             alts.append(
                 SemanticAlternative(
                     value=alt.get("value"),
@@ -560,6 +703,10 @@ def parse_semantic_plan(data: dict[str, Any]) -> SemanticPlan:
                     weight=float(wt) if isinstance(wt, (int, float)) else None,
                     grounding=_s(alt, "grounding", wa, errors),
                     evidence_claim_ids=_ids(alt),
+                    meaning=_s(alt, "meaning", wa, errors),
+                    why_unresolved=_s(alt, "why_unresolved", wa, errors),
+                    changes=change_kinds,
+                    terminal_sensitivity=sensitivity,
                 )
             )
         uncertainties.append(
@@ -579,6 +726,49 @@ def parse_semantic_plan(data: dict[str, Any]) -> SemanticPlan:
         if isinstance(f, dict) and isinstance(f.get("text"), str):
             facts.append((f["text"], _ids(f)))
 
+    excluded: list[ExcludedCandidate] = []
+    for i, x in enumerate(data.get("excluded_candidates") or []):
+        w = f"excluded_candidates[{i}]"
+        if not isinstance(x, dict):
+            errors.append(f"{w}: must be an object")
+            continue
+        excluded.append(
+            ExcludedCandidate(
+                name=_s(x, "name", w, errors),
+                why_immaterial=_s(x, "why_immaterial", w, errors),
+                evidence_claim_ids=_ids(x),
+            )
+        )
+
+    # Both of these blocks are conditionally required, so the schema shows them to every
+    # planner and most plans should leave them empty. An empty object is therefore "not
+    # claimed", never "claimed with nothing in it" — otherwise a model that echoes the
+    # schema's own keys would have every actor-bearing world refused for contradicting a
+    # claim it never made.
+    zac_raw = data.get("zero_actor_justification")
+    zero_actor = None
+    if isinstance(zac_raw, dict) and _any_content(zac_raw):
+        zero_actor = ZeroActorClaim(
+            no_material_decision=_s(
+                zac_raw, "no_material_decision", "zero_actor_justification", errors
+            ),
+            process_sufficiency=_s(
+                zac_raw, "process_sufficiency", "zero_actor_justification", errors
+            ),
+            evidence_claim_ids=_ids(zac_raw),
+        )
+
+    ex_raw = data.get("single_multiplier_exemption")
+    exemption = None
+    if isinstance(ex_raw, dict) and _any_content(ex_raw):
+        exemption = SingleDriverExemption(
+            empirical_model=_s(ex_raw, "empirical_model", "single_multiplier_exemption", errors),
+            parameter_uncertainty=_s(
+                ex_raw, "parameter_uncertainty", "single_multiplier_exemption", errors
+            ),
+            evidence_claim_ids=_ids(ex_raw),
+        )
+
     plan = SemanticPlan(
         question=_s(res, "question", "resolution", errors),
         yes_condition=_s(res, "yes_condition", "resolution", errors),
@@ -596,6 +786,9 @@ def parse_semantic_plan(data: dict[str, Any]) -> SemanticPlan:
         expected_participants=int(ep) if isinstance(ep, (int, float)) else None,
         resolution_evidence_ids=_ids(res),
         world_facts=tuple(facts),
+        excluded_candidates=tuple(excluded),
+        zero_actor_claim=zero_actor,
+        single_driver_exemption=exemption,
     )
     if errors:
         raise SemanticPlanError(errors)
@@ -622,6 +815,219 @@ def _parse_when(value: str | None) -> datetime | None:
     return when
 
 
+# ---------------------------------------------------------------------------
+# The plan's own arithmetic, evaluated statically
+#
+# Every gate below that talks about numbers derives them from the plan itself: the
+# declared initial values, the declared changes, and the declared terminal threshold.
+# No number, threshold, entity or domain is named in this file. The point of computing
+# rather than pattern-matching is that a defect like "two invented factors straddle the
+# break-even" has no textual signature at all — it exists only in the arithmetic.
+# ---------------------------------------------------------------------------
+
+
+def _numeric(value: Any) -> float | None:
+    """A value read as a number, or None. Booleans are not quantities."""
+
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _eval_value(v: SemanticValue | None, env: dict[str, float]) -> float | None:
+    """A SemanticValue evaluated against known state values, or None if undetermined."""
+
+    if v is None:
+        return None
+    if v.kind == "literal":
+        return _numeric(v.literal)
+    if v.kind == "state":
+        return env.get(v.state) if v.state else None
+    parts = [_eval_value(p, env) for p in v.parts]
+    if any(p is None for p in parts):
+        return None
+    numbers = [p for p in parts if p is not None]
+    if v.kind == "sum":
+        return sum(numbers)
+    if v.kind == "product":
+        out = 1.0
+        for n in numbers:
+            out *= n
+        return out
+    return None
+
+
+def _mechanism_changes(plan: SemanticPlan) -> list[SemanticChange]:
+    """Every non-agent change, in the order the world would apply it.
+
+    Dated occurrences first in chronological order, then dependency-chained ones in
+    declaration order (a chained occurrence follows its predecessor by construction).
+    Actor affordances are excluded on purpose: whether an actor acts is not statically
+    known, and assuming it does would let a gate refuse a world for a decision nobody
+    has made.
+    """
+
+    items: list[tuple[tuple[int, str, int], SemanticChange]] = []
+    for i, p in enumerate(plan.processes):
+        if p.kind == "actor_moment":
+            continue
+        for j, o in enumerate(p.occurrences):
+            dated = isinstance(o.at, str) and bool(o.at)
+            key = (0 if dated else 1, o.at if dated and o.at else "", i * 1000 + j)
+            for c in o.changes:
+                items.append((key, c))
+    items.sort(key=lambda kv: kv[0])
+    return [c for _, c in items]
+
+
+def _forward_state_values(plan: SemanticPlan, draw: dict[str, float]) -> dict[str, float]:
+    """Run the plan's own non-agent arithmetic forward from a given uncertainty draw.
+
+    A state with no numeric initial and no computable writer simply never appears in the
+    result — undetermined stays undetermined, so a gate that needs a number declines to
+    fire rather than inventing a zero.
+    """
+
+    env = {s.name: n for s in plan.states if (n := _numeric(s.initial)) is not None}
+    env.update(draw)
+    for c in _mechanism_changes(plan):
+        if c.op == "set":
+            value = _eval_value(c.value, env)
+            if value is not None:
+                env[c.target] = value
+        elif c.op in ("increase", "decrease"):
+            amount = _eval_value(c.amount, env)
+            if amount is None or c.target not in env:
+                continue
+            env[c.target] = env[c.target] + (amount if c.op == "increase" else -amount)
+    return env
+
+
+def _satisfies(comparison: str, value: float, threshold: float) -> bool:
+    if comparison == "greater_than":
+        return value > threshold
+    if comparison == "greater_or_equal":
+        return value >= threshold
+    if comparison == "less_than":
+        return value < threshold
+    if comparison == "less_or_equal":
+        return value <= threshold
+    return value == threshold
+
+
+def _quantity_comparisons(q: TerminalQuery) -> list[tuple[str, str, SemanticValue | None]]:
+    """Every (state, comparison, threshold) the terminal holds a quantity against."""
+
+    out: list[tuple[str, str, SemanticValue | None]] = []
+    if q.form == "quantity_comparison" and q.state and q.comparison:
+        out.append((q.state, q.comparison, q.threshold))
+    for part in q.parts:
+        out.extend(_quantity_comparisons(part))
+    return out
+
+
+def _terminal_events(q: TerminalQuery) -> set[str]:
+    """Event names the terminal's own resolution counts."""
+
+    out: set[str] = set()
+    if q.form == "event_exists" and q.event:
+        out.add(q.event)
+    if q.form == "record_count" and q.record_event:
+        out.add(q.record_event)
+    for part in q.parts:
+        out |= _terminal_events(part)
+    return out
+
+
+def _terminal_states(q: TerminalQuery) -> set[str]:
+    """Every state the terminal reads, directly or through a threshold."""
+
+    out: set[str] = set()
+    if q.state:
+        out.add(q.state)
+    if q.threshold is not None:
+        out |= q.threshold.states_read()
+    for part in q.parts:
+        out |= _terminal_states(part)
+    return out
+
+
+def _all_changes(plan: SemanticPlan) -> list[SemanticChange]:
+    return [c for a in plan.affordances for c in a.changes] + [
+        c for p in plan.processes for o in p.occurrences for c in o.changes
+    ]
+
+
+def terminal_relevant_states(plan: SemanticPlan) -> set[str]:
+    """Every state the terminal reads, plus every state those are computed from.
+
+    The public name for "terminal-relevant": the representation record and the
+    decorative-actor rule mean the same thing by it, and so should any reader.
+    """
+
+    return _lineage_states(plan, _terminal_states(plan.terminal))
+
+
+def _lineage_states(plan: SemanticPlan, seeds: set[str]) -> set[str]:
+    """Every state whose value can reach ``seeds`` through the plan's own changes.
+
+    The same closure the lowerer uses to decide what an UNKNOWN can undetermine, reused
+    here because "terminal-relevant" means exactly this: a state that something the
+    terminal reads is computed from, however many hops away.
+    """
+
+    changes = _all_changes(plan)
+    relevant = set(seeds)
+    while True:
+        grown = set(relevant)
+        for c in changes:
+            if c.op in WRITE_OPS and c.target in relevant:
+                if c.value is not None:
+                    grown |= c.value.states_read()
+                if c.amount is not None:
+                    grown |= c.amount.states_read()
+        if grown == relevant:
+            return relevant
+        relevant = grown
+
+
+def _draw_combinations(
+    uncertainties: list[SemanticUncertainty], *, cap: int = 16
+) -> list[dict[str, float]]:
+    """Assignments of the other uncertainties, so one variable can be varied against them.
+
+    Bounded: beyond the cap only the first numeric alternative of each is used, which
+    keeps a wide plan from turning a static check into an exponential one. Under-, never
+    over-refusing: fewer background assignments can only mean fewer straddles found.
+    """
+
+    per_variable: list[list[tuple[str, float]]] = []
+    for u in uncertainties:
+        values = [
+            (u.affects_state, n) for a in u.alternatives if (n := _numeric(a.value)) is not None
+        ]
+        if values:
+            per_variable.append(values)
+    if not per_variable:
+        return [{}]
+    total = 1
+    for values in per_variable:
+        total *= len(values)
+    if total > cap:
+        return [{name: value for values in per_variable for name, value in values[:1]}]
+    combos: list[dict[str, float]] = [{}]
+    for values in per_variable:
+        combos = [{**combo, name: value} for combo in combos for name, value in values]
+    return combos
+
+
 def _all_citations(plan: SemanticPlan) -> list[tuple[str, tuple[str, ...]]]:
     """Every (location, claim ids) pair the plan carries.
 
@@ -644,7 +1050,457 @@ def _all_citations(plan: SemanticPlan) -> list[tuple[str, tuple[str, ...]]]:
             out.append((f"uncertainty {u.name!r} alternative[{i}]", alt.evidence_claim_ids))
     for i, (_text, ids) in enumerate(plan.world_facts):
         out.append((f"world_fact[{i}]", ids))
+    for x in plan.excluded_candidates:
+        out.append((f"excluded candidate {x.name!r}", x.evidence_claim_ids))
+    if plan.zero_actor_claim is not None:
+        out.append(("zero_actor_justification", plan.zero_actor_claim.evidence_claim_ids))
+    if plan.single_driver_exemption is not None:
+        out.append(("single_multiplier_exemption", plan.single_driver_exemption.evidence_claim_ids))
     return [(where, ids) for where, ids in out if ids]
+
+
+# ---------------------------------------------------------------------------
+# Causal-world fidelity gates (Phase 3). Each names its defect and its correction
+# boundary, because a refusal a revision round cannot act on is a dead end.
+# ---------------------------------------------------------------------------
+
+
+def _representation_record_errors(plan: SemanticPlan) -> list[str]:
+    """CWF-1: every occupant answers the five representation questions, in fields.
+
+    A world is a claim about who matters. The claim is auditable only if each included
+    entity says why it can change the answer, which terminal-relevant state it can move,
+    what it learns, what it may do, and what is lost by deleting it — and if each
+    deliberately excluded candidate says why its removal cannot matter.
+    """
+
+    errors: list[str] = []
+    for e in plan.entities:
+        missing = [
+            label
+            for label, value in (
+                ("why_material", e.why_material),
+                ("authority", e.authority),
+                ("terminal_state_it_can_change", e.terminal_state_it_can_change),
+                ("information_received", e.information_received),
+                ("if_removed", e.if_removed),
+            )
+            if not value.strip()
+        ]
+        if missing:
+            errors.append(
+                f"REPRESENTATION_RECORD_INCOMPLETE: entity {e.name!r} is in the world "
+                f"without answering {missing} — state, for this entity, why it can "
+                "change the answer, which terminal-relevant state it can alter, what "
+                "information it receives, what authority it holds, and what the world "
+                "loses if it is removed. Correction boundary: these fields on this "
+                "entity, or remove the entity"
+            )
+    for x in plan.excluded_candidates:
+        if not x.name.strip() or not x.why_immaterial.strip():
+            errors.append(
+                "REPRESENTATION_RECORD_INCOMPLETE: an excluded_candidates entry names "
+                f"{x.name!r} without saying why its removal cannot materially change "
+                "the answer. Correction boundary: why_immaterial on that entry"
+            )
+    return errors
+
+
+def _alternative_quality_errors(plan: SemanticPlan, cited: Any) -> list[str]:
+    """FD-10 / FD-11: an alternative carries meaning, or it carries nothing.
+
+    FD-11's shape was a filler alternative — value ``"other"``, grounding "No specific
+    alternative in evidence" — carrying half the mass and all of the YES mass. The
+    universal rule is not a word list: an alternative must say what it means, why the
+    record leaves it open, what it changes about structure / actor state / process
+    state, and how the terminal responds under it; and an alternative that nothing
+    supports may not be the one the planner itself declares decisive.
+    """
+
+    errors: list[str] = []
+    for u in plan.uncertainties:
+        for i, alt in enumerate(u.alternatives):
+            where = f"uncertainty {u.name!r} alternative[{i}] ({alt.value!r})"
+            missing = [
+                label
+                for label, present in (
+                    ("meaning", bool(alt.meaning.strip())),
+                    ("why_unresolved", bool(alt.why_unresolved.strip())),
+                    ("changes", bool(alt.changes)),
+                    ("terminal_sensitivity", bool(alt.terminal_sensitivity.strip())),
+                )
+                if not present
+            ]
+            if missing:
+                errors.append(
+                    f"UNCERTAINTY_ALTERNATIVE_UNDESCRIBED: {where} carries branch mass "
+                    f"without {missing} — say what is true about the world under this "
+                    "alternative, why the record does not settle it, which of "
+                    f"{list(ALTERNATIVE_CHANGE_KINDS)} it changes, and its "
+                    f"terminal_sensitivity from {list(TERMINAL_SENSITIVITIES)}. "
+                    "Correction boundary: these fields on this alternative, or drop the "
+                    "alternative if there is nothing to say"
+                )
+            if (
+                alt.terminal_sensitivity == "decides_the_terminal"
+                and not cited(alt.evidence_claim_ids)
+                and alt.weight_is_ungrounded()
+            ):
+                errors.append(
+                    f"DEGENERATE_FILLER_ALTERNATIVE: {where} is declared to decide the "
+                    "terminal while citing no evidence and carrying a weight nothing "
+                    "supports — the answer would be this invented alternative and its "
+                    "invented share of the mass. Correction boundary: cite the claims "
+                    "that establish this alternative as a real possibility, or give its "
+                    "weight a grounded provenance, or remove it and let the mass sit "
+                    "with the alternatives the record does support"
+                )
+    return errors
+
+
+def _actor_admissibility_errors(plan: SemanticPlan, cited: Any) -> list[str]:
+    """CWF-5 / D5: no deciding entity is admissible only on stated, cited grounds; and
+    an entity whose decisions cannot move anything terminal-relevant is decoration.
+
+    Both directions are the same rule read from either end. A world may contain no
+    actors only when the evidence says no material human or population decision can
+    change the answer AND the non-agent process is causally sufficient; and an actor may
+    be present only when its decisions can reach the terminal — directly, or by reaching
+    someone whose decisions can.
+    """
+
+    errors: list[str] = []
+    deciders = {e.name for e in plan.entities if e.decides}
+    claim = plan.zero_actor_claim
+
+    if not deciders:
+        if (
+            claim is None
+            or not claim.no_material_decision.strip()
+            or not claim.process_sufficiency.strip()
+            or not cited(claim.evidence_claim_ids)
+        ):
+            errors.append(
+                "ZERO_ACTOR_WORLD_UNJUSTIFIED: this world contains no deciding entity, "
+                "so nobody's choice can change the answer — that is admissible only "
+                "when the plan says so with evidence. Declare "
+                "zero_actor_justification {no_material_decision, process_sufficiency, "
+                "evidence_claim_ids}: which human or population decisions could bear on "
+                "this outcome and why the record shows none of them can move it, and "
+                "why the non-agent process alone is causally sufficient. Correction "
+                "boundary: that justification with cited claims, or the deciding "
+                "entities the world is missing"
+            )
+        if plan.expected_participants:
+            errors.append(
+                "ZERO_ACTOR_CLAIM_CONTRADICTED: the plan declares "
+                f"{plan.expected_participants} decision-relevant participants the "
+                "evidence names, and then represents none of them as a deciding entity "
+                "— a world cannot both need those decisions and have none. Correction "
+                "boundary: model those participants as deciding entities with their "
+                "affordances and dated occasions, or lower expected_participants to "
+                "what the evidence actually requires"
+            )
+        return errors
+
+    if claim is not None:
+        errors.append(
+            "ZERO_ACTOR_CLAIM_CONTRADICTED: the plan claims no material decision can "
+            f"change the answer while modelling {sorted(deciders)} as deciding "
+            "entities. Correction boundary: drop zero_actor_justification, or drop the "
+            "deciding entities and justify the actor-free world"
+        )
+
+    relevant = _lineage_states(plan, _terminal_states(plan.terminal))
+    counted = _terminal_events(plan.terminal)
+    events_by_name = {ev.name: ev for ev in plan.events}
+    direct: set[str] = set()
+    informs: dict[str, set[str]] = {}
+    for a in plan.affordances:
+        if a.actor not in deciders:
+            continue
+        for c in a.changes:
+            writes_terminal_state = c.op in WRITE_OPS and c.target in relevant
+            records_counted_event = c.op == "record_event" and c.target in counted
+            if writes_terminal_state or records_counted_event:
+                direct.add(a.actor)
+            elif c.op == "record_event":
+                ev = events_by_name.get(c.target)
+                if ev is None:
+                    continue
+                audience = {who for _role, who in ev.participants}
+                if not audience and ev.visibility == "public":
+                    audience = set(deciders)
+                informs.setdefault(a.actor, set()).update(audience - {a.actor})
+            elif c.op == "send":
+                informs.setdefault(a.actor, set()).update(set(c.recipients) - {a.actor})
+
+    # An actor who informs an actor who matters, matters. Closed to a fixpoint so a
+    # genuine chain of influence is never called decoration.
+    material = set(direct)
+    changed = True
+    while changed:
+        changed = False
+        for actor, reach in informs.items():
+            if actor not in material and reach & material:
+                material.add(actor)
+                changed = True
+
+    for name in sorted(deciders - material):
+        errors.append(
+            f"DECORATIVE_ACTOR: {name!r} decides nothing that matters here — none of its "
+            "affordances writes a state the terminal reads or is computed from, records "
+            "an event the terminal counts, or informs an actor who can. An actor present "
+            "without a causal path is decoration that makes the world look alive. "
+            "Correction boundary: give this entity the affordance through which its real "
+            "authority reaches the outcome, or remove it and record it under "
+            "excluded_candidates with why its removal cannot change the answer"
+        )
+    return errors
+
+
+def _one_step_operational_errors(plan: SemanticPlan, cited: Any) -> list[str]:
+    """CWF-3 / D4: a terminal quantity produced in one non-agent step is not a simulation.
+
+    A live run computed the whole answer as one cited quarter multiplied by one invented
+    factor: one change, no intermediate state, nothing happening across the window. The
+    universal test is structural, not numeric — exactly one non-agent change writes the
+    terminal quantity, and its inputs are things nothing else in the world produces, so
+    there is no causal process through time at all. A single multiplier stands in for a
+    system only under a documented, cited empirical model, with the parameter's
+    uncertainty grounded (and the straddling gate clear on its own).
+
+    Deliberately no wider than D4's two forms: one final set-the-total, or one uncertain
+    factor scaling a base. One scheduled accumulation of a fully grounded amount is a
+    thin world, not a false one — no branch weight is doing work in it — and refusing it
+    would only extract detail the record does not have.
+    """
+
+    errors: list[str] = []
+    all_changes = _all_changes(plan)
+    for state, _comparison, threshold in _quantity_comparisons(plan.terminal):
+        actor_writers = [
+            a.name
+            for a in plan.affordances
+            for c in a.changes
+            if c.op in WRITE_OPS and c.target == state
+        ]
+        if actor_writers:
+            continue  # an actor-produced quantity is judged by the actor gates
+        mechanism = [
+            (p, c)
+            for p in plan.processes
+            if p.kind != "actor_moment"
+            for o in p.occurrences
+            for c in o.changes
+            if c.op in WRITE_OPS and c.target == state
+        ]
+        if not mechanism:
+            continue  # no producer at all, or a cited factual resolution — judged above
+        produced_elsewhere = {c.target for c in all_changes if c.op in WRITE_OPS} - {state}
+        inputs: set[str] = set()
+        for _p, c in mechanism:
+            if c.value is not None:
+                inputs |= c.value.states_read()
+            if c.amount is not None:
+                inputs |= c.amount.states_read()
+        if len(mechanism) > 1 or (inputs & produced_elsewhere):
+            continue  # a real progression: several steps, or a produced intermediate
+        process_name, change = mechanism[0]
+        # D4 names two forms, and the gate is exactly as wide as they are: one final
+        # set-the-total (the environment announcing the answer), or one arbitrary
+        # multiplier (a draw scaling a base). A single scheduled accumulation whose whole
+        # amount is grounded — a contracted transfer of a cited size — is neither: no
+        # branch weight is doing any work in it, and refusing it would demand detail the
+        # record does not contain.
+        uncertain_states = {u.affects_state for u in plan.uncertainties}
+        if change.op != "set" and not (inputs & uncertain_states):
+            continue
+        exemption = plan.single_driver_exemption
+        claimed = (
+            exemption is not None
+            and bool(exemption.empirical_model.strip())
+            and bool(exemption.parameter_uncertainty.strip())
+            and cited(exemption.evidence_claim_ids)
+        )
+        if not claimed:
+            errors.append(
+                f"ONE_STEP_OPERATIONAL_WORLD: the terminal quantity {state!r} is produced "
+                f"by a single non-agent change ({change.op}) in process "
+                f"{process_name.name!r}, reading only inputs nothing in this world "
+                f"produces ({sorted(inputs)}) — that is a reported figure, not an "
+                "operating process. Model what actually makes the quantity: grounded "
+                "inputs, at least one intermediate state the mechanism updates inside "
+                "the window, and occurrences spread across the real causal period, so "
+                "the total is reached rather than announced. If one multiplier genuinely "
+                "stands for the system, declare single_multiplier_exemption "
+                "{empirical_model, parameter_uncertainty, evidence_claim_ids} citing the "
+                "documented model. Correction boundary: the production process for "
+                f"{state!r}, or that exemption"
+            )
+            continue
+        lineage = _lineage_states(
+            plan, {state} | (threshold.states_read() if threshold is not None else set())
+        )
+        ungrounded = sorted(
+            u.name
+            for u in plan.uncertainties
+            if u.affects_state in lineage
+            and any(
+                not cited(a.evidence_claim_ids) and a.weight_is_ungrounded() for a in u.alternatives
+            )
+        )
+        if ungrounded:
+            errors.append(
+                "SINGLE_DRIVER_EXEMPTION_UNGROUNDED: the plan claims the single-"
+                f"multiplier exemption for {state!r}, but the parameter it rests on is "
+                f"not grounded — {ungrounded} carries alternatives with no cited "
+                "evidence and no supported weight, so the documented model is being used "
+                "to license invented numbers. Correction boundary: cite the evidence "
+                "that establishes those alternative values or their distribution, or "
+                "withdraw the exemption and model the process"
+            )
+    return errors
+
+
+def _straddling_errors(plan: SemanticPlan, cited: Any) -> list[str]:
+    """CWF-4 / D3: ungrounded alternatives may not sit on both sides of the threshold.
+
+    The failure this exists to end: a terminal comparing a quantity against a threshold,
+    where the quantity is a cited anchor times an uncertainty whose two alternatives were
+    invented, one on each side of the break-even. The published probability was then the
+    count of invented branches and nothing else — had the planner written a different
+    number, the answer would have been different with nothing else changed.
+
+    Everything here is computed from the plan's own arithmetic: the declared initial
+    values, the declared changes, the declared threshold. The break-even is *found*, by
+    bisecting the plan's own production function between the two straddling draws, so the
+    refusal can name the exact boundary the invented numbers were placed around without
+    any number, domain or question family appearing in this file.
+    """
+
+    errors: list[str] = []
+    if not plan.uncertainties:
+        return errors
+
+    def ungrounded(alt: SemanticAlternative) -> bool:
+        # Nothing supports the value, and nothing supports its probability. Either one
+        # alone is legal: a cited value under honest symmetric-ignorance weights is the
+        # shape of not knowing, and the runtime prices it as bounds.
+        return not cited(alt.evidence_claim_ids) and alt.weight_is_ungrounded()
+
+    for state, comparison, threshold in _quantity_comparisons(plan.terminal):
+        seeds = {state} | (threshold.states_read() if threshold is not None else set())
+        lineage = _lineage_states(plan, seeds)
+        feeders = [u for u in plan.uncertainties if u.affects_state in lineage]
+        for u in feeders:
+            numeric_alts = [(a, n) for a in u.alternatives if (n := _numeric(a.value)) is not None]
+            if len(numeric_alts) < 2:
+                continue
+            others = [o for o in feeders if o.name != u.name]
+            for base in _draw_combinations(others):
+                evaluated: list[tuple[SemanticAlternative, float, bool]] = []
+                for alt, value in numeric_alts:
+                    env = _forward_state_values(plan, {**base, u.affects_state: value})
+                    quantity = env.get(state)
+                    limit = _eval_value(threshold, env) if threshold is not None else None
+                    if quantity is None or limit is None:
+                        continue
+                    evaluated.append((alt, value, _satisfies(comparison, quantity, limit)))
+                sides = {side for _a, _v, side in evaluated}
+                if len(sides) < 2:
+                    continue
+                pair = _straddling_pair(evaluated)
+                if pair is None:
+                    continue
+                low, high = pair
+                if ungrounded(low[0]) and ungrounded(high[0]):
+                    break_even = _break_even(
+                        plan, state, comparison, threshold, u.affects_state, low, high, base
+                    )
+                    errors.append(
+                        "THRESHOLD_STRADDLING_UNGROUNDED_SCENARIOS: uncertainty "
+                        f"{u.name!r} offers {low[1]:.6g} and {high[1]:.6g} — neither "
+                        "value cited and neither weight supported — and the plan's own "
+                        f"arithmetic puts them on opposite sides of the terminal on "
+                        f"{state!r}"
+                        + (
+                            f" (break-even draw ≈ {break_even:.6g})"
+                            if break_even is not None
+                            else ""
+                        )
+                        + ". The answer would be the choice of those two numbers and the "
+                        "fact that there are two of them, not anything the world does. "
+                        "Correction boundary: the alternatives' VALUES and their "
+                        "citations — anchor each in cited evidence (a published range, a "
+                        "recorded distribution, a stated forecast), or replace the "
+                        "invented split with the mechanism that produces the quantity so "
+                        "the crossing follows from the process. Do not move the "
+                        "threshold and do not restate the terminal"
+                    )
+                    break
+                misdeclared = sorted(
+                    {
+                        f"{a.value!r}"
+                        for a, _v, _s in evaluated
+                        if a.terminal_sensitivity == "immaterial_to_the_terminal"
+                    }
+                )
+                if misdeclared:
+                    errors.append(
+                        f"TERMINAL_SENSITIVITY_MISDECLARED: uncertainty {u.name!r} "
+                        f"declares {misdeclared} immaterial to the terminal, but the "
+                        "plan's own arithmetic has its alternatives resolving "
+                        f"{state!r} on both sides of the threshold. Correction "
+                        "boundary: the terminal_sensitivity declaration on those "
+                        "alternatives"
+                    )
+                break
+    return errors
+
+
+def _straddling_pair(
+    evaluated: list[tuple[SemanticAlternative, float, bool]],
+) -> tuple[tuple[SemanticAlternative, float, bool], tuple[SemanticAlternative, float, bool]] | None:
+    """The adjacent pair of draws whose outcomes differ — the crossing itself."""
+
+    ordered = sorted(evaluated, key=lambda item: item[1])
+    for left, right in zip(ordered, ordered[1:], strict=False):
+        if left[2] != right[2]:
+            return left, right
+    return None
+
+
+def _break_even(
+    plan: SemanticPlan,
+    state: str,
+    comparison: str,
+    threshold: SemanticValue | None,
+    variable: str,
+    low: tuple[SemanticAlternative, float, bool],
+    high: tuple[SemanticAlternative, float, bool],
+    base: dict[str, float],
+) -> float | None:
+    """The draw at which the plan's own production function crosses its own threshold.
+
+    Found by bisection on the plan's arithmetic rather than by solving a form we assumed
+    — so it is right for a product, a sum, a chain of accumulations, or anything else the
+    universal value forms can express.
+    """
+
+    lo, hi, side_at_lo = low[1], high[1], low[2]
+    for _ in range(64):
+        mid = (lo + hi) / 2.0
+        env = _forward_state_values(plan, {**base, variable: mid})
+        quantity = env.get(state)
+        limit = _eval_value(threshold, env) if threshold is not None else None
+        if quantity is None or limit is None:
+            return None
+        if _satisfies(comparison, quantity, limit) == side_at_lo:
+            lo = mid
+        else:
+            hi = mid
+    return (lo + hi) / 2.0
 
 
 def validate_semantic_plan(
@@ -1054,4 +1910,14 @@ def validate_semantic_plan(
                 "unit is one entity with represents_count 7), or lower "
                 "expected_participants to what the evidence actually names"
             )
+
+    # The causal-world fidelity gates. They run last because they read the plan as a
+    # world rather than as a set of references — a plan whose references do not resolve
+    # is corrected above first, and these checks are written to decline (never to
+    # invent) when a name or a number is missing.
+    errors += _representation_record_errors(plan)
+    errors += _alternative_quality_errors(plan, cited)
+    errors += _actor_admissibility_errors(plan, cited)
+    errors += _one_step_operational_errors(plan, cited)
+    errors += _straddling_errors(plan, cited)
     return errors
