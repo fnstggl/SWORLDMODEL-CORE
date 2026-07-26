@@ -1036,6 +1036,73 @@ def _wake_from_entry(
 
 # -- the actor invocation ----------------------------------------------------
 
+# The validation_status recorded when a wake finds nothing the actor could do. It is a
+# statement about the world's offer, not about a decision — no model was called.
+NO_FEASIBLE_ACTION = "no_feasible_action"
+
+
+def _no_feasible_action_record(
+    world: WorldState,
+    spec: WorldSpec,
+    node: ProcessNode | None,
+    actor: ActorState,
+    action_exec: ActionExecutor,
+    entry: ScheduledEntry,
+) -> ActorDecisionRecord:
+    """The record of a wake at which nothing was feasible and nothing novel allowed.
+
+    Without it, the turn vanished: actor_decisions.jsonl showed no trace of the wake,
+    and a world in which the only offered action's authority token mismatched looked
+    inert for no stated reason. The record names each offered action and the exact
+    reason it was infeasible, using the same availability check that refused them.
+    """
+
+    p = entry.payload_dict
+    offered = node.action_ids if node is not None else ("*",)
+    candidates = [
+        a for a in spec.actions if offered == ("*",) or not offered or a.action_id in offered
+    ]
+    # The private check is the SAME one feasible_actions used to exclude these
+    # actions; asking it again is what makes the recorded reason the true reason.
+    reasons = [
+        f"{a.action_id}: {action_exec._check_availability(world, actor, a)[1]}"
+        for a in candidates
+    ]
+    why = (
+        "; ".join(reasons)
+        if reasons
+        else "this node offers no actions at all, and novel actions are not allowed"
+    )
+    state = actor.state_dict()
+    return ActorDecisionRecord(
+        branch_id=world.branch_id,
+        actor_id=actor.actor_id,
+        branch_time=world.time.isoformat(),
+        stage=world.stage,
+        wake_reason=str(p.get("wake_reason", "")),
+        wake_detail=str(p.get("wake_detail", "")),
+        trigger_event_ids=list(entry.causal_parents),
+        delivered_observation_ids=[
+            d.event_id for d in world.deliveries if d.actor_id == actor.actor_id
+        ],
+        noticed_observation_ids=[],
+        retrieved_memory_ids=[],
+        plan_before=None,
+        plan_after=None,
+        plan_disposition="not consulted: the wake offered nothing to decide",
+        state_before=state,
+        state_after=state,
+        decision_context={},
+        intent={},
+        validation_status=NO_FEASIBLE_ACTION,
+        validation_reason=f"no feasible action and novel actions not allowed here — {why}",
+        event_ids=[],
+        world_version_at_decision=world.version,
+        prompt_hash="",
+        model="",
+        tokens_out=0,
+    )
+
 
 def _invoke_actor(
     world: WorldState,
@@ -1067,6 +1134,13 @@ def _invoke_actor(
     feasible = action_exec.feasible_actions(world, node, actor, spec)
     allow_novel = node.allow_novel if node is not None else True
     if not feasible and not allow_novel:
+        # A wake the actor could do nothing with is still a wake, and it goes on the
+        # record: skipping it silently made the world look inert for no stated reason.
+        # The record carries WHY each offered action was infeasible, so the ledger
+        # shows "the officer woke and lacked the authority", not nothing at all.
+        decisions.append(
+            _no_feasible_action_record(world, spec, node, actor, action_exec, entry)
+        )
         return world, []
 
     base_view = world.view_for(aid)

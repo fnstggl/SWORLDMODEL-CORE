@@ -10,6 +10,9 @@ Covers audit findings:
   with the default ``unresolved_when = const(False)``, resolved a confident NO because
   comparison coerces an absent quantity to zero. The compile gate now demands an
   is-unset guard for every such field.
+* M-4 — an actor woken at a dated moment with no feasible action and ``allow_novel``
+  false was skipped with no record at all, so the world looked inert for no stated
+  reason.
 """
 
 from __future__ import annotations
@@ -302,3 +305,130 @@ def test_guarded_terminal_over_unset_field_compiles_and_stays_unresolved() -> No
     (branch,) = result.branch_outcomes
     assert not branch.resolved
     assert branch.outcome is None
+
+
+# ---------------------------------------------------------------------------
+# M-4: a wake with no feasible action leaves a decision record, not silence
+# ---------------------------------------------------------------------------
+
+
+def _authority_mismatch_world() -> dict[str, Any]:
+    """One actor, one dated node offering one action whose authority token the actor
+    does not hold, and novel actions disallowed at the node."""
+
+    return {
+        "reality": {
+            "as_of": AS_OF.isoformat(),
+            "horizon": HORIZON.isoformat(),
+            "subject_entity": "the record",
+            "resolution_units": "recorded entries",
+            "target_outcome": "an entry is recorded",
+            "expected_participants": 1,
+        },
+        "claims": [
+            {
+                "id": "c_actor",
+                "proposition": "the officer and their mandate are documented",
+                "value": True,
+                "supporting_excerpt": "the officer and their mandate are documented",
+            },
+            {
+                "id": "c_session",
+                "proposition": "the session is scheduled for 2026-06-01",
+                "value": True,
+                "supporting_excerpt": "the session is scheduled for 2026-06-01",
+            },
+        ],
+        "world_spec": {
+            "title": "authority mismatch",
+            "subject_entity": "the record",
+            "resolution_units": "recorded entries",
+            "entities": [
+                {
+                    "entity_id": "officer",
+                    "name": "The Officer",
+                    "kind": "person",
+                    "is_actor": True,
+                    "role": "officer",
+                    "authority": ["observe"],
+                    "representation_scale": "individual",
+                    "evidence_claim_ids": ["c_actor"],
+                }
+            ],
+            "actors": [
+                {
+                    "entity_id": "officer",
+                    "reasoning": "acts within the documented mandate",
+                    "memory_seeds": [
+                        {
+                            "content": "I hold observer status only.",
+                            "kind": "episodic",
+                            "importance": 0.9,
+                            "evidence_claim_ids": ["c_actor"],
+                        }
+                    ],
+                }
+            ],
+            "fields": [],
+            "actions": [
+                {
+                    "action_id": "record_entry",
+                    "meaning": "record an entry",
+                    "eligible_actors": ["role:officer"],
+                    "required_authority": ["record"],
+                    "parameters": [],
+                    "visibility": "public",
+                    "effects": [
+                        {
+                            "op": "append_record",
+                            "collection": "entries",
+                            "key": "$actor",
+                            "value": "recorded",
+                        }
+                    ],
+                    "evidence_claim_ids": ["c_session"],
+                }
+            ],
+            "process": {
+                "nodes": [
+                    {
+                        "node_id": "session",
+                        "stage": "session",
+                        "at": "2026-06-01T09:00:00+00:00",
+                        "description": "the session",
+                        "participants": ["officer"],
+                        "action_ids": ["record_entry"],
+                        "allow_novel": False,
+                    }
+                ]
+            },
+            "external_processes": [],
+            "wake_rules": [],
+            "terminal": {
+                "yes_when": {
+                    "op": "greater_or_equal",
+                    "args": [{"op": "count", "args": ["entries"]}, 1],
+                },
+                "unresolved_when": {
+                    "op": "less_than",
+                    "args": [{"op": "count", "args": ["entries"]}, 1],
+                },
+                "description": "YES when an entry is recorded",
+            },
+        },
+    }
+
+
+def test_no_feasible_action_wake_is_recorded_with_reasons() -> None:
+    gw = _wait_gateway()
+    compiled = _compile(_authority_mismatch_world(), gw)
+    result = run(compiled, gw, seed=0)
+
+    skips = [d for d in result.actor_decisions if d.validation_status == "no_feasible_action"]
+    assert skips, "the infeasible wake left no decision record — the world looks inert"
+    rec = skips[0]
+    assert rec.actor_id == "officer"
+    assert "record_entry" in rec.validation_reason
+    assert "authority" in rec.validation_reason
+    # The skip records a wake, not an action: nothing was applied.
+    assert rec.event_ids == []
