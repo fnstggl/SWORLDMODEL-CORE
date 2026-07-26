@@ -442,13 +442,7 @@ class TraceContext:
             "happened to them. Nothing here is scheduled.\n"
         )
         for d in self.run_result.actor_decisions:
-            c = d.intent
-            add(
-                f"- [{d.branch_id}] {d.branch_time} {d.actor_id} woken by "
-                f"*{d.wake_reason}* ({d.wake_detail}); plan: {d.plan_disposition}; "
-                f"intent {c['mode']} {c.get('action_id') or c.get('novel_description')} "
-                f"-> {d.validation_status} ({d.validation_reason})"
-            )
+            add(_invocation_line(d))
         add("")
 
         add("### 9b. Invocations per actor per branch")
@@ -514,6 +508,25 @@ class TraceContext:
             add(f"- {lim}")
 
         return "\n".join(lines) + "\n"
+
+
+def _invocation_line(d: Any) -> str:
+    """One actor invocation, rendered for the report — total over every record shape.
+
+    A no-feasible-action wake records ``intent={}``, and a hard ``c['mode']`` here
+    crashed the whole trace write of a COMPLETED direct-mode run 559 seconds in,
+    leaving an exit-4 diagnosis beside a finished forecast. A report line must not be
+    able to destroy the artifacts it reports on.
+    """
+
+    c = d.intent or {}
+    what = c.get("action_id") or c.get("novel_description") or ""
+    return (
+        f"- [{d.branch_id}] {d.branch_time} {d.actor_id} woken by "
+        f"*{d.wake_reason}* ({d.wake_detail}); plan: {d.plan_disposition}; "
+        f"intent {c.get('mode', 'none')} {what} "
+        f"-> {d.validation_status} ({d.validation_reason})"
+    )
 
 
 def _expr_repr(expr: Any) -> str:

@@ -572,3 +572,22 @@ def test_a_factual_resolution_skips_the_realism_review_it_cannot_fail() -> None:
     by_key = {f.key: f for f in audit.findings}
     assert by_key["factual_resolution_basis"].severity == "PASS"
     assert "actor_calls_causally_motivated" not in by_key
+
+
+def test_a_report_line_survives_an_intentless_wake() -> None:
+    """A no-feasible-action wake records intent={}, and the report renderer's hard
+    c['mode'] crashed the whole trace write of a completed direct-mode run 559s in —
+    an exit-4 diagnosis beside a finished forecast. The line must render for every
+    record shape the engine writes."""
+
+    from dataclasses import replace as dc_replace
+
+    from sworldmodel.tracing import _invocation_line
+
+    empty = dc_replace(_decision(), intent={})
+    line = _invocation_line(empty)
+    assert "intent none" in line
+    assert "executed" in line
+
+    normal = _decision(intent={"mode": "act", "action_id": "sign_it"})
+    assert "intent act sign_it" in _invocation_line(normal)
