@@ -180,10 +180,10 @@ def _eval_rendered(expr: str, fields: dict[str, Any], counts: dict[str, int]) ->
 def _eval_ast(node: Any, fields: dict[str, Any], counts: dict[str, int]) -> Any:
     """Evaluate the executable terminal AST with the engine's own evaluator."""
 
+    from _forensic_world import ForensicWorld  # local shim, see below
+
     from sworldmodel.expressions import evaluate
     from sworldmodel.worldspec import parse_expr
-
-    from _forensic_world import ForensicWorld  # local shim, see below
 
     return evaluate(parse_expr(node), ForensicWorld(fields, counts))
 
@@ -357,7 +357,13 @@ def reconstruct(run: Path, label: str) -> dict[str, Any]:
         initial = _initial_fields(run, b, evs)
         carried_in = sorted(set(initial) - _fields_written_by_events(evs))
 
-        def state(keep: Any) -> tuple[dict[str, Any], dict[str, int]]:
+        def state(
+            keep: Any, evs: list = evs, initial: dict = initial
+        ) -> tuple[dict[str, Any], dict[str, int]]:
+            # Loop variables bound as defaults: a closure capturing `evs` by
+            # reference evaluates against whichever branch the loop reached LAST if
+            # ever called late. Called-in-iteration today, but a forensic tool may
+            # not depend on that.
             f, c = _fields_from_events(evs, keep)
             return {**initial, **f}, c
 
@@ -441,7 +447,7 @@ def reconstruct(run: Path, label: str) -> dict[str, Any]:
     )
 
     weights = [float(b["weight"]) for b in per_branch]
-    uniform = len(set(round(w, 9) for w in weights)) == 1 and len(weights) > 1
+    uniform = len({round(w, 9) for w in weights}) == 1 and len(weights) > 1
     perfect_fraction = uniform and recomputed_p is not None
 
     # weight provenance, from the run's own uncertainty record
@@ -459,7 +465,6 @@ def reconstruct(run: Path, label: str) -> dict[str, Any]:
     )
 
     # -- responsibility classification --------------------------------------
-    published_outcomes = {b["recomputed_outcome"] for b in per_branch}
     actor_calls_total = sum(len(d) for d in [decisions])
     any_actor_changed = any(
         b["counterfactuals"]["all_actor_output_removed"] != b["recomputed_outcome"]

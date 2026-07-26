@@ -658,7 +658,7 @@ def test_the_merged_ledger_is_namespaced_like_every_other_collection() -> None:
         "ledger branch ids must join with outcome branch ids, or every mechanical "
         "check that reads the ledger per branch silently passes"
     )
-    assert {w for w in merged.final_worlds} == outcome_ids
+    assert set(merged.final_worlds) == outcome_ids
     assert {d.branch_id for d in merged.actor_decisions} == outcome_ids
 
 
