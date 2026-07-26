@@ -20,7 +20,7 @@ import argparse
 import json
 import sys
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -70,7 +70,10 @@ def freeze(case: dict[str, str], out_dir: Path) -> dict[str, str]:
     if case["mode"] == "pastcast":
         as_of = datetime.fromisoformat(case["as_of"])
     else:
-        as_of = datetime.now(UTC).replace(microsecond=0)
+        # One minute in the FUTURE, exactly like acceptance.sh's `date +1 minute`:
+        # a cutoff even microseconds behind process start silently makes the run a
+        # pastcast (as_of < started_at), and every un-archived page is refused.
+        as_of = (datetime.now(UTC) + timedelta(minutes=1)).replace(microsecond=0)
     horizon = datetime.fromisoformat(case["horizon"])
 
     transport = UrllibTransport()
