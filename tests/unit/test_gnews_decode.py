@@ -7,8 +7,9 @@ holds the URL. These tests replay that shape, plus each way it goes wrong.
 
 from __future__ import annotations
 
+from _fakes import FakeTransport
 from sworldmodel.gnews_decode import GoogleNewsDecoder, article_id_of
-from sworldmodel.http import FakeTransport, HttpResponse, html_response
+from sworldmodel.http import HttpResponse, html_response
 
 GURL = "https://news.google.com/rss/articles/CBMiTESTID?oc=5"
 
