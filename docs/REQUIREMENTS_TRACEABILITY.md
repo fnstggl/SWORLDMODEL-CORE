@@ -56,14 +56,14 @@ mypy --strict clean (52 files); forensic verdicts RECONSTRUCTED ×3
 
 | ID | Requirement | Owner / Reviewer | Status |
 | --- | --- | --- | --- |
-| CWF-1 | Representation-scale record: per included entity why/what-state/what-info/what-authority/what-if-removed; per excluded candidate why exclusion is immaterial (§7) | world-compiler-impl / causal-adversary | OPEN |
-| CWF-2 | Operational aggregates modeled as multi-stage systems (demand/production/logistics-class causal questions as PLANNING questions, never runtime types) (§8) | world-compiler-impl / causal-adversary | OPEN |
-| CWF-3 | D4: one-step operational worlds refused (single set_field / arbitrary multiplier) | world-compiler-impl / causal-adversary | OPEN |
-| CWF-4 | D3 static gate: THRESHOLD_STRADDLING_UNGROUNDED_SCENARIOS refused at semantic validation | world-compiler-impl / causal-adversary | OPEN |
-| CWF-5 | D5: zero-actor admissibility rule; decorative actors rejected; necessary actors cannot be omitted | world-compiler-impl / causal-adversary | OPEN |
-| CWF-6 | Reviewer rejects: one-step terminal, ungrounded multiplier decides result, no intermediate state, skipped causal period (§ immediate-6) | world-compiler-impl / causal-adversary | OPEN |
-| CWF-7 | Resolution-rule ambiguity surfaced and adjudicated (OPEC+ scope class) instead of silently resolved | world-compiler-impl / retrieval-adversary | OPEN |
-| CWF-8 | Cross-domain regressions: straddling rejected; ungrounded equal branches ≠ calibrated point; genuine operational process runs with/without actors; decorative actors rejected; necessary actors required; one-step reporting ≠ production | world-compiler-impl+forecast-integrity / CTO | OPEN |
+| CWF-1 | Representation-scale record: per included entity why/what-state/what-info/what-authority/what-if-removed; per excluded candidate why exclusion is immaterial (§7) | world-compiler-impl / causal-adversary | OPEN — adversary BLOCK. FD-26 was misdiagnosed; real gap is vacuous satisfaction (`representation_record.included: []` AND `world_spec.entities: []` — no gate requires a world to contain the subject it is about). Needs a non-empty-record check for any non-factual terminal + reconciliation of `plan.entities` against `world_spec.entities`. |
+| CWF-2 | Operational aggregates modeled as multi-stage systems (demand/production/logistics-class causal questions as PLANNING questions, never runtime types) (§8) | world-compiler-impl / causal-adversary | OPEN — adversary BLOCK. FD-24 (non-negativity on the wrong code path) and FD-25 (occurrence count is a free parameter straddling the threshold in BOTH directions) are its substance. FD-39 (no dimensional analysis) is the generalizing defect underneath both. |
+| CWF-3 | D4: one-step operational worlds refused (single set_field / arbitrary multiplier) | world-compiler-impl / causal-adversary | OPEN — adversary BLOCK. FD-28, FD-33 and FD-30 EACH independently defeat D4 at `e079577` with all 25 regressions green. |
+| CWF-4 | D3 static gate: THRESHOLD_STRADDLING_UNGROUNDED_SCENARIOS refused at semantic validation | world-compiler-impl / causal-adversary | OPEN — adversary BLOCK. FD-29 (one cited leg silences D3), FD-30 (`cited()` is an existence check), FD-32 (UNKNOWN-initial accumulator invisible to both evaluators), FD-35 (16-combination cap), FD-25. |
+| CWF-5 | D5: zero-actor admissibility rule; decorative actors rejected; necessary actors cannot be omitted | world-compiler-impl / causal-adversary | OPEN — adversary BLOCK. FD-33 makes 'material actor' self-satisfying; the zero-actor justification is unchecked prose over an existence-only citation test; `expected_participants` comes from the planner it is supposed to constrain (FD-38). Tesla's zero-actor justification is REFUSED on four grounds against its own store. |
+| CWF-6 | Reviewer rejects: one-step terminal, ungrounded multiplier decides result, no intermediate state, skipped causal period (§ immediate-6) | world-compiler-impl / causal-adversary | OPEN — adversary BLOCK. FD-28, FD-25, FD-31, FD-33, FD-34, FD-37. The review COMPUTES the right fact (`_flipping_uncertainties` on the shipped good fixture) and discards it. |
+| CWF-7 | Resolution-rule ambiguity surfaced and adjudicated (OPEC+ scope class) instead of silently resolved | world-compiler-impl / retrieval-adversary | OPEN — adversary BLOCK. ZERO implementation (`grep -i ambigu` over src/ returns one unrelated comment). Design fixed below; FD-41 adds the mechanical branch. |
+| CWF-8 | Cross-domain regressions: straddling rejected; ungrounded equal branches ≠ calibrated point; genuine operational process runs with/without actors; decorative actors rejected; necessary actors required; one-step reporting ≠ production | world-compiler-impl+forecast-integrity / CTO | OPEN — adversary BLOCK, **and this one matters most**. The 25 regressions are green and EVERY attack passes them: the suite proves the gates fire on the shapes they were written from and contains no EVASION class. May not move until, per gate, at least one plan is the same defect in different syntax (FD-40). Eight ready-made cases exist: K1–K4, S1, S2, S5, S8. |
 
 ## FI — Forecast integrity (Phase 4)
 
@@ -116,3 +116,59 @@ Each MET only on real artifacts, judged by release-manager, who may return NOT R
 
 DEL-1..28 map 1:1 to §21 of the directive; tracked in DEFECT_REGISTER as they land.
 Final report answers the 30 questions of §22. PR #6 updated; never merged.
+
+## CWF-7 — adjudicated design (causal-adversary, accepted by CTO)
+
+**Status: zero implementation.** `grep -i ambigu` over `src/sworldmodel/` returns one unrelated
+comment in `coverage.py` and `schedule.py:153`'s release-instant refusal. There is no code anywhere.
+
+**Two candidate homes are wrong for structural reasons:**
+
+- **Not the planner.** By the time `semantic_plan` runs, the terminal *form* is being authored.
+  `SemanticPlan` has one `terminal` field — there is structurally no place to hold two readings, so
+  a planner asked to consider ambiguity will silently pick one. That is exactly what happened on OPEC+.
+- **Not `structures.assess_structure`.** It runs *after* `_build_contract` (api.py:1316 vs api.py:57)
+  and consumes a `ResolutionContract` whose `terminal` is in `_LOCKED_FIELDS` (models.py:162-171).
+  Structural uncertainty asks "which world produces the outcome" holding the outcome definition
+  fixed. Scope ambiguity asks "**which outcome**". It cannot be expressed there.
+
+**Correct home: a resolution-scope adjudication step on the evidence view, immediately before
+`_build_contract` (api.py:57-72), whose output is part of the contract.** It needs a model pass
+(reading a rule is a judgement) but **the gate must be mechanical.**
+
+Adjudication order:
+
+1. If `authoritative_resolution_sources` (already on the contract, models.py:147) names a resolver
+   whose published wording settles the scope → that reading wins; record the wording and its claim id.
+2. Else if the candidate readings **agree** on the outcome under the current record → record both,
+   proceed, note the ambiguity as immaterial.
+3. Else — readings disagree and no authority settles it → **this is not a point forecast.** Compile
+   one world per reading and carry the readings as explicit unresolved mass (the same honesty rule
+   `structures.py` already applies to an unrepresentable alternative), or refuse.
+   **It may never publish `[1,1]`.**
+
+Artifact (`resolution_contract.json`, or a `resolution_scope` block on `forecast.json` +
+`world_manifest.json`):
+
+- `question_as_asked` verbatim
+- `readings: [{reading_id, statement, scope, unit, resolver, supporting_claim_ids,
+  contradicting_claim_ids, outcome_under_current_record}]` — for OPEC+: (a) group-wide quota level,
+  (b) the eight-country voluntary-cut unwinding; the store supports both
+- `adjudication: {method: authoritative_source | evidence_agreement | unresolved,
+  chosen_reading_id, why, authority_quote, authority_claim_id}`
+- `readings_disagree: bool`, and when true `bounds_forced: true` with per-reading mass
+- **the negative case explicitly**: `readings_considered: 1` plus `why_no_alternative_reading`.
+  This is the crux — the OPEC+ artifact records nothing at all, so *"we looked and it was
+  unambiguous"* is indistinguishable from *"nobody looked."*
+
+**Interaction the assignee must be told about (FD-41):** for a cited-factual-resolution world,
+`mechanical_world_checks` short-circuits to a single PASS at `world_review.py:460-470`
+(`_cited_factual_resolution`, `world_compiler.py:1689`). The OPEC+ class therefore receives *zero*
+mechanical scrutiny; the only remaining attack is `terminal_preresolved` in the LLM review, which
+`_settled_record_block` (world_review.py:718+) correctly aims at the citation's fit to the question
+— but that is an opinion with no mechanical backstop, and it goes advisory under FD-34. **CWF-7 must
+supply the mechanical branch: when a terminal is preresolved from citations, at least one
+reading-level check has to be a hard gate.**
+
+Ownership: `integration-1` + `world-compiler-impl` jointly (it sits at the api.py seam and consumes
+the evidence view); reviewer `retrieval-adversary`.
