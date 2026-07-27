@@ -100,11 +100,31 @@ def render_decision_prompt(context: dict[str, Any]) -> str:
             _block("PUBLIC FACTS", context.get("public_facts")),
             _block("FEASIBLE ACTIONS AVAILABLE TO YOU RIGHT NOW", context.get("feasible_actions")),
             f"Novel actions allowed: {context.get('allow_novel', True)}",
-            "Choose ONE action. You may pick one of the feasible compiled actions, or — if",
-            "none fits your situation — propose a NOVEL action describing what you attempt,",
-            "its target, parameters and intended effect. A novel action does NOT",
-            "automatically happen: the world decides. You state an intention only; you may",
-            "never assert a consequence. If an action needs a parameter (an option, an",
+            # The flag and the invitation used to disagree: the line below said "you may
+            # propose a NOVEL action" unconditionally, so a moment compiled with
+            # allow_novel false announced the restriction and then invited the actor past
+            # it in the next sentence. The engine only enforces the flag when there are
+            # NO feasible compiled actions, so on every other wake the invitation was the
+            # whole of the rule — which is how the novel path kept firing at moments the
+            # compiler had closed.
+            *(
+                [
+                    "Choose ONE action. You may pick one of the feasible compiled "
+                    "actions, or — if none fits your situation — propose a NOVEL action "
+                    "describing what you attempt, its target, parameters and intended "
+                    "effect. A novel action does NOT automatically happen: the world "
+                    "decides. You state an intention only; you may never assert a "
+                    "consequence.",
+                ]
+                if context.get("allow_novel", True)
+                else [
+                    "Choose ONE action from the feasible compiled actions above. This "
+                    "moment does not admit novel actions: if none of them fits your "
+                    "situation, choose wait and say what you are waiting for rather "
+                    "than proposing something else.",
+                ]
+            ),
+            "If an action needs a parameter (an option, an",
             "amount, a recipient) you must state it explicitly — nothing will be chosen on",
             "your behalf, and an action missing a parameter is refused.",
             "If the right thing to do is nothing yet, choose wait and say what you are",
