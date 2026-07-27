@@ -34,7 +34,7 @@ from _worlds import AS_OF, HORIZON, scheduled_multiparty_world
 from sworldmodel.api import ReviewRound, WorldReviewRecord, run_forecast
 from sworldmodel.config import ForecastConfig
 from sworldmodel.diagnosis import ForecastRefused, RunDiagnosis
-from sworldmodel.world_review import AuditFinding, WorldReview
+from sworldmodel.world_review import _QUESTIONS, AuditFinding, WorldReview
 
 AS_OF_DT = datetime.fromisoformat(AS_OF)
 HORIZON_DT = datetime.fromisoformat(HORIZON)
@@ -338,13 +338,18 @@ def test_a_world_that_passes_its_first_review_is_reviewed_once() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# 4. A review that could not run is advisory and never blocks. Unchanged behavior.
+# 4. The two halves of a review are priced differently (FD-34).
+#
+# An OPINION that could not be obtained decides nothing — a provider outage is not a
+# verdict about a world, and that behavior is unchanged. A MECHANICAL finding is a fact
+# computed from the compiled world with no provider involved, so a provider outage must
+# not launder it into an advisory note.
 # --------------------------------------------------------------------------- #
 
 
-def test_a_review_that_could_not_run_never_blocks_publication() -> None:
-    """An opinion about a world must never be able to stop it. A provider failure in the
-    reviewer is not a verdict, and the run publishes exactly as it did before."""
+def test_a_missing_opinion_over_a_mechanically_clean_world_never_blocks() -> None:
+    """The reviewer was unreachable and the world's own checks found nothing. The run
+    publishes exactly as it did before — and is never described as reviewed."""
 
     gw = _gateway(fail=frozenset({"world_review"}))
     result, ctx = run_forecast(QUESTION, AS_OF_DT, HORIZON_DT, _config(gw))
@@ -353,12 +358,16 @@ def test_a_review_that_could_not_run_never_blocks_publication() -> None:
     assert result.status.value == "resolved"
     record = ctx.world_review
     assert record.error.startswith("the review could not run")
+    assert record.model_opinion_obtained is False
+    assert record.surviving_mechanical_blocking == ()
     assert record.blocks_publication is False
-    # Not "valid" either: nobody looked. The publication gate is handed None, which it
-    # must price as unassessed rather than as a review that passed.
+    # Not "valid" either: nobody attacked it. The publication gate is handed None, which
+    # it must price as unassessed rather than as a review that passed — the fourth state
+    # ("no opinion, mechanically clean") must never read as the second ("ran and passed").
     assert record.world_review_blocking is None
     assert record.causal_simulation_valid is False
-    assert "did not complete" in " ".join(result.limitations)
+    assert "no adversarial review" in " ".join(result.limitations)
+    assert "NOT validated" in " ".join(result.limitations)
     assert "could not run" in record.disposition
 
 
@@ -366,12 +375,7 @@ def test_a_failed_review_with_nothing_blocking_asks_for_no_repair(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Repair answers findings. When the model half failed and the mechanical half found
-    nothing, there is nothing to answer — no recompile, no budget spent on an outage.
-
-    (An errored review whose MECHANICAL half does block still drives repair, exactly as
-    before: those are facts about the compiled world, not the opinion that was missing.
-    What it may never do is block publication.)
-    """
+    nothing, there is nothing to answer — no recompile, no budget spent on an outage."""
 
     gw = _gateway(fail=frozenset({"world_review"}))
     recompiles: list[str] = []
@@ -385,35 +389,74 @@ def test_a_failed_review_with_nothing_blocking_asks_for_no_repair(
 
     assert len(ctx.world_review.rounds) == 1
     assert not recompiles, "nothing was raised, so there was nothing to repair"
-    assert "decided nothing and blocked nothing" in ctx.world_review.disposition
+    assert "no opinion about this world was obtained" in ctx.world_review.disposition
 
 
-def test_a_failed_review_carrying_blocking_mechanical_findings_still_never_blocks() -> None:
-    """The rule stated directly, over a record whose model half failed while its
-    mechanical half found something blocking. Advisory means advisory: nothing is
-    refused, the findings stay in the record, and the seam reports 'not assessed'."""
+def _errored_review_with(finding: AuditFinding) -> WorldReviewRecord:
+    """A record whose model call failed while its mechanical half found something."""
 
-    finding = AuditFinding(
-        key="no_intermediate_production_state",
-        severity="HIGH",
-        finding="the world's mechanisms write nothing except the terminal quantity",
-        evidence_basis="computed from the compiled world",
-    )
     review = WorldReview(
-        answers=(("no_intermediate_production_state", False, finding.finding),),
-        failed_blocking=("no_intermediate_production_state",),
+        answers=((finding.key, False, finding.finding),),
+        failed_blocking=(finding.key,),
         error="the review could not run: GatewayError: provider down",
         findings=(finding,),
     )
-    record = WorldReviewRecord((ReviewRound(0, "abc123", review),))
+    return WorldReviewRecord((ReviewRound(0, "abc123", review),))
 
-    assert record.surviving_blocking == (finding,)
-    assert record.blocks_publication is False
-    assert record.world_review_blocking is None
+
+def test_an_unreachable_reviewer_cannot_launder_a_computed_blocker() -> None:
+    """FD-34, the bypass this closes: with the review call failing, a CRITICAL the world
+    computed about ITSELF used to become an advisory note and the run published.
+
+    ``world_review.py``'s own comment already said the mechanical findings survive a
+    failed model call. They now survive into the GATE, not merely into the record: a
+    provider outage is not evidence about a world and must not launder a fact about one.
+    """
+
+    record = _errored_review_with(
+        AuditFinding(
+            key="terminal_set_in_one_step",
+            severity="CRITICAL",
+            finding="the terminal quantity is written once and never built",
+            evidence_basis="computed from the compiled world",
+        )
+    )
+
+    assert record.model_opinion_obtained is False
+    assert len(record.surviving_mechanical_blocking) == 1
+    assert record.blocks_publication is True, "a computed CRITICAL blocks whoever is down"
     assert record.causal_simulation_valid is False
-    (limitation,) = api._review_limitations(record)
-    assert "no_intermediate_production_state" in limitation
-    assert "NOT validated" in limitation
+    # Nothing publishes, so the seam is never consulted; it still reports honestly.
+    assert record.world_review_blocking is None
+    assert api._review_limitations(record) == (), "nothing is published, so nothing is caveated"
+    refusal = api._review_refusal(record)
+    assert "terminal_set_in_one_step" in str(refusal)
+    assert "No adversarial opinion was obtained" in str(refusal)
+    assert refusal.details["surviving_mechanical_blocking_findings"] == ["terminal_set_in_one_step"]
+    assert refusal.details["model_opinion_obtained"] is False
+
+
+def test_an_unreachable_reviewer_still_cannot_block_on_an_opinion() -> None:
+    """The other half of the ruling, and the part that does NOT change: a model-authored
+    finding on a record whose model call failed decides nothing.
+
+    (Unreachable in production — a failed call returns only mechanical findings — and
+    asserted directly so the rule is pinned by the rule rather than by that accident.)
+    """
+
+    record = _errored_review_with(
+        AuditFinding(
+            key="decorative_actors",
+            severity="CRITICAL",
+            finding="every actor is decoration",
+            evidence_basis="the compiled world",
+        )
+    )
+
+    assert record.surviving_mechanical_blocking == ()
+    assert record.blocks_publication is False
+    assert record.causal_simulation_valid is False
+    assert record.world_review_blocking is None
 
 
 # --------------------------------------------------------------------------- #
@@ -463,8 +506,12 @@ def test_the_refusal_reaches_the_diagnosis_with_its_review_and_a_named_mechanism
         "expert_would_call_incomplete",
     ]
     causes = [c["cause"] for c in written["root_cause"]]
-    assert "compiler_omission" in causes, causes
+    # Its own root cause, not `compiler_omission` borrowed: nothing was left out by
+    # accident. A world was built, examined, found unfit, sent back, and still found
+    # unfit — the fix is a different world, not a missing piece added to this one.
+    assert "world_refused_by_its_own_review" in causes, causes
     assert "unclassified" not in causes
+    assert "compiler_omission" not in causes
 
     # The same artifact name a completed run writes, so one file answers "what did the
     # review say?" whether the run published or refused.
@@ -492,3 +539,126 @@ def _compile(bundle: Any, gw: ProgrammableGateway) -> Any:
         seed=0,
         max_branches=6,
     )
+
+
+# --------------------------------------------------------------------------- #
+# 6. FD-41 — a world that answers from the record is examined, not waved through.
+#
+# `mechanical_world_checks` used to short-circuit to a single PASS the moment
+# `_cited_factual_resolution` held, so the whole settled-record class of run (the
+# OPEC+/EU-Mercosur shape) received no mechanical scrutiny at all: any claim id
+# attached to any initial value established any outcome, and the only remaining
+# attack was one LLM opinion which — before the FD-34 ruling — went advisory the
+# moment the provider hiccupped. The attack moves to the citation itself.
+# --------------------------------------------------------------------------- #
+
+
+def _settled_world(*, cite: list[str] | None = None) -> dict[str, Any]:
+    """A world whose terminal is already YES at t0 on a cited pre-cutoff record."""
+
+    world = scheduled_multiparty_world(members=2, threshold=2)
+    cited = world["claims"][0]["id"]
+    world["world_spec"]["documents"] = [
+        {
+            "document_id": "agreement",
+            "fields": {"signed": True},
+            "evidence_claim_ids": [cited] if cite is None else cite,
+        }
+    ]
+    world["world_spec"]["terminal"]["yes_when"] = {
+        "op": "equals",
+        "args": [{"op": "document_field", "args": ["agreement", "signed"]}, True],
+    }
+    world["world_spec"]["terminal"]["unresolved_when"] = {"op": "const", "args": [False]}
+    return world
+
+
+def _mechanical(world: dict[str, Any]) -> dict[str, Any]:
+    from sworldmodel.world_review import mechanical_world_checks
+
+    bundle = build_bundle(world)
+    gw = _gateway()
+    compiled = _compile(bundle, gw)
+    view = bundle.evidence_store.view(AS_OF_DT)
+    return {f.key: f for f in mechanical_world_checks(compiled, view)}
+
+
+def test_a_settled_record_world_is_mechanically_examined_not_waved_through() -> None:
+    """The legitimate shape still passes — and now it passes something."""
+
+    from sworldmodel.world_compiler import _cited_factual_resolution
+
+    world = _settled_world()
+    bundle = build_bundle(world)
+    compiled = _compile(bundle, _gateway())
+    assert _cited_factual_resolution(compiled.spec, compiled.base_world), "fixture is settled"
+
+    findings = _mechanical(world)
+    # The operational-depth attacks stay off: a question the record already answered is
+    # not re-produced inside the window, and demanding a production process for it is
+    # what manufactured an absolute NO on a live Bank of England run.
+    assert findings["terminal_set_in_one_step"].severity == "PASS"
+    # But the citation is now examined, and the checks are real checks.
+    assert findings["cited_resolution_claims_exist"].severity == "PASS"
+    assert findings["cited_resolution_rests_on_the_record"].severity == "PASS"
+    assert findings["cited_resolution_subject_matches"].severity == "PASS"
+    assert [k for k, f in findings.items() if f.is_blocking] == []
+    for finding in findings.values():
+        assert finding.evidence_basis.startswith("computed from the compiled world")
+
+
+def test_a_settled_record_citing_a_claim_that_does_not_exist_is_refused() -> None:
+    """FD-30's shape at the point it decides an answer: the citation is an existence
+    check, so any id grounds anything. An id that names nothing grounds nothing."""
+
+    findings = _mechanical(_settled_world(cite=["c_session", "c_no_such_claim"]))
+
+    exists = findings["cited_resolution_claims_exist"]
+    assert exists.severity == "CRITICAL"
+    assert exists.is_blocking
+    assert "c_no_such_claim" in exists.finding
+
+
+def test_a_settled_record_about_something_else_is_refused() -> None:
+    """Subject and measurement scope must match: 'the record already answered this' is
+    not established by a record about a different subject."""
+
+    world = _settled_world()
+    # Same world, same citation, a subject the cited claim says nothing about.
+    world["world_spec"]["subject_entity"] = "the Kerguelen desalination tariff"
+    findings = _mechanical(world)
+
+    match = findings["cited_resolution_subject_matches"]
+    assert match.severity == "HIGH"
+    assert match.is_blocking
+    assert "Kerguelen" in match.finding or "kerguelen" in match.finding.lower()
+
+
+def test_a_settled_record_resting_on_inference_rather_than_record_is_refused() -> None:
+    """A conclusion somebody drew is not a record of what happened."""
+
+    world = _settled_world()
+    for claim in world["claims"]:
+        claim["epistemic_type"] = "inference"
+    findings = _mechanical(world)
+
+    rests = findings["cited_resolution_rests_on_the_record"]
+    assert rests.severity == "CRITICAL"
+    assert rests.is_blocking
+
+
+def test_the_settled_record_checks_reach_the_publication_gate_end_to_end() -> None:
+    """Not merely computed: a settled-record world with a broken citation must not
+    publish, and must not become publishable by the reviewer being unreachable."""
+
+    world = _settled_world(cite=["c_session", "c_no_such_claim"])
+    for reviews, why in (
+        ([_clean(*[k for k, _ in _QUESTIONS])], "with the reviewer answering"),
+        (None, "with the reviewer unreachable"),
+    ):
+        gw = _gateway(reviews, fail=frozenset() if reviews else frozenset({"world_review"}))
+        with pytest.raises(ForecastRefused) as caught:
+            run_forecast(QUESTION, AS_OF_DT, HORIZON_DT, _config(gw, world))
+        details = caught.value.__cause__.details  # type: ignore[union-attr]
+        assert "cited_resolution_claims_exist" in details["surviving_blocking_findings"], why
+        assert "cited_resolution_claims_exist" in details["surviving_mechanical_blocking_findings"]

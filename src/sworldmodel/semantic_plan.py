@@ -368,6 +368,12 @@ class SemanticChange:
     amount: SemanticValue | None = None  # for increase/decrease
     recipients: tuple[str, ...] = ()  # for send: entity names
     detail: str = ""  # open-ended meaning (e.g. what the recorded event's value is)
+    # For an increase: the stock this quantity comes OUT of. Without it, a tally that
+    # counts what a stock gives up counts what the stock was ASKED for rather than what
+    # it had — so a depleted elevator still reports a full quarter of shipments and the
+    # clamp protects the pile while the answer stays wrong. Naming the source makes the
+    # two sides of one movement the same clamped amount.
+    drawn_from: str = ""
 
 
 @dataclass(frozen=True)
@@ -750,6 +756,7 @@ def _change(obj: Any, where: str, errors: list[str]) -> SemanticChange | None:
         amount=_value(obj.get("amount"), f"{where}.amount", errors),
         recipients=tuple(str(r) for r in recipients) if isinstance(recipients, list) else (),
         detail=_s(obj, "detail", where, errors),
+        drawn_from=_s(obj, "drawn_from", where, errors),
     )
 
 
@@ -1171,7 +1178,7 @@ def _numeric(value: Any) -> float | None:
     return None
 
 
-def _flow_periods(plan: SemanticPlan) -> dict[str, Period]:
+def flow_periods(plan: SemanticPlan) -> dict[str, Period]:
     """Every declared rate's period, for the arithmetic that reads rate × duration."""
 
     out: dict[str, Period] = {}
@@ -1248,7 +1255,7 @@ def _forward_state_values(plan: SemanticPlan, draw: dict[str, float]) -> dict[st
     fire rather than inventing a zero.
     """
 
-    flows = _flow_periods(plan)
+    flows = flow_periods(plan)
     env = {s.name: n for s in plan.states if (n := _numeric(s.initial)) is not None}
     env.update(draw)
     for c in _mechanism_changes(plan):
@@ -1758,7 +1765,7 @@ def _straddling_errors(plan: SemanticPlan, cited: Any) -> list[str]:
                     env = _forward_state_values(plan, {**base, u.affects_state: value})
                     quantity = env.get(state)
                     limit = (
-                        _eval_value(threshold, env, _flow_periods(plan))
+                        _eval_value(threshold, env, flow_periods(plan))
                         if threshold is not None
                         else None
                     )
@@ -1851,9 +1858,7 @@ def _break_even(
         mid = (lo + hi) / 2.0
         env = _forward_state_values(plan, {**base, variable: mid})
         quantity = env.get(state)
-        limit = (
-            _eval_value(threshold, env, _flow_periods(plan)) if threshold is not None else None
-        )
+        limit = _eval_value(threshold, env, flow_periods(plan)) if threshold is not None else None
         if quantity is None or limit is None:
             return None
         if _satisfies(comparison, quantity, limit) == side_at_lo:
@@ -1940,7 +1945,7 @@ def _dimension_errors(plan: SemanticPlan) -> list[str]:
     errors: list[str] = []
     kinds = {s.name: s.kind for s in plan.states}
     units = {s.name: s.unit for s in plan.states}
-    flows = _flow_periods(plan)
+    flows = flow_periods(plan)
 
     def check_value(value: SemanticValue | None, target: str, where: str, verb: str) -> None:
         if value is None or target not in kinds:
@@ -1980,8 +1985,7 @@ def _dimension_errors(plan: SemanticPlan) -> list[str]:
         _scalars, why = duration_scalars(value.parts, flows)
         if why:
             errors.append(
-                f"DURATION_MISUSED: {where}: {why}. Correction boundary: the parts of this "
-                "product"
+                f"DURATION_MISUSED: {where}: {why}. Correction boundary: the parts of this product"
             )
         for part in value.parts:
             check_durations(part, where)
@@ -2023,21 +2027,20 @@ def _dimension_errors(plan: SemanticPlan) -> list[str]:
 
 
 def _state_kind_errors(plan: SemanticPlan) -> list[str]:
-    """FD-24: a physical quantity must say it is one, and then it is conserved.
+    """FD-24: a physical quantity must say it is one, and then it has a floor.
 
-    The runtime has always had conserved quantities — ``transfer_resource`` and
-    ``consume_resource`` refuse a move that would overdraw a holder — but the semantic
-    vocabulary had no way to say "this is a stock", so every quantity lowered to bare
-    arithmetic on a field and the conservation was unreachable. A live world drained
-    inventory below zero for a whole quarter and resolved every branch on the result.
+    The vocabulary had only datatypes, so a warehouse and a thermometer were the same
+    object and the only way to change either was bare arithmetic on a field. A live world
+    drained an inventory forty-eight thousand units below zero across a quarter and
+    resolved every branch on the result: the arithmetic was impossible and nothing in
+    the language could say so.
 
-    The rule is about shape, not subject: a quantity something draws down is a stock (a
-    reservoir, an elevator, a berth roster, a ward's beds) unless the plan says why this
-    particular quantity may legitimately go negative — a net position, a spread, a
-    temperature difference. A quantity that grows is growing into somewhere, so a stock
-    that any change increases declares the capacity it grows into; that ceiling is what
-    lets the increase be a *move* of quantity rather than an invention of it, and both
-    bounds then fall out of the same conservation.
+    The rule is about shape, not subject. A quantity something draws down is a stock — a
+    reservoir, an elevator, a berth queue, a ward's beds — unless the plan says why this
+    particular quantity may legitimately go below its floor: a net position, a spread, a
+    difference. A stock declares where it starts, the floor it cannot be drawn through
+    and, if anything adds to it, the capacity it fills to; lowering then clamps every
+    move at those bounds and records what could not be moved.
     """
 
     errors: list[str] = []
@@ -2045,10 +2048,17 @@ def _state_kind_errors(plan: SemanticPlan) -> list[str]:
     decreased = {c.target for c in changes if c.op == "decrease"}
     increased = {c.target for c in changes if c.op == "increase"}
     assigned = {c.target for c in changes if c.op == "set"}
-    terminal_read = _terminal_states(plan.terminal)
+    terminal_read = _lineage_states(plan, _terminal_states(plan.terminal))
 
     for s in plan.states:
         where = f"state {s.name!r}"
+        if s.state_type == "quantity" and not s.unit.strip():
+            errors.append(
+                f"UNIT_UNDECLARED: {where} is a quantity with no unit — what it is "
+                "measured in is what makes it comparable with anything else, and a "
+                "number with no unit cannot be checked against a rate, a threshold or "
+                "another quantity at all. Correction boundary: unit on this state"
+            )
         if s.kind != "flow" and s.period:
             errors.append(
                 f"{where}: only a flow declares a period — a {s.kind} is a quantity or a "
@@ -2058,6 +2068,11 @@ def _state_kind_errors(plan: SemanticPlan) -> list[str]:
             errors.append(
                 f"{where}: not_a_stock_because belongs on a level that has to explain "
                 f"itself, not on a {s.kind}. Correction boundary: drop that field"
+            )
+        if s.kind != "stock" and (s.capacity is not None or s.conserved_floor):
+            errors.append(
+                f"{where}: capacity and conserved_floor are a stock's bounds, and this "
+                f"state is a {s.kind}. Correction boundary: kind, or drop those fields"
             )
 
         if s.kind == "flow":
@@ -2072,10 +2087,10 @@ def _state_kind_errors(plan: SemanticPlan) -> list[str]:
                     f"FLOW_PERIOD_UNDECLARED: {where} is declared a flow — a rate — but "
                     f"its period is {s.period!r}, which is not a positive ISO-8601 "
                     "duration. A rate with no period is a number pretending to be a "
-                    "mechanism: how much it produces depends entirely on how often it is "
-                    "applied, and nothing can check that until the period is stated. "
-                    "Correction boundary: period on this state (P1D, P1W, P1M, PT6H …), "
-                    "or declare it kind=level if it is a total rather than a rate"
+                    "mechanism: what it produces depends entirely on how long it runs, "
+                    "and nothing can check that until the period is stated. Correction "
+                    "boundary: period on this state (P1D, P1W, P1M, PT6H …), or "
+                    "kind=level if it is a total rather than a rate"
                 )
 
         if s.kind == "stock":
@@ -2089,50 +2104,55 @@ def _state_kind_errors(plan: SemanticPlan) -> list[str]:
             if initial is None:
                 errors.append(
                     f"STOCK_DECLARATION_INCOMPLETE: {where} is a stock with initial "
-                    f"{s.initial!r} — a conserved quantity has to start at a known "
-                    "amount, because there is no such thing as an unknown number of "
-                    "things in a container and every later move is checked against it. "
-                    "Correction boundary: a cited initial quantity on this state, or "
-                    "kind=level if the record genuinely does not establish the level"
+                    f"{s.initial!r} — a quantity held somewhere has to start at a known "
+                    "amount, because every later move is measured against it and an "
+                    "UNKNOWN one is invisible to every check that would catch a "
+                    "physically impossible run. Correction boundary: a cited initial "
+                    "quantity on this state, or kind=level with not_a_stock_because if "
+                    "the record genuinely does not establish the level"
                 )
-            elif initial < 0:
+            elif initial < s.conserved_floor:
                 errors.append(
-                    f"STOCK_DECLARATION_INCOMPLETE: {where} is a stock starting at "
-                    f"{initial:g} — a stock cannot begin below zero. Correction boundary: "
-                    "the initial value, or kind"
+                    f"STOCK_DECLARATION_INCOMPLETE: {where} starts at {initial:g}, below "
+                    f"its own floor of {s.conserved_floor:g}. Correction boundary: the "
+                    "initial value, or conserved_floor"
                 )
             if s.name in assigned:
                 errors.append(
                     f"UNCONSERVED_PHYSICAL_STOCK: {where} is a stock and something 'set's "
-                    "it — assigning a conserved quantity makes it appear or vanish "
-                    "without moving anywhere, which is exactly the arithmetic a stock "
-                    "exists to forbid. Correction boundary: express the change as "
+                    "it — assigning a held quantity makes it appear or vanish without "
+                    "moving anywhere, which is exactly the arithmetic a stock exists to "
+                    "forbid. Correction boundary: express the change as "
                     "increase/decrease of the amount that moves, or declare the state "
                     "kind=level if it is a reading rather than a quantity held somewhere"
                 )
-            if s.name in increased:
-                if s.capacity is None:
-                    errors.append(
-                        f"STOCK_DECLARATION_INCOMPLETE: {where} is a stock something adds "
-                        "to, but declares no capacity — quantity that enters a stock "
-                        "comes from somewhere and occupies room that is finite, and "
-                        "without the ceiling the inflow is quantity invented rather than "
-                        "moved. Correction boundary: capacity on this state (the physical "
-                        "ceiling: the reservoir's volume, the elevator's tonnage, the "
-                        "ward's beds), or kind=level with not_a_stock_because if this is "
-                        "a running tally that nothing can draw down"
-                    )
-                elif initial is not None and s.capacity < initial:
-                    errors.append(
-                        f"STOCK_DECLARATION_INCOMPLETE: {where} starts at {initial:g} with "
-                        f"capacity {s.capacity:g} — it begins over its own ceiling. "
-                        "Correction boundary: capacity or initial"
-                    )
-            if s.capacity is not None and s.capacity <= 0:
+            if s.capacity is not None and initial is not None and s.capacity < initial:
+                errors.append(
+                    f"STOCK_DECLARATION_INCOMPLETE: {where} starts at {initial:g} with "
+                    f"capacity {s.capacity:g} — it begins over its own ceiling. "
+                    "Correction boundary: capacity or initial"
+                )
+            if s.capacity is not None and s.capacity <= s.conserved_floor:
                 errors.append(
                     f"STOCK_DECLARATION_INCOMPLETE: {where} declares capacity "
-                    f"{s.capacity:g} — a stock's ceiling is a positive quantity. "
-                    "Correction boundary: capacity"
+                    f"{s.capacity:g} at or below its floor {s.conserved_floor:g} — there "
+                    "is no room between them for anything to be held. Correction "
+                    "boundary: capacity or conserved_floor"
+                )
+            if s.name in decreased and s.name not in increased and s.name in terminal_read:
+                # Refusable before anything runs: a stock the world only ever draws on,
+                # standing between the cutoff and the answer, cannot be what the record
+                # says it is unless nothing replenishes it inside the window — and if
+                # nothing does, the plan should say what the world does when it empties.
+                errors.append(
+                    f"STOCK_DRAINED_WITHOUT_INFLOW: {where} is drawn down by this world "
+                    "and nothing anywhere puts anything back, while the terminal depends "
+                    "on it — so the answer is decided by how long the starting amount "
+                    "lasts, and the plan never says whether that is true of the real "
+                    "world. Correction boundary: model the inflow that replenishes it "
+                    "(with its own rate and cadence), or state in why_material that this "
+                    "quantity genuinely is not replenished inside the window so the "
+                    "drawdown is the mechanism"
                 )
 
         if s.kind == "level" and s.state_type == "quantity" and not s.not_a_stock_because.strip():
@@ -2142,55 +2162,95 @@ def _state_kind_errors(plan: SemanticPlan) -> list[str]:
                     "decreases it, so nothing stops it going below zero — a live world "
                     "drained one of these for a whole quarter and resolved on the "
                     "impossible arithmetic. If this is a quantity held somewhere, declare "
-                    "kind=stock (with its owner as holder, a known initial amount, and a "
-                    "capacity if anything adds to it) and the runtime will refuse a move "
-                    "that would overdraw it. Correction boundary: kind=stock on this "
-                    "state, or not_a_stock_because saying why this particular quantity "
-                    "may legitimately go below zero (a net position, a balance, a "
-                    "difference)"
+                    "kind=stock (with its holder, a known initial amount, its floor, and "
+                    "a capacity if anything adds to it) and every draw on it is clamped "
+                    "at the floor with the shortfall recorded. Correction boundary: "
+                    "kind=stock on this state, or not_a_stock_because saying why this "
+                    "particular quantity may legitimately go below zero (a net position, "
+                    "a balance, a difference)"
                 )
             elif s.name in terminal_read and s.name in increased:
                 errors.append(
-                    f"ACCUMULATING_QUANTITY_UNDECLARED: the terminal reads {s.name!r}, "
-                    "which this world accumulates, and it is declared a plain level — so "
-                    "nothing in the plan says whether it is a quantity held somewhere or "
-                    "a tally of what has already happened. The answer turns on it, so it "
-                    "has to be said. Correction boundary: kind=stock on this state (with "
-                    "its initial amount and its capacity), or not_a_stock_because saying "
-                    "why it is a running record rather than a conserved quantity"
+                    f"ACCUMULATING_QUANTITY_UNDECLARED: the terminal depends on "
+                    f"{s.name!r}, which this world accumulates, and it is declared a "
+                    "plain level — so nothing in the plan says whether it is a quantity "
+                    "held somewhere or a tally of what has already happened. The answer "
+                    "turns on it, so it has to be said. Correction boundary: kind=stock "
+                    "on this state (with its initial amount, floor and capacity), or "
+                    "not_a_stock_because saying why it is a running record rather than a "
+                    "conserved quantity"
                 )
+
+        # CW-F: an accumulator with no starting point is invisible to every forward
+        # evaluator this module and the reviewer run — `_forward_state_values` cannot
+        # begin the sum, so the straddling gate, the break-even and the pre-simulation
+        # probe all silently decline. Requiring a citation for a precise initial made
+        # UNKNOWN the cheap way out for exactly the counters this vocabulary is meant to
+        # encourage, so the escape is closed where it matters: a quantity the terminal
+        # depends on and the world adds to must say where it starts, and "nothing has
+        # been recorded yet" is a claim the record can carry.
+        if (
+            s.state_type == "quantity"
+            and s.name in terminal_read
+            and s.name in increased
+            and _numeric(s.initial) is None
+        ):
+            errors.append(
+                f"ACCUMULATOR_WITHOUT_AN_ORIGIN: {where} is accumulated by this world and "
+                f"the terminal depends on it, but it starts at {s.initial!r} — an "
+                "accumulation with no starting point has no value at any moment, and "
+                "every check that would compare its total against the threshold declines "
+                "instead of firing. Correction boundary: the initial value on this state "
+                "— the amount recorded so far, cited (0 with the claim that nothing has "
+                "been recorded yet is a real and sufficient answer)"
+            )
     return errors
 
 
-def _flows_applied_by(process: SemanticProcess, flows: dict[str, SemanticState]) -> list[str]:
-    """Which declared rates this process's own firings apply."""
+def _process_duration(process: SemanticProcess) -> tuple[str, str]:
+    """The single length of time this process's firings each cover, or why there isn't one.
 
-    read: set[str] = set()
+    A firing that applies a rate says how long it runs for; two firings of one process
+    that claim different lengths are two mechanisms wearing one name, so that is refused
+    rather than averaged.
+    """
+
+    seen: list[str] = []
     for o in process.occurrences:
         for c in o.changes:
             for v in (c.value, c.amount):
                 if v is not None:
-                    read |= v.states_read()
-    return sorted(read & set(flows))
+                    seen.extend(v.durations())
+    unique = sorted(set(seen))
+    if not unique:
+        return "", ""
+    if len(unique) > 1:
+        return "", (
+            f"its firings claim to cover different lengths of time ({unique}) — one "
+            "process is one mechanism, and a mechanism has one cadence"
+        )
+    return unique[0], ""
 
 
 def _cadence_errors(plan: SemanticPlan) -> list[str]:
-    """FD-25: a process that applies a rate must fire at that rate across its window.
+    """FD-25: the number of firings is derived from a window, never typed by hand.
 
-    A live world applied a WEEKLY delivery rate at two dates in a ten-week quarter, so
-    the quarter's deliveries were the rate times two and every branch resolved NO. The
-    published number was an artifact of how many dates the planner typed, and nothing
-    checked it — the plan was internally consistent, cited, multi-stage and wrong.
+    A live world applied a WEEKLY rate at two dates in a ten-week quarter, so the total
+    was the rate times two and every branch resolved NO on an artifact of the schedule.
+    The adversary then showed the same hole in the other direction on one invented world:
+    the identical mechanism typed eight times totals 840 and typed ten times totals 990
+    against a threshold of 900, and both pass every other gate. The count IS the answer,
+    so it may not be a free integer.
 
-    The rule is "declare your cadence", not "count my occurrences for me": a process
-    that applies a declared rate either states its recurrence (and code enumerates every
-    firing) or enumerates a calendar that actually spans its own window at the rate's
-    period. The shortfall is named, so the correction is arithmetic rather than
-    guesswork.
+    Once a firing declares the length of time it covers (see the dimensional gate — a
+    rate cannot be applied without one), the count is arithmetic: a window from the first
+    firing to the last holds exactly as many firings of that length as it holds, and a
+    calendar that disagrees with its own window is refused in whichever direction it
+    disagrees. Declaring a recurrence sidesteps the question entirely, which is the
+    point: code enumerates, the planner declares.
     """
 
     errors: list[str] = []
-    flows = {s.name: s for s in plan.states if s.kind == "flow"}
     for p in plan.processes:
         rec = p.recurrence
         if rec is not None:
@@ -2256,56 +2316,62 @@ def _cadence_errors(plan: SemanticPlan) -> list[str]:
 
         if p.kind == "actor_moment":
             continue
-        applied = _flows_applied_by(p, flows)
-        if not applied:
+        covered, why = _process_duration(p)
+        if why:
+            errors.append(
+                f"DURATION_MISUSED: process {p.name!r}: {why}. Correction boundary: the "
+                "durations inside this process's changes"
+            )
             continue
-        usable = [
-            (name, period)
-            for name in applied
-            if (period := parse_period(flows[name].period)) is not None and period.is_positive()
-        ]
-        if not usable:
-            continue  # FLOW_PERIOD_UNDECLARED already names this
-        flow_name, period = min(usable, key=lambda kv: kv[1].approx_seconds())
+        if not covered:
+            continue  # nothing here applies a rate; there is no cadence to check
+        span = parse_period(covered)
+        if span is None or not span.is_positive():
+            continue  # the dimensional gate names it
 
         if rec is not None:
             rec_period = parse_period(rec.period)
-            mismatched = sorted(
-                name
-                for name, fp in usable
-                if rec_period is not None
-                and (fp.months, fp.seconds) != (rec_period.months, rec_period.seconds)
-            )
-            if rec_period is not None and mismatched:
+            if rec_period is not None and (rec_period.months, rec_period.seconds) != (
+                span.months,
+                span.seconds,
+            ):
                 errors.append(
                     f"RECURRENCE_DECLARATION_INVALID: process {p.name!r} fires every "
-                    f"{rec.period} but applies rate(s) {mismatched} quoted over a "
-                    "different period — applying a weekly rate daily would deliver seven "
-                    "weeks of work every week, and this compiler will not silently "
-                    "rescale a number the evidence quoted. Correction boundary: state the "
-                    "recurrence at the rate's own period, or declare a rate at the "
-                    "recurrence's period"
+                    f"{rec.period} but each firing claims to cover {covered} — the world "
+                    f"would advance {covered} of the mechanism every {rec.period} of the "
+                    "calendar, counting the same time more than once or skipping it. "
+                    "Correction boundary: the duration inside the recurrence's changes, "
+                    "or the recurrence period — they are the same length of time"
                 )
             continue
 
         dates = sorted(w for o in p.occurrences if (w := _parse_when(o.at)) is not None)
         if len(dates) < 2:
             continue
-        required = firings_between(dates[0], dates[-1], period)
-        if len(dates) >= required:
+        required = firings_between(dates[0], dates[-1], span)
+        if len(dates) == required:
             continue
-        errors.append(
-            f"UNDER_ENUMERATED_CADENCE: process {p.name!r} applies {flow_name!r}, a rate "
-            f"quoted per {flows[flow_name].period}, across {dates[0].isoformat()} → "
-            f"{dates[-1].isoformat()} — a window that holds {required} firings at that "
-            f"rate — but enumerates only {len(dates)}. The quantity it produces is the "
-            f"rate times the number of dates written down, so as it stands the answer is "
-            f"short by {required - len(dates)} applications and would be whatever the "
-            "typing happened to be. Correction boundary: declare recurrence "
-            f"{{period: {flows[flow_name].period}, start, end, changes}} on this process "
-            "and let the cadence be enumerated, or enumerate every one of the "
-            f"{required} occurrences the window requires"
-        )
+        window = f"{dates[0].isoformat()} → {dates[-1].isoformat()}"
+        if len(dates) < required:
+            errors.append(
+                f"UNDER_ENUMERATED_CADENCE: process {p.name!r} fires {len(dates)} times "
+                f"across {window}, each firing covering {covered} — but that window holds "
+                f"{required} of them, so {required - len(dates)} periods of the mechanism "
+                "never happen and everything it would have produced is missing. The total "
+                "this world reaches is a fact about how many dates were written down. "
+                f"Correction boundary: declare recurrence {{period: {covered}, start, end, "
+                "changes}} on this process and let the calendar be enumerated, or "
+                f"enumerate all {required} occurrences"
+            )
+        else:
+            errors.append(
+                f"OVER_ENUMERATED_CADENCE: process {p.name!r} fires {len(dates)} times "
+                f"across {window}, each firing covering {covered} — but that window holds "
+                f"only {required}, so {len(dates) - required} periods of the mechanism are "
+                "counted twice and the total is inflated by whatever they produce. "
+                f"Correction boundary: declare recurrence {{period: {covered}, start, end, "
+                f"changes}} on this process, or enumerate exactly {required} occurrences"
+            )
     return errors
 
 
@@ -2722,6 +2788,7 @@ def validate_semantic_plan(
     # is corrected above first, and these checks are written to decline (never to
     # invent) when a name or a number is missing.
     errors += _state_kind_errors(plan)
+    errors += _dimension_errors(plan)
     errors += _cadence_errors(plan)
     errors += _representation_record_errors(plan)
     errors += _alternative_quality_errors(plan, cited)

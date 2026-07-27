@@ -24,12 +24,15 @@ from typing import Any
 from .errors import WorldIntegrityError
 from .semantic_plan import (
     UNKNOWN,
+    Period,
     SemanticChange,
     SemanticPlan,
     SemanticProcess,
     SemanticState,
     SemanticValue,
     TerminalQuery,
+    duration_scalars,
+    flow_periods,
     terminal_relevant_states,
 )
 
@@ -139,7 +142,11 @@ class SymbolTable:
 
 def build_symbols(plan: SemanticPlan) -> SymbolTable:
     t = SymbolTable()
-    entity_names = {e.name for e in plan.entities}
+    changes = [c for a in plan.affordances for c in a.changes] + [
+        c for p in plan.processes for o in p.occurrences for c in o.changes
+    ]
+    drawn = {c.target for c in changes if c.op == "decrease"}
+    filled = {c.target for c in changes if c.op == "increase"}
     for e in plan.entities:
         t.mint(
             "entity", e.name, rule="entity → entities[].entity_id", evidence=e.evidence_claim_ids
@@ -148,31 +155,25 @@ def build_symbols(plan: SemanticPlan) -> SymbolTable:
         t.mint("field", s.name, rule="state → fields[].field_id", evidence=s.evidence_claim_ids)
         if s.kind != "stock":
             continue
-        # A stock is a quantity held somewhere, so it gets a resource and at least one
-        # holder as well as its readable field. The resource is what the executor
-        # conserves: every move of the stock is a transfer or a consume against these
-        # holders, and one that would overdraw is refused rather than recorded.
-        t.mint(
-            "resource",
-            s.name,
-            rule="stock state → resources[].resource_id (moved by transfer/consume, "
-            "which the executor refuses to overdraw)",
-            evidence=s.evidence_claim_ids,
-        )
-        if s.owner not in entity_names:
+        # What a bounded stock could not absorb is causal information, not an error: the
+        # draw a depleted stock could not pay for IS the backlog, the unmet demand, the
+        # queue that grows. It gets its own field so downstream conditions, the terminal,
+        # the state diffs and the replay core can all read it — never a log line.
+        if s.name in drawn:
             t.mint(
-                "holder",
-                s.owner or "world",
-                rule="stock owner → resources[].holder_entity_id",
-                evidence=(),
+                "field",
+                f"unmet draw on {s.name}",
+                rule="stock floor → fields[].field_id recording the quantity a draw could "
+                "not take (the shortfall: unmet demand, backlog, queue)",
+                evidence=s.evidence_claim_ids,
             )
-        if s.capacity is not None:
+        if s.capacity is not None and s.name in filled:
             t.mint(
-                "holder",
-                f"beyond {s.name}",
-                rule="stock capacity → the counterpart holder of the same resource, so "
-                "the ceiling and the floor are both the executor's own conservation",
-                evidence=(),
+                "field",
+                f"overflow above {s.name}",
+                rule="stock capacity → fields[].field_id recording the quantity offered "
+                "above the ceiling (the spill)",
+                evidence=s.evidence_claim_ids,
             )
     for ev in plan.events:
         t.mint(
@@ -246,14 +247,47 @@ def _node_process_names(plan: SemanticPlan) -> set[str]:
 # ---------------------------------------------------------------------------
 
 
-def _lower_value(v: SemanticValue, t: SymbolTable) -> Any:
+def _lower_value(v: SemanticValue, t: SymbolTable, flows: dict[str, Period]) -> Any:
+    """A semantic value → a runtime expression, with rate × duration made arithmetic.
+
+    A duration is not a number until it meets the rate it multiplies: "P1W" against a
+    per-week rate is the scalar 1, against a per-day rate it is 7. Code owns that
+    conversion — the planner writes the length of time the firing covers and never a
+    conversion factor, which is the whole reason the total can be checked against the
+    window instead of against how many dates were typed.
+    """
+
     if v.kind == "literal":
         return v.literal
     if v.kind == "state":
         assert v.state is not None
         return {"op": "field", "args": [t.resolve("field", v.state)]}
+    if v.kind == "duration":
+        raise LoweringGap(
+            f"duration {v.literal!r} standing alone",
+            why="a length of time is a quantity of nothing until it multiplies a rate; "
+            "the validator should have refused this plan before lowering",
+            composable=False,
+            smallest_missing="nothing — put the duration in a product with its rate",
+            must_refuse=False,
+        )
     op = "add" if v.kind == "sum" else "multiply"
-    parts = [_lower_value(p, t) for p in v.parts]
+    scalars: dict[int, float] = {}
+    if v.kind == "product":
+        scalars, why = duration_scalars(v.parts, flows)
+        if why:
+            raise LoweringGap(
+                f"product containing a duration: {why}",
+                why="the duration cannot be resolved against a single rate; the "
+                "validator should have refused this plan before lowering",
+                composable=False,
+                smallest_missing="nothing — this is an unresolvable duration, not a "
+                "missing capability",
+                must_refuse=False,
+            )
+    parts = [
+        scalars[i] if i in scalars else _lower_value(p, t, flows) for i, p in enumerate(v.parts)
+    ]
     # The runtime's arithmetic is binary; fold left so any arity lowers.
     out = {"op": op, "args": [parts[0], parts[1]]}
     for extra in parts[2:]:
@@ -269,38 +303,126 @@ def _negate(value: Any) -> Any:
 
 @dataclass(frozen=True)
 class _Stock:
-    """A declared stock, with the runtime symbols its conservation runs on."""
+    """A declared stock and the runtime symbols its bounds are written in."""
 
     state: SemanticState
-    resource_id: str
-    holder: str
-    beyond: str  # the counterpart holder; "" when the stock declares no capacity
+    field_id: str
+    unmet_id: str  # where a draw the stock could not pay for is recorded
+    overflow_id: str  # where quantity offered above the capacity is recorded
 
 
 def _stock_table(plan: SemanticPlan, t: SymbolTable) -> dict[str, _Stock]:
     """Every stock in the plan, keyed by its semantic name."""
 
-    entity_names = {e.name for e in plan.entities}
     out: dict[str, _Stock] = {}
     for s in plan.states:
         if s.kind != "stock":
             continue
-        holder = (
-            t.resolve("entity", s.owner)
-            if s.owner in entity_names
-            else t.resolve("holder", s.owner or "world")
-        )
         out[s.name] = _Stock(
             state=s,
-            resource_id=t.resolve("resource", s.name),
-            holder=holder,
-            beyond=t.resolve("holder", f"beyond {s.name}") if s.capacity is not None else "",
+            field_id=t.resolve("field", s.name),
+            unmet_id=t.by_key.get(("field", f"unmet draw on {s.name}"), ""),
+            overflow_id=t.by_key.get(("field", f"overflow above {s.name}"), ""),
+        )
+    return out
+
+
+def _available(stock: _Stock) -> dict[str, Any]:
+    """How much of the stock is above its floor right now, never below nothing."""
+
+    return {
+        "op": "max",
+        "args": [
+            0,
+            {
+                "op": "subtract",
+                "args": [
+                    {"op": "field", "args": [stock.field_id]},
+                    stock.state.conserved_floor,
+                ],
+            },
+        ],
+    }
+
+
+def _room(stock: _Stock) -> dict[str, Any]:
+    """How much more the stock can hold before its capacity, never below nothing."""
+
+    assert stock.state.capacity is not None
+    return {
+        "op": "max",
+        "args": [
+            0,
+            {
+                "op": "subtract",
+                "args": [stock.state.capacity, {"op": "field", "args": [stock.field_id]}],
+            },
+        ],
+    }
+
+
+def _lower_stock_move(op: str, demand: Any, stock: _Stock) -> list[dict[str, Any]]:
+    """A change to a stock, CLAMPED at its bounds with the remainder recorded.
+
+    The runtime does not conserve anything on its own. ``effects.can_apply`` holds the
+    only non-negativity check in the system and it is reached from the actor paths alone
+    (``executor.py`` and ``novel.py``); an operational process applies its effects at
+    ``engine.py`` with no feasibility check at all, and ``world.py`` subtracts with no
+    floor. That is precisely how a live world drove an inventory forty-eight thousand
+    units negative: the drawdown was issued by a process, so nothing was ever consulted.
+
+    So the bound is compiled into the write itself, which is the one place every issuer
+    passes through — actor, node and external occurrence alike lower through this
+    function. And it CLAMPS rather than refuses, because refusing the firing would throw
+    away the causal fact: a delivery run that could only half-load did happen, and the
+    half it could not load is the backlog. What moves is the demand or what is there,
+    whichever is smaller; the remainder is written to its own field, where downstream
+    conditions, the terminal, the state diffs and the replay core can all read it as the
+    unmet demand it is.
+    """
+
+    field_id = stock.field_id
+    if op == "decrease":
+        moved = {"op": "min", "args": [demand, _available(stock)]}
+        out = [{"op": "adjust_field", "field": field_id, "delta": _negate(moved)}]
+        if stock.unmet_id:
+            out.append(
+                {
+                    "op": "adjust_field",
+                    "field": stock.unmet_id,
+                    "delta": {
+                        "op": "max",
+                        "args": [0, {"op": "subtract", "args": [demand, _available(stock)]}],
+                    },
+                }
+            )
+        return out
+    if stock.state.capacity is None:
+        # Nothing declared a ceiling, so there is nothing to clamp against: an inflow
+        # into an unbounded stock is exactly today's adjustment.
+        return [{"op": "adjust_field", "field": field_id, "delta": demand}]
+    moved = {"op": "min", "args": [demand, _room(stock)]}
+    out = [{"op": "adjust_field", "field": field_id, "delta": moved}]
+    if stock.overflow_id:
+        out.append(
+            {
+                "op": "adjust_field",
+                "field": stock.overflow_id,
+                "delta": {
+                    "op": "max",
+                    "args": [0, {"op": "subtract", "args": [demand, _room(stock)]}],
+                },
+            }
         )
     return out
 
 
 def _lower_change(
-    c: SemanticChange, t: SymbolTable, plan: SemanticPlan, stocks: dict[str, _Stock]
+    c: SemanticChange,
+    t: SymbolTable,
+    plan: SemanticPlan,
+    stocks: dict[str, _Stock],
+    flows: dict[str, Period],
 ) -> list[dict[str, Any]]:
     """One universal semantic change → the existing effect operations."""
 
@@ -310,15 +432,15 @@ def _lower_change(
             {
                 "op": "set_field",
                 "field": t.resolve("field", c.target),
-                "value": _lower_value(c.value, t),
+                "value": _lower_value(c.value, t, flows),
             }
         ]
     if c.op in ("increase", "decrease"):
         assert c.amount is not None
-        delta = _lower_value(c.amount, t)
+        delta = _lower_value(c.amount, t, flows)
         stock = stocks.get(c.target)
         if stock is not None:
-            return _lower_stock_move(c.op, delta, stock, t)
+            return _lower_stock_move(c.op, delta, stock)
         return [
             {
                 "op": "adjust_field",
@@ -397,97 +519,6 @@ def _lower_change(
     )
 
 
-def _lower_stock_move(op: str, delta: Any, stock: _Stock, t: SymbolTable) -> list[dict[str, Any]]:
-    """A change to a stock, as a MOVE of quantity plus the reading it leaves behind.
-
-    The move is the authoritative half: ``transfer_resource`` and ``consume_resource``
-    are the runtime's conserved operations, and :meth:`EffectExecutor.can_apply` refuses
-    the whole effect list — never a partial application — when a holder lacks what the
-    move would take. Where the stock declares a capacity, the counterpart holder makes
-    the ceiling the same conservation as the floor: filling past capacity is drawing
-    from a holder that has run out.
-
-    The ``adjust_field`` alongside it is the readable level, not a second truth. It
-    moves only in lockstep with the resource, because both live in one effect list and
-    the executor accepts or refuses that list as a unit — so the field can no more go
-    negative than the resource can.
-    """
-
-    res, holder, beyond = stock.resource_id, stock.holder, stock.beyond
-    move: dict[str, Any]
-    if op == "increase":
-        # Quantity entering a stock comes out of the room above it. The validator
-        # guarantees a capacity for any stock something adds to, so `beyond` exists.
-        move = {
-            "op": "transfer_resource",
-            "resource": res,
-            "from": beyond or t.resolve("holder", f"beyond {stock.state.name}"),
-            "to": holder,
-            "amount": delta,
-        }
-    elif beyond:
-        move = {
-            "op": "transfer_resource",
-            "resource": res,
-            "from": holder,
-            "to": beyond,
-            "amount": delta,
-        }
-    else:
-        move = {"op": "consume_resource", "resource": res, "holder": holder, "amount": delta}
-    return [
-        move,
-        {
-            "op": "adjust_field",
-            "field": t.resolve("field", stock.state.name),
-            "delta": delta if op == "increase" else _negate(delta),
-        },
-    ]
-
-
-def _conservation_guard(effects: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """The declarative precondition that makes a non-agent firing obey conservation too.
-
-    An actor's action is dry-run by the executor before it starts, so an overdrawing
-    move never happens. A process occurrence is not: the engine applies its effects
-    directly, which is how a live world subtracted deliveries from an inventory it did
-    not have for a whole quarter. The runtime already has the right mechanism for this —
-    an occurrence's ``condition`` and a node's ``entry_condition``, checked before
-    anything is applied — so the same refusal is compiled from the same effects: the
-    firing happens only if every holder it draws on holds what it takes.
-
-    All-or-nothing, exactly like the executor's dry run: a firing that cannot be made in
-    full is not made in part. Withdrawals from one holder are summed, so two draws in
-    one firing cannot both pass against the same balance.
-    """
-
-    demands: dict[tuple[str, str], list[Any]] = {}
-    for eff in effects:
-        if eff.get("op") == "transfer_resource":
-            key = (str(eff.get("resource")), str(eff.get("from")))
-        elif eff.get("op") == "consume_resource":
-            key = (str(eff.get("resource")), str(eff.get("holder")))
-        else:
-            continue
-        demands.setdefault(key, []).append(eff.get("amount"))
-    tests: list[dict[str, Any]] = []
-    for (res, holder), amounts in sorted(demands.items()):
-        total = amounts[0]
-        for extra in amounts[1:]:
-            total = {"op": "add", "args": [total, extra]}
-        tests.append(
-            {
-                "op": "greater_or_equal",
-                "args": [{"op": "resource", "args": [res, holder]}, total],
-            }
-        )
-    if not tests:
-        return None
-    if len(tests) == 1:
-        return tests[0]
-    return {"op": "and", "args": tests}
-
-
 _KIND_BY_TYPE = {
     "person": "person",
     "object": "object",
@@ -526,6 +557,36 @@ def _aware_iso(value: str | None) -> str | None:
     return when.isoformat() if when is not None else None
 
 
+def _recurrence_keys(p: SemanticProcess) -> dict[str, Any]:
+    """The declared cadence, carried onto the compiled process it produced.
+
+    The expansion is what runs; the declaration is what gets audited. A reviewer handed
+    a flat list of dated firings cannot tell a cadence declared over a window from a
+    calendar somebody typed — which is the FD-25 hole itself — so both travel together
+    and a compiled review can check one against the other without the semantic plan.
+
+    ISO strings rather than seconds or counts, because that is what every other timestamp
+    in the executable already is and because a period is not always a fixed number of
+    seconds (P1M is a calendar step). ``recurrence_firings`` is the count code generated,
+    so a reviewer can compare it against its own reading of period and window.
+    """
+
+    rec = p.recurrence
+    if rec is None or not p.occurrences_generated:
+        return {
+            "recurrence_period": "",
+            "recurrence_start": "",
+            "recurrence_end": "",
+            "recurrence_firings": 0,
+        }
+    return {
+        "recurrence_period": rec.period,
+        "recurrence_start": _aware_iso(rec.start) or "",
+        "recurrence_end": _aware_iso(rec.end) or "",
+        "recurrence_firings": len(p.occurrences),
+    }
+
+
 def _lookup(table: dict[str, str], key: Any, what: str) -> str:
     """A table miss is a named gap, never a KeyError and never a silent default.
 
@@ -545,13 +606,13 @@ def _lookup(table: dict[str, str], key: Any, what: str) -> str:
     )
 
 
-def _lower_terminal(q: TerminalQuery, t: SymbolTable) -> dict[str, Any]:
+def _lower_terminal(q: TerminalQuery, t: SymbolTable, flows: dict[str, Period]) -> dict[str, Any]:
     if q.form == "all_of":
-        return {"op": "and", "args": [_lower_terminal(p, t) for p in q.parts]}
+        return {"op": "and", "args": [_lower_terminal(p, t, flows) for p in q.parts]}
     if q.form == "any_of":
-        return {"op": "or", "args": [_lower_terminal(p, t) for p in q.parts]}
+        return {"op": "or", "args": [_lower_terminal(p, t, flows) for p in q.parts]}
     if q.form == "not":
-        return {"op": "not", "args": [_lower_terminal(q.parts[0], t)]}
+        return {"op": "not", "args": [_lower_terminal(q.parts[0], t, flows)]}
     if q.form == "event_exists":
         assert q.event is not None
         return {
@@ -565,7 +626,7 @@ def _lower_terminal(q: TerminalQuery, t: SymbolTable) -> dict[str, Any]:
             "op": _lookup(_CMP_OPS, q.comparison, "comparison"),
             "args": [
                 {"op": "count", "args": [t.resolve("event", q.record_event)]},
-                _lower_value(q.threshold, t),
+                _lower_value(q.threshold, t, flows),
             ],
         }
     if q.form == "state_equals":
@@ -589,7 +650,7 @@ def _lower_terminal(q: TerminalQuery, t: SymbolTable) -> dict[str, Any]:
             "op": _lookup(_CMP_OPS, q.comparison, "comparison"),
             "args": [
                 {"op": "field", "args": [t.resolve("field", q.state)]},
-                _lower_value(q.threshold, t),
+                _lower_value(q.threshold, t, flows),
             ],
         }
     raise LoweringGap(
@@ -814,6 +875,7 @@ def lower_plan(
     t = build_symbols(plan)
     node_processes = _node_process_names(plan)
     stocks = _stock_table(plan, t)
+    flows = flow_periods(plan)
 
     entities: list[dict[str, Any]] = []
     for e in plan.entities:
@@ -853,51 +915,57 @@ def lower_plan(
     fields = []
     for s in plan.states:
         # why_material is meaning, not metadata: it survives in the field description
-        # every consumer of the field reads, never validated-then-vanished.
+        # every consumer of the field reads, never validated-then-vanished. So does the
+        # kind: a reader of the executable can see that this number is a held quantity
+        # with a floor, or a rate quoted over a period, without going back to the plan.
         desc = f"{s.name} ({s.owner})" + (f" [{s.unit}]" if s.unit else "")
         if s.why_material:
             desc = f"{desc} — {s.why_material}"
+        if s.kind == "stock":
+            bounds = f"floor {s.conserved_floor:g}"
+            if s.capacity is not None:
+                bounds = f"{bounds}, capacity {s.capacity:g}"
+            desc = f"{desc} [stock held by {s.owner}; {bounds}]"
+        elif s.kind == "flow":
+            desc = f"{desc} [rate per {s.period}]"
         f: dict[str, Any] = {
             "field_id": t.resolve("field", s.name),
             "value_type": _lookup(_VALUE_TYPES, s.state_type, "state_type"),
             "description": desc,
             "evidence_claim_ids": list(s.evidence_claim_ids),
         }
-        if s.kind == "stock":
-            desc = f"{desc} [stock held by {s.owner}" + (
-                f", capacity {s.capacity:g}]" if s.capacity is not None else "]"
-            )
-        elif s.kind == "flow":
-            desc = f"{desc} [rate per {s.period}]"
         if s.initial != UNKNOWN:
             f["initial"] = s.initial
-        f["description"] = desc
         fields.append(f)
 
-    # A stock's conserved half: the resource and the holders the executor checks. The
-    # counterpart holder starts with the room left in the stock, so filling past
-    # capacity and draining below zero are the same refusal from the same machinery.
-    resources: list[dict[str, Any]] = []
+    # The remainder fields. A draw a stock could not pay for, and quantity offered above
+    # a ceiling, are causal facts the world produced — the backlog and the spill — so
+    # they are world state a condition or a terminal can read, not a note in a log.
     for name in sorted(stocks):
         stock = stocks[name]
         s = stock.state
-        held = float(s.initial) if isinstance(s.initial, (int, float)) else 0.0
-        resources.append(
-            {
-                "resource_id": stock.resource_id,
-                "holder_entity_id": stock.holder,
-                "quantity": held,
-                "description": f"{s.name} held by {s.owner}" + (f" [{s.unit}]" if s.unit else ""),
-            }
-        )
-        if stock.beyond and s.capacity is not None:
-            resources.append(
+        if stock.unmet_id:
+            fields.append(
                 {
-                    "resource_id": stock.resource_id,
-                    "holder_entity_id": stock.beyond,
-                    "quantity": max(0.0, float(s.capacity) - held),
-                    "description": f"room left in {s.name} below its capacity "
-                    f"of {s.capacity:g}" + (f" {s.unit}" if s.unit else ""),
+                    "field_id": stock.unmet_id,
+                    "value_type": "number",
+                    "initial": 0,
+                    "description": f"cumulative quantity of {s.name} drawn for but not "
+                    f"there [{s.unit}] — the shortfall this world's draws left unmet "
+                    f"once {s.name} reached its floor of {s.conserved_floor:g}",
+                    "evidence_claim_ids": list(s.evidence_claim_ids),
+                }
+            )
+        if stock.overflow_id and s.capacity is not None:
+            fields.append(
+                {
+                    "field_id": stock.overflow_id,
+                    "value_type": "number",
+                    "initial": 0,
+                    "description": f"cumulative quantity offered to {s.name} above its "
+                    f"capacity of {s.capacity:g} [{s.unit}] — what the world produced "
+                    "and this stock could not hold",
+                    "evidence_claim_ids": list(s.evidence_claim_ids),
                 }
             )
 
@@ -905,7 +973,7 @@ def lower_plan(
     for a in plan.affordances:
         effects: list[dict[str, Any]] = []
         for c in a.changes:
-            effects.extend(_lower_change(c, t, plan, stocks))
+            effects.extend(_lower_change(c, t, plan, stocks, flows))
         meaning = a.meaning
         if a.preconditions:
             # Free-text preconditions are not mechanically enforceable in this slice;
@@ -973,12 +1041,11 @@ def lower_plan(
                         "separately and chained with after_process",
                     )
                 for c in o.changes:
-                    effects.extend(_lower_change(c, t, plan, stocks))
+                    effects.extend(_lower_change(c, t, plan, stocks, flows))
             emit_node(
                 {
                     "node_id": node_id,
                     "stage": node_id,
-                    "entry_condition": _conservation_guard(effects),
                     "description": _produced(p.meaning, p),
                     "at": _aware_iso(p.at),
                     "after_node": "",
@@ -997,7 +1064,7 @@ def lower_plan(
             for j, o in enumerate(p.occurrences):
                 effects = []
                 for c in o.changes:
-                    effects.extend(_lower_change(c, t, plan, stocks))
+                    effects.extend(_lower_change(c, t, plan, stocks, flows))
                 node_id = (
                     t.resolve("node", p.name)
                     if j == 0
@@ -1007,7 +1074,6 @@ def lower_plan(
                     {
                         "node_id": node_id,
                         "stage": t.resolve("node", p.name),
-                        "entry_condition": _conservation_guard(effects),
                         "description": _produced(o.description or p.meaning, p),
                         "at": _aware_iso(o.at),
                         "after_node": "",
@@ -1022,6 +1088,7 @@ def lower_plan(
                         "effects": effects,
                         "next_nodes": [],
                         "evidence_claim_ids": list(p.evidence_claim_ids),
+                        **_recurrence_keys(p),
                     }
                 )
                 last_node_of_process[p.name] = node_id
@@ -1042,22 +1109,21 @@ def lower_plan(
             for o in p.occurrences:
                 effects = []
                 for c in o.changes:
-                    effects.extend(_lower_change(c, t, plan, stocks))
-                occurrence: dict[str, Any] = {
-                    "at": _aware_iso(o.at),
-                    "description": o.description or p.meaning,
-                    "effects": effects,
-                }
-                guard = _conservation_guard(effects)
-                if guard is not None:
-                    occurrence["condition"] = guard
-                occurrences.append(occurrence)
+                    effects.extend(_lower_change(c, t, plan, stocks, flows))
+                occurrences.append(
+                    {
+                        "at": _aware_iso(o.at),
+                        "description": o.description or p.meaning,
+                        "effects": effects,
+                    }
+                )
             externals.append(
                 {
                     "process_id": t.resolve("external", p.name),
                     "description": _produced(p.meaning, p),
                     "occurrences": occurrences,
                     "evidence_claim_ids": list(p.evidence_claim_ids),
+                    **_recurrence_keys(p),
                 }
             )
             if p.deadline is not None:
@@ -1188,7 +1254,7 @@ def lower_plan(
         "entities": entities,
         "actors": actors,
         "fields": fields,
-        "resources": resources,
+        "resources": [],
         "channels": [],
         "documents": [],
         "actions": actions,
@@ -1196,7 +1262,7 @@ def lower_plan(
         "external_processes": externals,
         "wake_rules": _wake_rules(plan, t),
         "terminal": {
-            "yes_when": _lower_terminal(plan.terminal, t),
+            "yes_when": _lower_terminal(plan.terminal, t, flows),
             "unresolved_when": _unresolved_when(plan, t),
             "description": plan.yes_condition,
         },

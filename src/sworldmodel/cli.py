@@ -65,14 +65,24 @@ def _install_stop_handler() -> None:
 def _print_summary(result: ForecastResult, forecast_hash: str, out_dir: Path | None) -> None:
     print(f"Question: {result.question}")
     print(f"Status: {result.status.value}")
+    # Four different things used to print the same em-dash: an answer, an answer the D6
+    # gate withheld, a number D2 suppressed, and a run that resolved nothing. A reader
+    # cannot tell "we will not answer this" from "nothing resolved" if both render as —.
     p = result.simulation_probability
-    print(
-        f"Simulation probability: {'—' if p is None else f'{p:.4f}'}  "
-        f"(source: {result.probability_source})"
-    )
+    if p is not None:
+        print(f"Simulation probability: {p:.4f}  (source: {result.probability_source})")
+    elif getattr(result, "answer_withheld", False):
+        print("Answer: not published — this run does not get to answer the question")
+    elif getattr(result, "point_estimate_suppressed", False):
+        print("Point estimate: unavailable")
+    else:
+        print("Simulation probability: —  (nothing resolved)")
     lb = result.lower_bound if result.lower_bound is not None else 0.0
     ub = result.upper_bound if result.upper_bound is not None else 1.0
     print(f"Unconditional bounds: [{lb:.4f}, {ub:.4f}]")
+    reason = getattr(result, "point_estimate_suppression_reason", "")
+    if reason:
+        print(f"Reason: {reason}")
     print(
         f"Mass — resolved YES {result.resolved_yes_mass:.4f}, NO {result.resolved_no_mass:.4f}, "
         f"unresolved {result.unresolved_mass:.4f}"
@@ -103,9 +113,26 @@ def _print_summary(result: ForecastResult, forecast_hash: str, out_dir: Path | N
             f"Integrity: p_before={before} -> p_after={after}  "
             f"calibrated={integ.point_estimate_is_calibrated}"
         )
+        # Under the diagnostics heading and labeled, never above it. Two live runs
+        # published this figure as the headline while the labels beside it already said
+        # it constrained nothing.
+        avg = getattr(result, "scenario_average", None)
+        if avg is not None:
+            print(f"  Scenario average (diagnostic, NOT the answer): {avg:.4f}")
         if integ.ungrounded_variables:
             print(f"  ungrounded weights: {integ.ungrounded_variables}")
         print(f"  {integ.counterfactual_note}")
+    validity = getattr(result, "validity", None)
+    as_dict = getattr(validity, "as_dict", None)
+    if callable(as_dict):
+        # D1: three separate answers, printed as three, with each leg's basis. No summary
+        # verdict is printed, because a summary is the thing that gets quoted instead.
+        legs = as_dict()
+        print("Validity (D1):")
+        for leg in ("trace_reproducible", "causal_simulation_valid", "point_estimate_calibrated"):
+            if leg in legs:
+                basis = legs.get(f"{leg}_basis") or ""
+                print(f"  {leg}: {legs[leg]}{f' — {basis}' if basis else ''}")
     if out_dir is not None:
         print(f"Artifacts: {out_dir}")
         if forecast_hash:

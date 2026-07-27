@@ -454,13 +454,191 @@ def _uncertainty_field_ids(compiled: CompiledWorld) -> set[str]:
     return out
 
 
-def mechanical_world_checks(compiled: CompiledWorld) -> tuple[AuditFinding, ...]:
+def _cited_terminal_claim_ids(spec: Any) -> dict[str, tuple[str, ...]]:
+    """Per terminal term, the claim ids its ``evidence:`` producers cite.
+
+    Read from :func:`terminal_producers`, which is the same source
+    ``_cited_factual_resolution`` uses to decide the world is settled — so these are
+    exactly the citations the settled-record claim rests on, and nothing else.
+    """
+
+    out: dict[str, tuple[str, ...]] = {}
+    for term, producers in terminal_producers(spec).items():
+        ids: list[str] = []
+        for who in producers:
+            text = str(who)
+            if text.startswith("evidence:"):
+                ids.extend(i for i in text[len("evidence:") :].split(",") if i)
+        out[term] = tuple(dict.fromkeys(ids))
+    return out
+
+
+def _significant_tokens(text: str) -> set[str]:
+    """Words long enough to identify a subject, lowercased.
+
+    Deliberately crude and deliberately generous: this decides whether a citation is
+    plausibly ABOUT the world's subject at all, not whether it resolves the question.
+    Short words carry no subject.
+    """
+
+    cleaned = "".join(c.lower() if c.isalnum() else " " for c in text)
+    return {w for w in cleaned.split() if len(w) >= 4}
+
+
+def _preresolved_checks(compiled: CompiledWorld, evidence: Any) -> tuple[AuditFinding, ...]:
+    """Examine the citation a settled-record world rests on (FD-41).
+
+    The operational-depth checks below are meaningless here — a question the record has
+    already answered is not re-produced inside the window, and demanding a production
+    process for it is what manufactured an absolute NO on a live Bank of England run.
+    But "meaningless" was implemented as "return one PASS and check nothing", which left
+    the entire OPEC+/EU-Mercosur class of run with no mechanical gate whatsoever: any
+    claim id, attached to any initial value, established any outcome.
+
+    So the attack moves to where it belongs — the citation itself:
+
+    * the cited ids must name claims that actually exist and are admissible at the
+      cutoff (an id that names nothing grounds nothing);
+    * at least one of them must be an OBSERVATION carrying a verified excerpt, not an
+      inference or a hypothesis (a record that "already answered" the question is a
+      record, not a conclusion the compiler drew);
+    * and they must be about the world's own subject.
+
+    Scope adjudication — whether the cited act matches the question's instrument, degree
+    and specificity — is CWF-7 and is not attempted here; the LLM review's
+    ``terminal_preresolved`` attack still carries that, now with a mechanical floor
+    underneath it.
+    """
+
+    cited = _cited_terminal_claim_ids(compiled.spec)
+    all_ids = tuple(dict.fromkeys(i for ids in cited.values() for i in ids))
+    if evidence is None:
+        # Only reachable from a caller that supplied no evidence view. Not a defect in
+        # the world, so it cannot block — but it must never read as an examined citation.
+        return (
+            _mech(
+                "cited_resolution_claims_exist",
+                "MEDIUM",
+                "this world resolves on cited record and the citation could NOT be "
+                f"examined here: no evidence view was supplied to check {sorted(all_ids)}",
+                "computed from the compiled world: terminal producers are all evidence: "
+                "citations, and no store was available to resolve them",
+            ),
+        )
+
+    findings: list[AuditFinding] = []
+    resolved: list[Any] = []
+    missing: list[str] = []
+    for claim_id in all_ids:
+        try:
+            resolved.append(evidence.get(claim_id))
+        except Exception:  # noqa: BLE001 — unknown id, or one past the cutoff
+            missing.append(claim_id)
+
+    if missing:
+        findings.append(
+            _mech(
+                "cited_resolution_claims_exist",
+                "CRITICAL",
+                f"this world answers the question from the record, and the record it "
+                f"cites is not there: {sorted(missing)} name no claim admissible at the "
+                "cutoff — the resolution rests on a citation to nothing",
+                "computed from the compiled world: terminal-producing evidence: ids "
+                "resolved against the evidence store at the cutoff",
+            )
+        )
+    else:
+        findings.append(
+            _mech(
+                "cited_resolution_claims_exist",
+                "PASS",
+                f"every claim the settled record cites exists and is admissible: {sorted(all_ids)}",
+                "computed from the compiled world: terminal-producing evidence: ids "
+                "resolved against the evidence store at the cutoff",
+            )
+        )
+
+    observed = [
+        c
+        for c in resolved
+        if getattr(getattr(c, "epistemic_type", None), "value", "") == "observation"
+        and str(getattr(c, "supporting_excerpt", "")).strip()
+    ]
+    if resolved and not observed:
+        findings.append(
+            _mech(
+                "cited_resolution_rests_on_the_record",
+                "CRITICAL",
+                "the outcome is declared already established, but not one cited claim is "
+                "an observation carrying a verified excerpt — every one is an inference "
+                "or a hypothesis, so what answers the question is a conclusion somebody "
+                "drew rather than a record of what happened",
+                "computed from the compiled world: epistemic_type and supporting_excerpt "
+                "of every claim the terminal's producers cite",
+            )
+        )
+    else:
+        findings.append(
+            _mech(
+                "cited_resolution_rests_on_the_record",
+                "PASS" if observed else "MEDIUM",
+                f"{len(observed)} cited claim(s) are observations with verified excerpts"
+                if observed
+                else "the terminal cites no claims at all, so there is no record to weigh",
+                "computed from the compiled world: epistemic_type and supporting_excerpt "
+                "of every claim the terminal's producers cite",
+            )
+        )
+
+    subject = str(getattr(compiled.spec, "subject_entity", "") or "")
+    wanted = _significant_tokens(subject)
+    if wanted and resolved:
+        haystack: set[str] = set()
+        for c in resolved:
+            haystack |= _significant_tokens(str(getattr(c, "proposition", "")))
+            haystack |= _significant_tokens(" ".join(getattr(c, "entities", ()) or ()))
+        overlap = sorted(wanted & haystack)
+        findings.append(
+            _mech(
+                "cited_resolution_subject_matches",
+                "PASS" if overlap else "HIGH",
+                f"the cited record is about this world's subject ({overlap})"
+                if overlap
+                else f"the cited record never mentions this world's subject "
+                f"({subject!r}): the claim that the question is already answered rests "
+                "on evidence about something else",
+                "computed from the compiled world: the spec's subject_entity against the "
+                "propositions and entities of every claim the terminal's producers cite",
+            )
+        )
+    else:
+        # No usable subject string, or nothing to compare it against. Absence of a
+        # subject is not evidence of a mismatch, so this never fails on it.
+        findings.append(
+            _mech(
+                "cited_resolution_subject_matches",
+                "MEDIUM",
+                "the subject match could not be computed: this world declares no usable "
+                f"subject_entity ({subject!r}) or its terminal cites no claims",
+                "computed from the compiled world: subject_entity and the cited claims",
+            )
+        )
+    return tuple(findings)
+
+
+def mechanical_world_checks(
+    compiled: CompiledWorld, evidence: Any = None
+) -> tuple[AuditFinding, ...]:
     """The CWF-6 attacks that are decided by the compiled world, not by an opinion.
 
     Each check contributes at least one finding — its violation, or a PASS saying what
     was checked — so a review that found nothing still shows what it looked at. They run
     on the executable, so the direct compiler and the semantic compiler are judged by
     exactly the same standard.
+
+    ``evidence`` is the cutoff-filtered view the world was compiled from. It is used only
+    on the settled-record path, where the thing to attack is the citation rather than the
+    machinery; the operational checks need nothing but the executable.
     """
 
     from .world_compiler import _cited_factual_resolution, _effect_produces, _expr_terms
@@ -476,7 +654,7 @@ def mechanical_world_checks(compiled: CompiledWorld) -> tuple[AuditFinding, ...]
                 "process to demand",
                 "computed from the compiled world: a cited factual resolution",
             ),
-        )
+        ) + _preresolved_checks(compiled, evidence)
     terms = _expr_terms(spec.terminal.yes_when)
     field_terms = {t.split(":", 1)[1] for t in terms if t.startswith("field:")}
     action_written: set[str] = set()
@@ -706,7 +884,7 @@ def review_world(
     """
 
     try:
-        mechanical = mechanical_world_checks(compiled)
+        mechanical = mechanical_world_checks(compiled, evidence)
     except Exception:  # noqa: BLE001 — a check that cannot run blocks nothing
         mechanical = ()
     try:
