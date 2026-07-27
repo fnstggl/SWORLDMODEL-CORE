@@ -229,6 +229,18 @@ def verify_reality(
 
     # 5. Decisive evidence contradictions block rollout.
     conflicts = [f"{a} <> {b}" for a, b in evidence.store.contradictions()]
+    # An empty conflict list is a finding only if something looked. Screening is
+    # deterministic and costs nothing, so it is run here rather than assumed; adjudicating
+    # a candidate is what costs, and a screen with unexamined pairs says so by name
+    # instead of presenting itself as a clean store.
+    screen = evidence.store.screen_conflicts(evidence.as_of)
+    if not screen.is_conclusive:
+        notes.append(
+            "evidence conflicts NOT certified: "
+            + screen.summary()
+            + " — unexamined: "
+            + ", ".join(f"{c.a_id}<>{c.b_id}" for c in screen.unexamined[:12])
+        )
 
     verdict = (
         IntegrityVerdict.VERIFIED

@@ -82,6 +82,17 @@ CLAIMS: dict[str, dict[str, Any]] = {
         "value": "1.3 to 1.4",
         "entities": ["Kestrel Bay Ferry Terminal"],
     },
+    # An actor needs a claim that names it. c-f1 records the terminal's crossings and
+    # names no person, so a world that puts a manager on the terminal quantity while
+    # citing c-f1 is citing the thing the manager is supposed to be deciding about —
+    # which is how a fabricated participant used to attest itself. This claim gives the
+    # manager the same standing c-a4 gives the district's water engineer.
+    "c-f3": {
+        "proposition": "Kestrel Bay's terminal operations manager sets the published "
+        "sailing schedule and may add or withdraw sailings within the season",
+        "value": "schedule authority, terminal operations manager",
+        "entities": ["Kestrel Bay Ferry Terminal", "Terminal operations manager"],
+    },
 }
 
 

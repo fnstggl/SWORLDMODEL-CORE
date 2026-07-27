@@ -40,6 +40,7 @@ from .gateway import GatewayRequest, ModelGateway
 from .grounding import (
     ActorGroundingProfile,
     assess_actor_grounding,
+    attest_profiles,
     enforce_actor_grounding,
     profile_from_member,
 )
@@ -144,10 +145,13 @@ def compile_world(
     manifest = verify_reality(contract, evidence, base_world.actors, spec)
 
     # Gate 2 — actors must be specific grounded entities, not generic role templates.
-    profiles = tuple(
-        st.grounding
-        for st in base_world.actors.values()
-        if isinstance(st.grounding, ActorGroundingProfile)
+    profiles = attest_profiles(
+        tuple(
+            st.grounding
+            for st in base_world.actors.values()
+            if isinstance(st.grounding, ActorGroundingProfile)
+        ),
+        evidence,
     )
     grounding_report = assess_actor_grounding(profiles)
     enforce_actor_grounding(grounding_report)

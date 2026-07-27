@@ -201,7 +201,9 @@ def _actor_publishes_the_tally() -> dict[str, Any]:
             "terminal_state_it_can_change": "recorded crossings this quarter",
             "information_received": "the projection from the tally system",
             "if_removed": "no tally is ever recorded",
-            "evidence_claim_ids": ["c-f1"],
+            # c-f3 names the manager; c-f1 records the crossings the manager reports on.
+            # Citing only c-f1 made the actor attest itself from the figure it decides.
+            "evidence_claim_ids": ["c-f3", "c-f1"],
         }
     )
     plan["affordances"] = [
@@ -218,7 +220,7 @@ def _actor_publishes_the_tally() -> dict[str, Any]:
                     "value": _read("projected crossings"),
                 }
             ],
-            "evidence_claim_ids": ["c-f1"],
+            "evidence_claim_ids": ["c-f3", "c-f1"],
         }
     ]
     plan["processes"].append(
@@ -230,7 +232,7 @@ def _actor_publishes_the_tally() -> dict[str, Any]:
             "allowed_affordances": ["publish the quarterly tally"],
             "at": "2026-02-27T09:00:00+00:00",
             "occurrences": [],
-            "evidence_claim_ids": ["c-f1"],
+            "evidence_claim_ids": ["c-f3"],
         }
     )
     plan.pop("zero_actor_justification", None)
