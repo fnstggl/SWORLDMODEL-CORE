@@ -1624,6 +1624,48 @@ def _actor_admissibility_errors(plan: SemanticPlan, cited: Any) -> list[str]:
     return errors
 
 
+def _relabelled_from(plan: SemanticPlan, state: str, seen: frozenset[str]) -> set[str] | None:
+    """What ``state`` ultimately rests on if it is only a rename, or None if it is built.
+
+    A state is a rename when exactly one non-agent change writes it, that change is a
+    ``set``, no actor can write it, and every input it reads that the world also produces
+    is itself only a rename. The returned set is the leaves of that chain — the inputs
+    nothing in the world produces — which is what D4's one-step test has to be applied to
+    once the renames are seen through.
+
+    ``None`` means the world genuinely builds this state: it accumulates into it, several
+    changes write it, an actor writes it, or something it rests on is itself built.
+    """
+
+    if state in seen:
+        return None
+    if any(c.op in WRITE_OPS and c.target == state for a in plan.affordances for c in a.changes):
+        return None  # an actor-produced quantity is judged by the actor gates
+    writers = [
+        c
+        for p in plan.processes
+        if p.kind != "actor_moment"
+        for o in p.occurrences
+        for c in o.changes
+        if c.op in WRITE_OPS and c.target == state
+    ]
+    if len(writers) != 1 or writers[0].op != "set":
+        return None
+    reads: set[str] = set()
+    if writers[0].value is not None:
+        reads |= writers[0].value.states_read()
+    if writers[0].amount is not None:
+        reads |= writers[0].amount.states_read()
+    produced = {c.target for c in _all_changes(plan) if c.op in WRITE_OPS} - {state}
+    leaves = reads - produced
+    for source in sorted(reads & produced):
+        upstream = _relabelled_from(plan, source, seen | {state})
+        if upstream is None:
+            return None
+        leaves |= upstream
+    return leaves
+
+
 def _one_step_operational_errors(plan: SemanticPlan, cited: Any) -> list[str]:
     """CWF-3 / D4: a terminal quantity produced in one non-agent step is not a simulation.
 
@@ -1669,8 +1711,28 @@ def _one_step_operational_errors(plan: SemanticPlan, cited: Any) -> list[str]:
                 inputs |= c.value.states_read()
             if c.amount is not None:
                 inputs |= c.amount.states_read()
-        if len(mechanism) > 1 or (inputs & produced_elsewhere):
+        # FD-28. This used to stop at the first produced input, so splitting the one step
+        # in two — `projection := base x factor`, then `total := projection` — bought a
+        # "produced intermediate" that computes exactly what the one step computed, and
+        # the plan was accepted. A produced input only ends the enquiry when the world
+        # genuinely BUILDS it; when the terminal is wholly replaced by a chain of single
+        # set-writes, the same question is asked of each link and a rename costs nothing.
+        # Only a `set` terminal can be announced this way: a terminal that accumulates
+        # onto a cited initial is reached rather than announced, whatever feeds it, and
+        # is judged by the second form below.
+        relabels: set[str] = set()
+        if len(mechanism) == 1 and mechanism[0][1].op == "set":
+            relabels = {
+                source
+                for source in inputs & produced_elsewhere
+                if _relabelled_from(plan, source, frozenset({state})) is not None
+            }
+        if len(mechanism) > 1 or ((inputs & produced_elsewhere) - relabels):
             continue  # a real progression: several steps, or a produced intermediate
+        for source in sorted(relabels):
+            inputs = (inputs - {source}) | (
+                _relabelled_from(plan, source, frozenset({state})) or set()
+            )
         process_name, change = mechanism[0]
         # D4 names two forms, and the gate is exactly as wide as they are: one final
         # set-the-total (the environment announcing the answer), or one arbitrary
