@@ -160,6 +160,9 @@ def recharge_plan(*, with_actor: bool = False, cited_driver: bool = True) -> dic
                 "unit": "acre-feet",
                 "initial": 240,
                 "why_material": "the terminal reads it",
+                "not_a_stock_because": "the recharge log is the season's cumulative record "
+                "of water already infiltrated, not water held somewhere: nothing draws it "
+                "back down and it fills no container",
                 "evidence_claim_ids": ["c-a1"],
             },
             {
@@ -429,6 +432,9 @@ def ferry_plan(
                 "unit": "crossings",
                 "initial": "UNKNOWN",
                 "why_material": "the terminal reads it",
+                "not_a_stock_because": "the quarter's tally counts crossings that have "
+                "already been made; it is a record rather than anything held at the "
+                "terminal, and nothing can take a crossing back out of it",
                 "evidence_claim_ids": [],
             },
             {

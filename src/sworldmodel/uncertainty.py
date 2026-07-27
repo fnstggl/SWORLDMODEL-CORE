@@ -107,6 +107,25 @@ UNGROUNDED_PROVENANCES = frozenset(
     {WeightProvenance.SYMMETRIC_IGNORANCE, WeightProvenance.SENSITIVITY_ONLY}
 )
 
+#: §15 / FI-6. The evidence classes that can ground a branch weight, and the provenance
+#: label each one is recorded under. A weight outside these classes is a description of
+#: how many alternatives were written, not of how likely any of them is.
+WEIGHT_EVIDENCE_CLASSES: dict[WeightProvenance, str] = {
+    WeightProvenance.DIRECT_EMPIRICAL: (
+        "an empirical frequency, a documented base rate, direct current-state evidence, "
+        "or verified comparable cases"
+    ),
+    WeightProvenance.MARKET_SURVEY: (
+        "survey or market evidence — a polled or priced distribution someone published"
+    ),
+    WeightProvenance.CALIBRATED_BEHAVIOR: (
+        "a behavior model whose calibration is itself identified"
+    ),
+    WeightProvenance.EXPLICIT_MODEL: (
+        "an explicit model estimate, admissible only with visible support and stated uncertainty"
+    ),
+}
+
 
 def weights_grounded(scenario: Scenario) -> bool:
     """Whether this branch's weight is anchored in an identified distribution.
@@ -118,6 +137,76 @@ def weights_grounded(scenario: Scenario) -> bool:
     """
 
     return scenario.provenance not in UNGROUNDED_PROVENANCES
+
+
+def _uniform(outcomes: tuple[UncertaintyOutcome, ...]) -> bool:
+    """Do these alternatives carry one shared weight? ``1/n``, however it is labeled."""
+
+    weights = {round(o.weight.value, 9) for o in outcomes}
+    return len(outcomes) > 1 and len(weights) == 1
+
+
+def effective_provenance(spec: UncertaintySpec, outcome: UncertaintyOutcome) -> WeightProvenance:
+    """§15 / FI-6: the provenance this weight actually carries, not the one it claims.
+
+    Two rules, both universal and both computed from what the compiler itself declared:
+
+    * **Equal weights are never automatically probabilities.** A uniform split across a
+      variable's alternatives, with no constraining evidence identified for that
+      variable, is symmetric ignorance whatever label it wears. ``1/n`` states how many
+      alternatives were written; it is not a distribution someone measured.
+    * **An explicit model estimate is admissible only with visible support and stated
+      uncertainty.** An ``explicit_model_distribution`` weight with no constraining
+      evidence on its uncertainty and no source detail has neither, so it is demoted to
+      what it really is.
+
+    Demotion, never promotion: a weight already declared ungrounded stays ungrounded.
+    """
+
+    claimed = outcome.weight.provenance
+    if claimed in UNGROUNDED_PROVENANCES:
+        return claimed
+    if claimed is WeightProvenance.EXPLICIT_MODEL and not (
+        spec.constraining_evidence_ids and outcome.weight.source_detail.strip()
+    ):
+        return WeightProvenance.SYMMETRIC_IGNORANCE
+    if _uniform(spec.outcomes) and not spec.constraining_evidence_ids:
+        return WeightProvenance.SYMMETRIC_IGNORANCE
+    return claimed
+
+
+def weight_grounding_defects(spec: UncertaintySpec) -> tuple[str, ...]:
+    """Which of an uncertainty's weights claim a grounding they do not carry (§15).
+
+    Reported, not raised: an ungrounded alternative is perfectly legitimate *as scenario
+    analysis*, and this repository keeps it. What §15 forbids is letting its average
+    stand in for a calibrated probability, which the aggregation gate enforces
+    separately. This function exists so the mislabeling itself is visible.
+    """
+
+    defects: list[str] = []
+    for outcome in spec.outcomes:
+        claimed = outcome.weight.provenance
+        actual = effective_provenance(spec, outcome)
+        if actual is claimed:
+            continue
+        why = (
+            "an explicit model estimate with neither constraining evidence nor stated "
+            "support is not a model estimate"
+            if claimed is WeightProvenance.EXPLICIT_MODEL
+            and not (spec.constraining_evidence_ids and outcome.weight.source_detail.strip())
+            else (
+                f"all {len(spec.outcomes)} alternatives share one weight and the variable "
+                "identifies no constraining evidence — equal weights are never "
+                "automatically probabilities"
+            )
+        )
+        defects.append(
+            f"{spec.variable}={outcome.value!r} claims {claimed.value} "
+            f"({WEIGHT_EVIDENCE_CLASSES.get(claimed, 'an identified distribution')}) "
+            f"but carries {actual.value}: {why}"
+        )
+    return tuple(defects)
 
 
 def _weakest(provs: list[WeightProvenance]) -> WeightProvenance:
@@ -213,8 +302,18 @@ def enumerate_scenarios(
         for name, outcome, spec in zip(var_names, combo, specs, strict=True):
             var_total = sum(o.weight.value for o in spec.outcomes)
             weight *= outcome.weight.value / var_total
-            provs.append(outcome.weight.provenance)
-            details.append(f"{name}={outcome.value}({outcome.weight.provenance.value})")
+            # §15/FI-6: the provenance the weight actually carries. A uniform split with
+            # no constraining evidence, or a model estimate with no visible support, is
+            # symmetric ignorance however it was labeled — and the demotion travels into
+            # the branch record, where the aggregation gate reads it.
+            claimed = outcome.weight.provenance
+            actual = effective_provenance(spec, outcome)
+            provs.append(actual)
+            details.append(
+                f"{name}={outcome.value}({actual.value})"
+                if actual is claimed
+                else f"{name}={outcome.value}({claimed.value} -> {actual.value}: §15)"
+            )
             conditions.append((name, outcome.value))
             if not outcome.field_effects:
                 # An outcome that changes no world field announces nothing; it is a

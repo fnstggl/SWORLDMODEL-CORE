@@ -117,8 +117,15 @@ def _aggregate(contract, result):
 # ---------------------------------------------------------------------------
 
 
-def test_the_probability_is_exactly_the_weighted_yes_trajectories() -> None:
-    """Reconstruct the number by hand from the branch table."""
+def test_the_aggregate_figure_is_exactly_the_weighted_yes_trajectories() -> None:
+    """Reconstruct the number by hand from the branch table.
+
+    This world's branch weights are a symmetric-ignorance split whose branches DISAGREE,
+    so D2 suppresses the headline: ``simulation_probability`` is emptied and the figure
+    survives as ``scenario_average``, diagnostics only. The invariant this file exists
+    for is unchanged and is asserted against that figure — whatever the run reports, it
+    comes from the trajectories and from nothing else.
+    """
 
     gw = _gateway(_signal_sensitive)
     contract, compiled = _compile(_split_world(), gw)
@@ -129,17 +136,20 @@ def test_the_probability_is_exactly_the_weighted_yes_trajectories() -> None:
     no = sum(b.weight for b in result.branch_outcomes if b.resolved and b.outcome == "NO")
     assert forecast.resolved_yes_mass == pytest.approx(yes)
     assert forecast.resolved_no_mass == pytest.approx(no)
-    assert forecast.simulation_probability == pytest.approx(yes / (yes + no))
+    assert forecast.scenario_average == pytest.approx(yes / (yes + no))
     # The actors split the branches: this is not a degenerate all-one-way run.
-    assert 0.0 < forecast.simulation_probability < 1.0
-    # This world's branch weights are a symmetric-ignorance split and the branches
-    # disagree, so the point estimate depends on arbitrary weights — the source says so
-    # rather than presenting the scenario average as a simulated frequency.
+    assert forecast.scenario_average is not None
+    assert 0.0 < forecast.scenario_average < 1.0
+
+    # No headline. The published answer is emptied rather than merely labelled, because
+    # every reader that renders an answer reads that field.
+    assert forecast.simulation_probability is None
+    assert forecast.point_estimate_suppressed is True
+    assert forecast.point_estimate_suppression_reason
     assert forecast.probability_source == "scenario_enumeration_ungrounded_weights"
     assert forecast.integrity is not None
     assert not forecast.integrity.point_estimate_is_calibrated
-    # The number is still exactly the weighted YES trajectories; only its label and
-    # bounds acknowledge what the weights are.
+    # Only the bounds are published, and they acknowledge what the weights are.
     assert forecast.lower_bound == pytest.approx(0.0)
     assert forecast.upper_bound == pytest.approx(1.0)
 
@@ -155,9 +165,12 @@ def test_deleting_the_actor_decisions_destroys_the_forecast() -> None:
     contract2, compiled2 = _compile(_split_world(), silent)
     without = _aggregate(contract2, run(compiled2, silent, seed=0))
 
-    assert with_actors.simulation_probability is not None
+    # Read through the suppression: this world's headline is withheld either way, so the
+    # question "did the actors produce the answer?" is asked of the figure that exists.
+    assert with_actors.scenario_average is not None
     # No positions are recorded, so the compiled unresolved_when holds and there is
     # nothing to compute a probability from. Nothing fills the gap.
+    assert without.scenario_average is None
     assert without.simulation_probability is None
     assert without.status is ForecastStatus.UNRESOLVED
     assert without.unresolved_mass == pytest.approx(1.0)
@@ -214,7 +227,11 @@ def test_each_branch_records_its_pre_simulation_answer_and_weight_grounding() ->
     assert integrity is not None
     assert integrity.probability_before_simulation is None
     assert integrity.pre_unresolved_mass == pytest.approx(1.0)
-    assert integrity.probability_after_simulation == forecast.simulation_probability
+    # D2 empties the published headline for this world (ungrounded weights that
+    # disagree); the integrity block keeps the post-simulation figure, and it is the same
+    # number the diagnostics-only scenario average reports.
+    assert integrity.probability_after_simulation == forecast.scenario_average
+    assert forecast.simulation_probability is None
     assert not integrity.weights_grounded_all
     assert integrity.ungrounded_variables == ("external_signal",)
 
@@ -505,14 +522,20 @@ def test_an_operational_process_that_accumulates_output_is_not_an_announcement()
     assert producers and producers[0].process_id == "assembly_line"
 
 
-def test_the_pre_rollout_review_can_never_kill_a_run_that_passed_the_gates() -> None:
-    """It is advisory, and it runs after every mechanical gate has already passed.
+def test_a_review_that_could_not_run_can_never_kill_a_run_that_passed_the_gates() -> None:
+    """A FAULT in the review is not a verdict about the world.
 
-    A fault here can therefore only ever destroy a run that was otherwise sound — which
-    is what happened: a live Bank of England run compiled a real world, cleared every
-    gate, and died in the review's own summary helper because a compiled `at` is an ISO
-    string and the helper assumed a datetime. An opinion about a world must not be able
-    to stop it.
+    The review runs after every mechanical gate has already passed the world, so a fault
+    here can only ever destroy a run that was otherwise sound — which is what happened: a
+    live Bank of England run compiled a real world, cleared every gate, and died in the
+    review's own summary helper because a compiled `at` is an ISO string and the helper
+    assumed a datetime.
+
+    This is about the review that could not RUN, and it is deliberately not the same
+    question as what a review that ran gets to decide: a completed review's blocking
+    findings do stop publication (FD-27, CWF-6, and
+    ``tests/unit/test_publication_gate.py``). Something nobody was able to look at is
+    never priced as something that passed, and never as something that failed either.
     """
 
     from sworldmodel.world_review import _when, review_world
@@ -530,6 +553,45 @@ def test_the_pre_rollout_review_can_never_kill_a_run_that_passed_the_gates() -> 
     review = review_world(Malformed(), None, None, question="q", evidence_render="")
     assert "could not run" in review.error
     assert not review.should_repair  # a review that did not happen demands no repair
+
+
+def test_the_persisted_review_always_judges_the_world_that_was_simulated() -> None:
+    """Whatever a run publishes, its recorded review is a review OF the world it ran.
+
+    FD-27's artifact recorded seven blocking failures against a world the run had
+    already thrown away, beside the disposition "recompiled; the world simulated is not
+    the world reviewed here" — and then published a 0.0 from the unreviewed replacement.
+    A record that describes a different world than the one that produced the number
+    cannot audit it, whatever it says.
+
+    Checked over two structurally unlike worlds, so it is a property of every run rather
+    than of one shape: one whose answer turns on an actor's decision, and one where the
+    answer is already settled by a scheduled external release.
+    """
+
+    from _fakes import FixtureResearchBackend
+    from sworldmodel.api import _world_signature, run_forecast
+    from sworldmodel.config import ForecastConfig
+
+    for data in (_split_world(), scheduled_multiparty_world(members=2, threshold=2)):
+        gw = ProgrammableGateway(
+            {
+                "actor_decision": lambda ctx: (
+                    act("record_position", {"position": "hold"})
+                    if ctx.get("stage") == "session"
+                    else wait_decision("waiting for the session")
+                ),
+                "reflect": {"beliefs_update": [], "new_memories": []},
+            }
+        )
+        bundle = build_bundle(data)
+        config = ForecastConfig(gateway=gw, research_backend=FixtureResearchBackend(bundle))
+        _result, ctx = run_forecast("q", AS_OF, HORIZON, config)
+
+        review = ctx.world_review
+        assert review.simulated_world_signature == _world_signature(ctx.compiled)
+        assert review.as_dict()["describes_simulated_world"] is True
+        assert "the world simulated is not the world reviewed here" not in str(review.as_dict())
 
 
 def test_a_terminal_that_reads_no_world_state_is_refused() -> None:

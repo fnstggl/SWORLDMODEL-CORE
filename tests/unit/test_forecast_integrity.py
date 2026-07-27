@@ -16,10 +16,14 @@ import pytest
 
 from sworldmodel.models import (
     PROBABILITY_SOURCE,
+    RECONSTRUCTED_MEANS,
+    REQUIRED_RESPONSIBILITY_TESTS,
     BranchOutcome,
     IntegrityVerdict,
     RealityManifest,
     ResolutionContract,
+    ResponsibilityReport,
+    ValidityState,
 )
 from sworldmodel.outcomes import aggregate
 from sworldmodel.worldspec import Expr, TerminalExpression
@@ -78,7 +82,11 @@ def _branch(
     )
 
 
-def _aggregate(branches: tuple[BranchOutcome, ...], truncated_mass: float = 0.0):
+def _aggregate(
+    branches: tuple[BranchOutcome, ...],
+    truncated_mass: float = 0.0,
+    **gates: object,
+):
     return aggregate(
         branches,
         truncated_mass=truncated_mass,
@@ -90,6 +98,50 @@ def _aggregate(branches: tuple[BranchOutcome, ...], truncated_mass: float = 0.0)
         model_call_count=0,
         token_usage=0,
         limitations=(),
+        **gates,  # type: ignore[arg-type]
+    )
+
+
+def _report(
+    *,
+    classification: str = "ACTOR_CAUSED",
+    may_publish: bool | None = None,
+    point_estimate_permitted: bool | None = None,
+    weights_grounded: bool = True,
+    trace_reproducible: bool = True,
+    reason: str = "the actors produced the answer",
+) -> ResponsibilityReport:
+    """A responsibility report as :mod:`sworldmodel.responsibility` would emit it.
+
+    The gate itself is exercised end-to-end in ``test_responsibility.py``; here it is a
+    fixed input, so these tests pin what the *aggregation* does with each verdict.
+    """
+
+    publishes = (
+        classification
+        in ("ACTOR_CAUSED", "PROCESS_CAUSED", "ACTOR_AND_PROCESS_CAUSED", "FACTUALLY_RESOLVED")
+        if may_publish is None
+        else may_publish
+    )
+    return ResponsibilityReport(
+        classification=classification,
+        may_publish_answer=publishes,
+        point_estimate_permitted=(
+            publishes and weights_grounded
+            if point_estimate_permitted is None
+            else point_estimate_permitted
+        ),
+        reason=reason,
+        weights_grounded=weights_grounded,
+        trace_reproducible=trace_reproducible,
+        trace_reproducible_basis=(
+            "every branch outcome reproduces exactly by replaying the recorded ledger "
+            "and re-evaluating the terminal, with no model call. This confirms the "
+            "arithmetic, nothing more."
+            if trace_reproducible
+            else "the ledger replay disagrees with the published outcome: b1 does not reproduce"
+        ),
+        tests_completed=REQUIRED_RESPONSIBILITY_TESTS,
     )
 
 
@@ -105,10 +157,16 @@ def test_ungrounded_symmetric_split_is_flagged_not_presented_as_a_finding() -> N
             _branch("sc_false", 0.5, "NO", pre_outcome="NO", weight_grounded=False, value="false"),
         )
     )
-    # The point estimate is still exactly the weighted YES trajectories ...
-    assert forecast.simulation_probability == pytest.approx(0.5)
-    # ... but before simulation both branches said NO, so the simulation *did* move
-    # the answer — the branch weights, not the trajectories, put it back at the prior.
+    # D2/FI-2: no point estimate is published at all. The scenario average is still
+    # exactly the weighted YES trajectories, and it lives in diagnostics — never as the
+    # answer, because a label beside a number does not stop the number being read.
+    assert forecast.simulation_probability is None
+    assert forecast.point_estimate_suppressed
+    assert forecast.scenario_average == pytest.approx(0.5)
+    assert "Point estimate unavailable" in forecast.point_estimate_suppression_reason
+    # ... and before simulation both branches said NO, so the simulation *did* move
+    # the scenario average — the branch weights, not the trajectories, put it back at
+    # the prior.
     integrity = forecast.integrity
     assert integrity is not None
     assert integrity.probability_before_simulation == pytest.approx(0.0)
@@ -134,8 +192,17 @@ def test_ungrounded_symmetric_split_is_flagged_not_presented_as_a_finding() -> N
         "ungrounded_variables",
         "point_estimate_is_calibrated",
         "counterfactual_note",
+        "point_estimate_suppressed",
+        "suppression_reasons",
+        "resolved_mass_share",
+        "threshold_straddling_variables",
+        "scenario_average_is_diagnostic_only",
     }
     assert d["ungrounded_variables"] == ["job_market_slowing"]
+    assert d["suppression_reasons"] == ["ungrounded_branch_weights_disagree"]
+    # The scenario average is in the record, and the record says what it is.
+    assert d["probability_after_simulation"] == pytest.approx(0.5)
+    assert d["scenario_average_is_diagnostic_only"] is True
 
 
 def test_the_same_split_with_grounded_weights_is_calibrated() -> None:
@@ -333,3 +400,525 @@ def test_an_answer_the_record_already_carried_is_not_labeled_a_trajectory() -> N
         )
     )
     assert mixed.probability_source != PROBABILITY_SOURCE_ESTABLISHED
+
+
+# ===========================================================================
+# FI-1 (D1) — the validity triple, three separate fields, honest defaults
+# ===========================================================================
+
+
+def test_the_validity_triple_is_three_separate_fields_not_one_verdict() -> None:
+    forecast = _aggregate(
+        (_branch("a", 1.0, "YES", pre_outcome=None, weight_grounded=True),),
+        world_review_blocking=(),
+    )
+    validity = forecast.validity
+    assert validity is not None
+    assert validity.trace_reproducible is ValidityState.NOT_ASSESSED
+    assert validity.causal_simulation_valid is ValidityState.VALID
+    assert validity.point_estimate_calibrated is ValidityState.VALID
+    d = validity.as_dict()
+    assert set(d) == {
+        "trace_reproducible",
+        "trace_reproducible_basis",
+        "causal_simulation_valid",
+        "causal_simulation_valid_basis",
+        "point_estimate_calibrated",
+        "point_estimate_calibrated_basis",
+        "all_three_valid",
+        "reconstructed_means",
+    }
+    # Each leg carries its own basis: no reader can quote one as the others.
+    assert d["trace_reproducible_basis"]
+    assert d["causal_simulation_valid_basis"]
+    assert d["point_estimate_calibrated_basis"]
+
+
+def test_reconstructed_never_reads_as_trustworthy() -> None:
+    """The forensic audit returned RECONSTRUCTED on all three live runs, and two of the
+    three were arithmetic over equal ungrounded weights. Reproducibility is a statement
+    about arithmetic and must say so in its own words."""
+
+    report = _report(trace_reproducible=True, classification="ACTOR_CAUSED")
+    forecast = _aggregate(
+        (
+            _branch("a", 0.5, "YES", pre_outcome=None, weight_grounded=False, value="a"),
+            _branch("b", 0.5, "NO", pre_outcome=None, weight_grounded=False, value="b"),
+        ),
+        responsibility=report,
+    )
+    validity = forecast.validity
+    assert validity is not None
+    # The trace reproduces exactly ...
+    assert validity.trace_reproducible is ValidityState.VALID
+    # ... and the forecast is still not trustworthy: no point estimate survives.
+    assert validity.point_estimate_calibrated is ValidityState.INVALID
+    assert not validity.all_three_valid
+    assert forecast.simulation_probability is None
+    assert "confirms the arithmetic, nothing more" in validity.trace_reproducible_basis
+    assert RECONSTRUCTED_MEANS in validity.as_dict()["reconstructed_means"]
+    assert "not a claim" in RECONSTRUCTED_MEANS
+
+
+def test_causal_validity_defaults_to_not_assessed_never_to_true() -> None:
+    """The seam with the world review is three-valued. An absent review is an absent
+    assessment; only an actual review with nothing blocking surviving is 'valid'."""
+
+    branches = (_branch("a", 1.0, "YES", pre_outcome=None, weight_grounded=True),)
+
+    absent = _aggregate(branches)
+    assert absent.validity is not None
+    assert absent.validity.causal_simulation_valid is ValidityState.NOT_ASSESSED
+    assert "absence of an assessment" in absent.validity.causal_simulation_valid_basis
+
+    clean = _aggregate(branches, world_review_blocking=())
+    assert clean.validity is not None
+    assert clean.validity.causal_simulation_valid is ValidityState.VALID
+
+    blocked = _aggregate(
+        branches, world_review_blocking=("terminal_preresolved", "decorative_actors")
+    )
+    assert blocked.validity is not None
+    assert blocked.validity.causal_simulation_valid is ValidityState.INVALID
+    assert "decorative_actors" in blocked.validity.causal_simulation_valid_basis
+    # A world the review condemned does not stop the arithmetic reproducing, and the
+    # two facts stay separate — that is the whole point of the triple.
+    assert blocked.validity.point_estimate_calibrated is ValidityState.VALID
+
+
+def test_a_trace_that_does_not_reproduce_invalidates_the_causal_leg_too() -> None:
+    report = _report(trace_reproducible=False, classification="INVALID", may_publish=False)
+    forecast = _aggregate(
+        (_branch("a", 1.0, "YES", pre_outcome=None, weight_grounded=True),),
+        world_review_blocking=(),
+        responsibility=report,
+    )
+    validity = forecast.validity
+    assert validity is not None
+    assert validity.trace_reproducible is ValidityState.INVALID
+    # Even though the world review passed, a record that does not reconstruct cannot
+    # evidence a valid causal simulation.
+    assert validity.causal_simulation_valid is ValidityState.INVALID
+    assert "does not reproduce" in validity.causal_simulation_valid_basis
+
+
+# ===========================================================================
+# FI-2 (D2, FD-2, FD-17) — headline suppression
+# ===========================================================================
+
+
+def test_fd17_one_yes_branch_and_three_unresolved_publishes_no_point_estimate() -> None:
+    """The live artifact artifacts/phase2/geopolitical2/forecast.json, exactly.
+
+    Four branches at 0.25 with symmetric-ignorance weights; one resolved YES and three
+    never resolved. The run published `simulation_probability: 1.0` under
+    `weighted_simulated_trajectories` with `point_estimate_is_calibrated: true` and
+    0.75 unresolved. FI-2's disagreement test cannot fire — the other three are
+    unresolved rather than opposed — so the minority-mass rule is what catches it.
+    """
+
+    forecast = _aggregate(
+        (
+            _branch("sc_ff", 0.25, None, pre_outcome=None, weight_grounded=False, value="ff"),
+            _branch("sc_ft", 0.25, None, pre_outcome=None, weight_grounded=False, value="ft"),
+            _branch("sc_tf", 0.25, None, pre_outcome=None, weight_grounded=False, value="tf"),
+            _branch("sc_tt", 0.25, "YES", pre_outcome=None, weight_grounded=False, value="tt"),
+        )
+    )
+    # The published headline is empty. It was 1.0000.
+    assert forecast.simulation_probability is None
+    assert forecast.point_estimate_suppressed
+    # The stale calibration flag comes out false. It was true.
+    integrity = forecast.integrity
+    assert integrity is not None
+    assert integrity.point_estimate_is_calibrated is False
+    assert integrity.suppression_reasons == ("resolved_mass_is_a_minority_of_branch_mass",)
+    assert integrity.resolved_mass_share == pytest.approx(0.25)
+    # The scenario average survives, labelled, in diagnostics only.
+    assert forecast.scenario_average == pytest.approx(1.0)
+    assert integrity.probability_after_simulation == pytest.approx(1.0)
+    # What is published instead: no point estimate, honest bounds, and the reason.
+    assert forecast.lower_bound == pytest.approx(0.0)
+    assert forecast.upper_bound == pytest.approx(1.0)
+    assert "minority of the branch mass" in forecast.point_estimate_suppression_reason
+    assert forecast.probability_source == "point_estimate_withheld_scenario_bounds_only"
+    # The reason travels with the published limitations, not only in a side record.
+    assert any("Point estimate unavailable" in lim for lim in forecast.limitations)
+
+
+def test_the_minority_rule_is_a_minority_not_a_majority_requirement() -> None:
+    """Exactly half the mass resolving is not a minority; the estimate stands."""
+
+    half = _aggregate(
+        (
+            _branch("a", 0.5, "YES", pre_outcome=None, weight_grounded=True, value="a"),
+            _branch("b", 0.5, None, pre_outcome=None, weight_grounded=True, value="b"),
+        )
+    )
+    assert half.simulation_probability == pytest.approx(1.0)
+    assert not half.point_estimate_suppressed
+
+    just_under = _aggregate(
+        (
+            _branch("a", 0.49, "YES", pre_outcome=None, weight_grounded=True, value="a"),
+            _branch("b", 0.51, None, pre_outcome=None, weight_grounded=True, value="b"),
+        )
+    )
+    assert just_under.simulation_probability is None
+    assert just_under.point_estimate_suppressed
+
+
+def test_the_minority_rule_fires_on_truncated_mass_too() -> None:
+    """Mass dropped by the branch cap is mass that never reached an answer."""
+
+    forecast = _aggregate(
+        (_branch("a", 0.4, "YES", pre_outcome=None, weight_grounded=True, value="a"),),
+        truncated_mass=0.6,
+    )
+    assert forecast.simulation_probability is None
+    assert forecast.integrity is not None
+    assert "resolved_mass_is_a_minority_of_branch_mass" in forecast.integrity.suppression_reasons
+
+
+def test_fd2_ungrounded_disagreement_suppresses_whatever_the_resolved_share() -> None:
+    """The Bank of England / Tesla shape: all mass resolved, and still no point estimate."""
+
+    forecast = _aggregate(
+        (
+            _branch("a", 0.25, "YES", pre_outcome=None, weight_grounded=False, value="a"),
+            _branch("b", 0.25, "NO", pre_outcome=None, weight_grounded=False, value="b"),
+            _branch("c", 0.25, "NO", pre_outcome=None, weight_grounded=False, value="c"),
+            _branch("d", 0.25, "NO", pre_outcome=None, weight_grounded=False, value="d"),
+        )
+    )
+    assert forecast.resolved_mass == pytest.approx(1.0)
+    assert forecast.simulation_probability is None
+    assert forecast.scenario_average == pytest.approx(0.25)
+    assert forecast.integrity is not None
+    assert forecast.integrity.suppression_reasons == ("ungrounded_branch_weights_disagree",)
+    assert "not grounded in any identified distribution" in (
+        forecast.point_estimate_suppression_reason
+    )
+
+
+def test_grounded_weights_that_disagree_still_publish_a_point_estimate() -> None:
+    """Suppression is about ungrounded weights, not about disagreement as such."""
+
+    forecast = _aggregate(
+        (
+            _branch("a", 0.7, "YES", pre_outcome=None, weight_grounded=True, value="a"),
+            _branch("b", 0.3, "NO", pre_outcome=None, weight_grounded=True, value="b"),
+        )
+    )
+    assert forecast.simulation_probability == pytest.approx(0.7)
+    assert not forecast.point_estimate_suppressed
+    assert forecast.integrity is not None
+    assert forecast.integrity.point_estimate_is_calibrated
+
+
+# ===========================================================================
+# FI-5 (D3) — the aggregation-time threshold-straddling backstop
+# ===========================================================================
+
+
+def test_fi5_ungrounded_numeric_alternatives_straddling_the_threshold_suppress() -> None:
+    """The Tesla shape at aggregation time: factors 0.8 and 1.05 either side of 0.8331.
+
+    The semantic validator refuses this statically. This is the late net, for a world
+    the static gate never saw.
+    """
+
+    forecast = _aggregate(
+        (
+            _branch(
+                "lo",
+                0.5,
+                "NO",
+                pre_outcome=None,
+                weight_grounded=False,
+                variable="seasonal_factor",
+                value="0.8",
+            ),
+            _branch(
+                "hi",
+                0.5,
+                "YES",
+                pre_outcome=None,
+                weight_grounded=False,
+                variable="seasonal_factor",
+                value="1.05",
+            ),
+        )
+    )
+    assert forecast.simulation_probability is None
+    integrity = forecast.integrity
+    assert integrity is not None
+    assert integrity.threshold_straddling_variables == ("seasonal_factor",)
+    assert "threshold_straddling_ungrounded_scenarios" in integrity.suppression_reasons
+    assert "opposite sides of the terminal threshold" in (
+        forecast.point_estimate_suppression_reason
+    )
+
+
+def test_fi5_does_not_fire_on_grounded_numeric_alternatives() -> None:
+    """A cited distribution over numeric draws is a distribution, not an invention."""
+
+    forecast = _aggregate(
+        (
+            _branch(
+                "lo",
+                0.5,
+                "NO",
+                pre_outcome=None,
+                weight_grounded=True,
+                variable="seasonal_factor",
+                value="0.8",
+            ),
+            _branch(
+                "hi",
+                0.5,
+                "YES",
+                pre_outcome=None,
+                weight_grounded=True,
+                variable="seasonal_factor",
+                value="1.05",
+            ),
+        )
+    )
+    assert forecast.integrity is not None
+    assert forecast.integrity.threshold_straddling_variables == ()
+    assert forecast.simulation_probability == pytest.approx(0.5)
+
+
+# ===========================================================================
+# FI-3 / FI-4 (D6, FD-4) — the responsibility publication gate
+# ===========================================================================
+
+
+def test_fd4_a_branch_weights_dominated_run_publishes_no_answer_at_all() -> None:
+    """The defect: the classification lived only in the offline forensic script, so a
+    BRANCH_WEIGHTS_DOMINATED run published 0.25 normally. It may now publish nothing."""
+
+    report = _report(
+        classification="BRANCH_WEIGHTS_DOMINATED",
+        may_publish=False,
+        point_estimate_permitted=False,
+        reason="the probability is the weight of the winning cells",
+    )
+    forecast = _aggregate(
+        (
+            _branch("a", 0.25, "YES", pre_outcome=None, weight_grounded=False, value="a"),
+            _branch("b", 0.25, "NO", pre_outcome=None, weight_grounded=False, value="b"),
+            _branch("c", 0.25, "NO", pre_outcome=None, weight_grounded=False, value="c"),
+            _branch("d", 0.25, "NO", pre_outcome=None, weight_grounded=False, value="d"),
+        ),
+        responsibility=report,
+    )
+    assert forecast.answer_withheld
+    assert forecast.simulation_probability is None
+    assert forecast.probability_source == "no_answer_published_responsibility_gate"
+    assert "No answer is published for this run" in forecast.point_estimate_suppression_reason
+    assert "BRANCH_WEIGHTS_DOMINATED" in forecast.point_estimate_suppression_reason
+    # The report travels with the forecast so the artifact carries the whole gate.
+    assert forecast.responsibility is report
+    assert forecast.integrity is not None
+    assert "responsibility_classification_forbids_publication" in (
+        forecast.integrity.suppression_reasons
+    )
+    # The scenario average is still recoverable for diagnosis, and is not the answer.
+    assert forecast.scenario_average == pytest.approx(0.25)
+
+
+@pytest.mark.parametrize(
+    "classification",
+    ["INITIAL_ASSUMPTIONS_DOMINATED", "BRANCH_WEIGHTS_DOMINATED", "UNRESOLVED", "INVALID"],
+)
+def test_only_the_four_causing_classifications_may_publish(classification: str) -> None:
+    blocked = _aggregate(
+        (_branch("a", 1.0, "YES", pre_outcome=None, weight_grounded=True),),
+        responsibility=_report(classification=classification, may_publish=False),
+    )
+    assert blocked.answer_withheld
+    assert blocked.simulation_probability is None
+
+
+@pytest.mark.parametrize(
+    "classification",
+    ["ACTOR_CAUSED", "PROCESS_CAUSED", "ACTOR_AND_PROCESS_CAUSED", "FACTUALLY_RESOLVED"],
+)
+def test_the_four_causing_classifications_publish_normally(classification: str) -> None:
+    ok = _aggregate(
+        (_branch("a", 1.0, "YES", pre_outcome=None, weight_grounded=True),),
+        responsibility=_report(classification=classification),
+    )
+    assert not ok.answer_withheld
+    assert ok.simulation_probability == pytest.approx(1.0)
+
+
+def test_a_caused_result_without_grounded_weights_still_loses_its_point_estimate() -> None:
+    """D6, second sentence: actor- and process-caused results still need grounded
+    weights before the magnitude is a calibrated probability."""
+
+    report = _report(
+        classification="ACTOR_CAUSED",
+        may_publish=True,
+        point_estimate_permitted=False,
+        weights_grounded=False,
+    )
+    forecast = _aggregate(
+        (
+            _branch("a", 0.5, "YES", pre_outcome=None, weight_grounded=False, value="a"),
+            _branch("b", 0.5, "YES", pre_outcome=None, weight_grounded=False, value="b"),
+        ),
+        responsibility=report,
+    )
+    # The answer is not withheld — the actors really did produce it ...
+    assert not forecast.answer_withheld
+    # ... but there is no calibrated number.
+    assert forecast.simulation_probability is None
+    assert forecast.point_estimate_suppressed
+    assert forecast.integrity is not None
+    assert "caused_result_without_grounded_branch_weights" in (
+        forecast.integrity.suppression_reasons
+    )
+
+
+def test_omitting_the_gate_applies_no_gate_and_says_so() -> None:
+    """A caller that has not run the gate gets today's behaviour and an honest
+    'not assessed', never a silent pass."""
+
+    forecast = _aggregate((_branch("a", 1.0, "YES", pre_outcome=None, weight_grounded=True),))
+    assert forecast.responsibility is None
+    assert not forecast.answer_withheld
+    assert forecast.simulation_probability == pytest.approx(1.0)
+    assert forecast.validity is not None
+    assert forecast.validity.trace_reproducible is ValidityState.NOT_ASSESSED
+    assert "no ledger replay was run" in forecast.validity.trace_reproducible_basis
+
+
+# ===========================================================================
+# FI-6 (§15) — weight rules
+# ===========================================================================
+
+
+def test_fi6_every_grounded_provenance_names_an_evidence_class() -> None:
+    from sworldmodel.models import WeightProvenance
+    from sworldmodel.uncertainty import UNGROUNDED_PROVENANCES, WEIGHT_EVIDENCE_CLASSES
+
+    grounded = set(WeightProvenance) - UNGROUNDED_PROVENANCES
+    assert set(WEIGHT_EVIDENCE_CLASSES) == grounded
+    text = " ".join(WEIGHT_EVIDENCE_CLASSES.values())
+    for phrase in (
+        "empirical frequency",
+        "base rate",
+        "current-state evidence",
+        "survey or market evidence",
+        "comparable cases",
+        "explicit model estimate",
+        "visible support and stated uncertainty",
+    ):
+        assert phrase in text
+
+
+def test_fi6_equal_weights_are_never_automatically_probabilities() -> None:
+    """A uniform split with no constraining evidence is symmetric ignorance whatever
+    label it wears, and the demotion reaches the branch record."""
+
+    from sworldmodel.models import (
+        BranchWeight,
+        UncertaintyOutcome,
+        UncertaintySpec,
+        WeightProvenance,
+    )
+    from sworldmodel.uncertainty import (
+        effective_provenance,
+        enumerate_scenarios,
+        weight_grounding_defects,
+        weights_grounded,
+    )
+
+    def outcome(value: str, weight: float) -> UncertaintyOutcome:
+        return UncertaintyOutcome(
+            value=value,
+            weight=BranchWeight(weight, WeightProvenance.DIRECT_EMPIRICAL, "claimed empirical"),
+            field_effects=(("s", value),),
+        )
+
+    uniform = UncertaintySpec("v", "unknown", True, (outcome("a", 0.5), outcome("b", 0.5)))
+    assert effective_provenance(uniform, uniform.outcomes[0]) is (
+        WeightProvenance.SYMMETRIC_IGNORANCE
+    )
+    defects = weight_grounding_defects(uniform)
+    assert len(defects) == 2
+    assert "equal weights are never automatically probabilities" in defects[0]
+    assert all(not weights_grounded(s) for s in enumerate_scenarios((uniform,), {}).scenarios)
+
+    # Cite the distribution the split came from and the claim stands.
+    cited = UncertaintySpec(
+        "v",
+        "unknown",
+        True,
+        (outcome("a", 0.5), outcome("b", 0.5)),
+        constraining_evidence_ids=("c-1e7c9d751ad5",),
+    )
+    assert effective_provenance(cited, cited.outcomes[0]) is WeightProvenance.DIRECT_EMPIRICAL
+    assert weight_grounding_defects(cited) == ()
+    assert all(weights_grounded(s) for s in enumerate_scenarios((cited,), {}).scenarios)
+
+    # An asymmetric split is itself a claim someone made, and is not demoted.
+    asymmetric = UncertaintySpec("v", "unknown", True, (outcome("a", 0.7), outcome("b", 0.3)))
+    assert effective_provenance(asymmetric, asymmetric.outcomes[0]) is (
+        WeightProvenance.DIRECT_EMPIRICAL
+    )
+
+
+def test_fi6_an_explicit_model_estimate_needs_visible_support_and_uncertainty() -> None:
+    from sworldmodel.models import (
+        BranchWeight,
+        UncertaintyOutcome,
+        UncertaintySpec,
+        WeightProvenance,
+    )
+    from sworldmodel.uncertainty import effective_provenance, weight_grounding_defects
+
+    def outcome(value: str, weight: float, detail: str) -> UncertaintyOutcome:
+        return UncertaintyOutcome(
+            value=value,
+            weight=BranchWeight(weight, WeightProvenance.EXPLICIT_MODEL, detail),
+            field_effects=(("s", value),),
+        )
+
+    bare = UncertaintySpec("v", "unknown", True, (outcome("a", 0.7, ""), outcome("b", 0.3, "")))
+    assert effective_provenance(bare, bare.outcomes[0]) is WeightProvenance.SYMMETRIC_IGNORANCE
+    assert "is not a model estimate" in weight_grounding_defects(bare)[0]
+
+    supported = UncertaintySpec(
+        "v",
+        "unknown",
+        True,
+        (outcome("a", 0.7, "logit model, +/- 0.08"), outcome("b", 0.3, "logit model, +/- 0.08")),
+        constraining_evidence_ids=("c-82fa536178c2",),
+    )
+    assert effective_provenance(supported, supported.outcomes[0]) is (
+        WeightProvenance.EXPLICIT_MODEL
+    )
+    assert weight_grounding_defects(supported) == ()
+
+
+def test_fi6_ungrounded_alternatives_stay_available_for_scenario_analysis() -> None:
+    """§15 keeps them. What it forbids is their average masquerading as calibrated."""
+
+    forecast = _aggregate(
+        (
+            _branch("a", 0.5, "YES", pre_outcome=None, weight_grounded=False, value="a"),
+            _branch("b", 0.5, "NO", pre_outcome=None, weight_grounded=False, value="b"),
+        )
+    )
+    # Every scenario is still reported, with its weight and its answer.
+    assert len(forecast.branch_outcomes) == 2
+    assert {b.outcome for b in forecast.branch_outcomes} == {"YES", "NO"}
+    # The average exists, in diagnostics, and is not the answer.
+    assert forecast.scenario_average == pytest.approx(0.5)
+    assert forecast.simulation_probability is None
+    assert forecast.validity is not None
+    assert forecast.validity.point_estimate_calibrated is ValidityState.INVALID

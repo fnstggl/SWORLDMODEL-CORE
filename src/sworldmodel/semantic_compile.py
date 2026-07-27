@@ -30,6 +30,7 @@ from .semantic_plan import (
     COMPARISONS,
     PROCESS_KINDS,
     REPRESENTATION_SCALES,
+    STATE_KINDS,
     STATE_TYPES,
     STRUCTURAL_TYPES,
     TERMINAL_FORMS,
@@ -81,8 +82,14 @@ SEMANTIC_SCHEMA = f"""Return a SINGLE JSON object with exactly these keys:
  }}],
  "states": [{{
    "name": "<ordinary-language name, unique>",
-   "owner": "<entity name or 'world'>",
+   "owner": "<entity name or 'world' — for a stock, who HOLDS the quantity>",
    "state_type": "<one of {list(STATE_TYPES)}>",
+   "kind": "<one of {list(STATE_KINDS)} — see WHAT KIND OF THING THIS IS; default level>",
+   "capacity": <stock only: the physical ceiling it can be filled to, or null>,
+   "period": "<flow only: ISO-8601 duration the rate is quoted over, e.g. P1W>",
+   "not_a_stock_because": "<level only, and ONLY when something draws this quantity down
+     or the terminal reads it as an accumulating total: why this quantity is a reading or
+     a record rather than something held somewhere>",
    "unit": "<unit or ''>",
    "initial": <verified value, or "UNKNOWN" when the evidence does not establish one>,
    "why_material": "...",
@@ -117,6 +124,13 @@ SEMANTIC_SCHEMA = f"""Return a SINGLE JSON object with exactly these keys:
    "inputs": ["<state names read>"],
    "at": "<ISO datetime for an actor_moment's dated occasion, else null>",
    "deadline": "<ISO or null>",
+   "recurrence": {{
+     "period": "<ISO-8601 duration this mechanism repeats on, e.g. P1D, P1W, P1M, PT6H>",
+     "start": "<ISO datetime of the first firing>",
+     "end": "<ISO datetime after which it stops>",
+     "description": "<what happens at each firing>",
+     "changes": [<see CHANGES — applied at EVERY firing>]
+   }},
    "occurrences": [{{
      "description": "...",
      "at": "<ISO datetime or null>",
@@ -175,6 +189,27 @@ SEMANTIC_SCHEMA = f"""Return a SINGLE JSON object with exactly these keys:
  "world_facts": [{{"text": "...", "evidence_claim_ids": ["..."]}}]
 }}
 
+WHAT KIND OF THING A STATE IS. Every state declares its kind, because conservation
+follows from it and nothing else can supply it:
+  stock — a real quantity HELD somewhere: water behind a dam, grain in an elevator,
+    vehicles on a lot, beds on a ward, berths at a quay, ballots in a box. Give it the
+    holder in "owner", a known starting amount, and — if anything adds to it — the
+    "capacity" it fills up to. Change it only with increase/decrease: a stock MOVES, it
+    is never "set", and the runtime refuses any move that would overdraw or overfill it.
+  flow  — a RATE, and therefore only meaningful with the "period" it is quoted over
+    (P1D, P1W, P1M). A rate produces nothing until a process applies it, so the process
+    that applies it must fire at that rate across its whole window.
+  level — a reading, an indicator, a category, a boolean, or a running record of what
+    has already happened. Unconstrained. If something DECREASES a quantity-level, or the
+    terminal reads one the world accumulates, say in "not_a_stock_because" why it is not
+    a quantity held somewhere — otherwise declare it a stock.
+
+CADENCE. A mechanism that repeats declares "recurrence" (period + start + end + the
+changes each firing makes) and code enumerates every firing. Do NOT hand-write the
+dates: a weekly process typed as two dates becomes a twice-a-quarter process, and the
+answer becomes a fact about your typing. Use "occurrences" only for genuinely irregular
+or dependent firings, and never alongside a recurrence.
+
 CHANGES — the only universal change operations (they apply to dynamically named
 real-world objects; there is no domain event list):
   {{"op": "set", "target": "<state name>", "value": <literal |
@@ -195,6 +230,14 @@ CONSISTENCY REQUIREMENTS (checked mechanically; a violation costs a revision rou
 - every operational / scheduled_release process needs at least one occurrence with
   "at" or "after_process";
 - every entity with decides=true needs at least one affordance and cited evidence;
+- a quantity anything decreases is a stock, or says in not_a_stock_because why it may go
+  below zero; a stock starts at a known amount, is never "set", and declares a capacity
+  if anything adds to it; a flow declares a positive ISO-8601 period;
+- a process that applies a flow either declares a recurrence at that flow's own period,
+  or enumerates every occurrence its window requires at that period — a rate applied
+  fewer times than the window holds makes the total an artifact of the schedule;
+- a recurrence needs a positive period, a start before its end, at least two firings,
+  its own changes, and no hand-written occurrences beside it;
 - a precise initial number needs evidence_claim_ids, otherwise write "UNKNOWN";
 - the state the terminal reads must be written by an affordance or process occurrence,
   or carry a cited initial value — and must never be set by an uncertainty, nor set
@@ -250,6 +293,15 @@ set-the-total, or one cited base times one invented factor, is a forecast wearin
 world's clothes: it has no intermediate state, spans no time, and its answer is decided
 by the factor you chose. Give the quantity grounded inputs, at least one intermediate
 state the mechanism updates, and occurrences across the real causal period.
+
+PHYSICAL QUANTITIES ARE CONSERVED, AND RATES NEED CADENCES. When the mechanism moves
+real things — units built, delivered, released, admitted, loaded, counted — declare each
+of those quantities a stock with its holder, its starting amount and, where anything
+adds to it, its capacity; then the world cannot deliver what it does not have or fill
+what has no room. Declare the rates that drive it as flows with their periods, and give
+the process that applies them its recurrence. A world that models throughput as bare
+arithmetic on plain levels can and does run its inventory tens of thousands of units
+below zero for a whole quarter and resolve on the result.
 
 ALREADY SETTLED vs STILL OPEN. If verified claims available at the cutoff establish
 that the outcome has already happened, say so: give the resolving state its established

@@ -165,8 +165,12 @@ def test_symmetric_ignorance_structure_weights_reach_the_integrity_record() -> N
     assert result.integrity.point_estimate_is_calibrated is False
     # The structure choice surfaces beside every other ungrounded variable.
     assert "causal_structure" in result.integrity.ungrounded_variables
-    # The bounds are wider than the point: no grounded mass pins either end.
-    p = result.simulation_probability
+    # D2/FI-2: the two structures disagree and neither weight is grounded, so no point
+    # estimate is published at all. The scenario average survives as a diagnostic, and
+    # the bounds — which are the honest answer here — are wider than it at both ends.
+    assert result.simulation_probability is None
+    assert result.point_estimate_suppressed is True
+    p = result.scenario_average
     assert p is not None
     assert result.lower_bound < p < result.upper_bound
 

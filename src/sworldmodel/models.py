@@ -332,6 +332,228 @@ PROBABILITY_SOURCE_UNGROUNDED_WEIGHTS = "scenario_enumeration_ungrounded_weights
 # a live OPEC+ run published 1.00 under that label with zero scheduling batches, zero
 # actor invocations and a terminal that was true at t0.
 PROBABILITY_SOURCE_ESTABLISHED = "established_before_simulation_from_cited_record"
+# D2/FI-2: there is no published point estimate. The run has honest scenario bounds and
+# a stated reason, and the scenario average survives in diagnostics only. A label alone
+# was demonstrably not enough — two live runs published their scenario average as the
+# headline while `probability_source` and bounds of [0, 1] sat beside it saying the
+# number constrained nothing — so suppression empties the number itself.
+PROBABILITY_SOURCE_SUPPRESSED = "point_estimate_withheld_scenario_bounds_only"
+# D6/FI-3: the responsibility gate refused publication outright. Not "here is a number
+# we do not trust" but "this run does not get to answer the question".
+PROBABILITY_SOURCE_NOT_PUBLISHABLE = "no_answer_published_responsibility_gate"
+
+# Why a point estimate was withheld (D2/FI-2, D3/FI-5). Universal, never per question.
+SUPPRESSED_UNGROUNDED_WEIGHTS_DISAGREE = "ungrounded_branch_weights_disagree"
+SUPPRESSED_RESOLVED_MASS_IS_A_MINORITY = "resolved_mass_is_a_minority_of_branch_mass"
+SUPPRESSED_THRESHOLD_STRADDLING = "threshold_straddling_ungrounded_scenarios"
+SUPPRESSED_RESPONSIBILITY_GATE = "responsibility_classification_forbids_publication"
+SUPPRESSED_WEIGHTS_UNGROUNDED_FOR_A_CAUSED_RESULT = "caused_result_without_grounded_branch_weights"
+
+# ---------------------------------------------------------------------------
+# Responsibility (D6 / FI-3 / FI-4) — what produced the number
+# ---------------------------------------------------------------------------
+
+ACTOR_CAUSED = "ACTOR_CAUSED"
+PROCESS_CAUSED = "PROCESS_CAUSED"
+ACTOR_AND_PROCESS_CAUSED = "ACTOR_AND_PROCESS_CAUSED"
+FACTUALLY_RESOLVED = "FACTUALLY_RESOLVED"
+INITIAL_ASSUMPTIONS_DOMINATED = "INITIAL_ASSUMPTIONS_DOMINATED"
+BRANCH_WEIGHTS_DOMINATED = "BRANCH_WEIGHTS_DOMINATED"
+RESPONSIBILITY_UNRESOLVED = "UNRESOLVED"
+RESPONSIBILITY_INVALID = "INVALID"
+
+#: The complete D6 vocabulary. Nothing outside it may be written to an artifact.
+RESPONSIBILITY_CLASSIFICATIONS: tuple[str, ...] = (
+    ACTOR_CAUSED,
+    PROCESS_CAUSED,
+    ACTOR_AND_PROCESS_CAUSED,
+    FACTUALLY_RESOLVED,
+    INITIAL_ASSUMPTIONS_DOMINATED,
+    BRANCH_WEIGHTS_DOMINATED,
+    RESPONSIBILITY_UNRESOLVED,
+    RESPONSIBILITY_INVALID,
+)
+
+#: The only classifications that may publish an answer at all (D6). The other four
+#: describe a run whose number came from its own initialization, its own enumeration,
+#: nothing, or a record that does not reconstruct.
+PUBLISHING_CLASSIFICATIONS: frozenset[str] = frozenset(
+    {ACTOR_CAUSED, PROCESS_CAUSED, ACTOR_AND_PROCESS_CAUSED, FACTUALLY_RESOLVED}
+)
+
+#: The counterfactual and sensitivity tests §14 requires before any publication. A
+#: report that does not list all of them in ``tests_completed`` has not run the gate.
+REQUIRED_RESPONSIBILITY_TESTS: tuple[str, ...] = (
+    "all_actor_output_removed",
+    "per_actor_removed",
+    "per_process_removed",
+    "initialization_preserved_terminal_reevaluated",
+    "equal_weight_substitution",
+    "ungrounded_numeric_alternatives_perturbed",
+    "terminal_relevant_actions_removed",
+)
+
+
+@dataclass(frozen=True)
+class BranchCounterfactual:
+    """One branch's deterministic deletion replays (D6/D7), all zero-LLM.
+
+    Each field holds the terminal answer the branch reaches when the named events are
+    removed from its recorded ledger and the terminal is re-evaluated by the engine's
+    own evaluator: ``"YES"`` / ``"NO"`` / ``"UNRESOLVED"`` / ``"UNRECONSTRUCTABLE"``.
+    """
+
+    branch_id: str
+    outcome: str | None  # the branch's published answer, for comparison
+    recomputed_outcome: str | None  # the same answer replayed from the ledger
+    all_actor_output_removed: str | None
+    all_process_output_removed: str | None
+    initialization_preserved: str | None  # every recorded event removed
+    terminal_relevant_actions_removed: str | None
+    per_actor_removed: tuple[tuple[str, str | None], ...] = ()
+    per_process_removed: tuple[tuple[str, str | None], ...] = ()
+    numeric_perturbations: tuple[tuple[str, str | None], ...] = ()
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "branch_id": self.branch_id,
+            "outcome": self.outcome,
+            "recomputed_outcome": self.recomputed_outcome,
+            "all_actor_output_removed": self.all_actor_output_removed,
+            "all_process_output_removed": self.all_process_output_removed,
+            "initialization_preserved": self.initialization_preserved,
+            "terminal_relevant_actions_removed": self.terminal_relevant_actions_removed,
+            "per_actor_removed": dict(self.per_actor_removed),
+            "per_process_removed": dict(self.per_process_removed),
+            "numeric_perturbations": dict(self.numeric_perturbations),
+        }
+
+
+@dataclass(frozen=True)
+class ResponsibilityReport:
+    """What produced the number, computed before publication and never asserted.
+
+    Built by :func:`sworldmodel.responsibility.classify_responsibility` from the run's
+    own ledger through :mod:`sworldmodel.replaycore`. ``classification`` is one of
+    :data:`RESPONSIBILITY_CLASSIFICATIONS`; ``may_publish_answer`` is membership in
+    :data:`PUBLISHING_CLASSIFICATIONS` **and** a complete test set —
+    an incomplete gate publishes nothing, because a gate that did not run is not a
+    gate that passed.
+
+    ``point_estimate_permitted`` is the separate, stricter question D6 asks of an
+    actor- or process-caused result: it still needs grounded branch weights before its
+    magnitude may be presented as a calibrated point estimate. A factual resolution
+    does not — the record, not the weights, decided it.
+    """
+
+    classification: str
+    may_publish_answer: bool
+    point_estimate_permitted: bool
+    reason: str
+    weights_grounded: bool
+    trace_reproducible: bool
+    trace_reproducible_basis: str
+    branch_counterfactuals: tuple[BranchCounterfactual, ...] = ()
+    weighted_probability: float | None = None
+    equal_weight_probability: float | None = None
+    weight_sensitivity_span: float | None = None
+    threshold_straddling_variables: tuple[str, ...] = ()
+    numeric_perturbation_findings: tuple[str, ...] = ()
+    tests_completed: tuple[str, ...] = ()
+    tests_missing: tuple[str, ...] = ()
+    error: str = ""
+
+    @property
+    def gate_complete(self) -> bool:
+        return not self.tests_missing and not self.error
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "classification": self.classification,
+            "may_publish_answer": self.may_publish_answer,
+            "point_estimate_permitted": self.point_estimate_permitted,
+            "reason": self.reason,
+            "weights_grounded": self.weights_grounded,
+            "trace_reproducible": self.trace_reproducible,
+            "trace_reproducible_basis": self.trace_reproducible_basis,
+            "weighted_probability": self.weighted_probability,
+            "equal_weight_probability": self.equal_weight_probability,
+            "weight_sensitivity_span": self.weight_sensitivity_span,
+            "threshold_straddling_variables": list(self.threshold_straddling_variables),
+            "numeric_perturbation_findings": list(self.numeric_perturbation_findings),
+            "tests_completed": list(self.tests_completed),
+            "tests_missing": list(self.tests_missing),
+            "method": (
+                "deterministic replay of the recorded event ledger with selected events "
+                "removed, then terminal re-evaluation by the engine's own evaluator; no "
+                "re-simulation, no model call"
+            ),
+            "error": self.error,
+            "branches": [b.as_dict() for b in self.branch_counterfactuals],
+        }
+
+
+# ---------------------------------------------------------------------------
+# The validity triple (D1 / FI-1)
+# ---------------------------------------------------------------------------
+
+
+class ValidityState(StrEnum):
+    """Three-valued on purpose. ``NOT_ASSESSED`` is the honest default everywhere: a
+    check that did not run must never read as a check that passed."""
+
+    VALID = "valid"
+    INVALID = "invalid"
+    NOT_ASSESSED = "not_assessed"
+
+
+#: What a reproducible trace does and does not claim. Carried into every artifact so
+#: "RECONSTRUCTED" can never be read as "trustworthy": the forensic audit of three live
+#: runs returned RECONSTRUCTED on all three, and two of the three were arithmetic over
+#: equal, ungrounded weights that should never have been called forecasts.
+RECONSTRUCTED_MEANS = (
+    "trace_reproducible states only that the published arithmetic reproduces exactly "
+    "from the recorded trace. It is not a claim that the compiled world was right, "
+    "that the simulation was causally valid, or that the number is calibrated — read "
+    "causal_simulation_valid and point_estimate_calibrated for those, separately."
+)
+
+
+@dataclass(frozen=True)
+class ForecastValidity:
+    """D1: three separate questions, three separate answers, never collapsed into one.
+
+    A forecast is trustworthy as a forecast only when all three read ``VALID``; any
+    other combination is reported as-is, with each leg's basis, and no summary verdict
+    is offered that could be quoted in place of the three.
+    """
+
+    trace_reproducible: ValidityState
+    causal_simulation_valid: ValidityState
+    point_estimate_calibrated: ValidityState
+    trace_reproducible_basis: str = ""
+    causal_simulation_valid_basis: str = ""
+    point_estimate_calibrated_basis: str = ""
+
+    @property
+    def all_three_valid(self) -> bool:
+        return (
+            self.trace_reproducible is ValidityState.VALID
+            and self.causal_simulation_valid is ValidityState.VALID
+            and self.point_estimate_calibrated is ValidityState.VALID
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "trace_reproducible": self.trace_reproducible.value,
+            "trace_reproducible_basis": self.trace_reproducible_basis,
+            "causal_simulation_valid": self.causal_simulation_valid.value,
+            "causal_simulation_valid_basis": self.causal_simulation_valid_basis,
+            "point_estimate_calibrated": self.point_estimate_calibrated.value,
+            "point_estimate_calibrated_basis": self.point_estimate_calibrated_basis,
+            "all_three_valid": self.all_three_valid,
+            "reconstructed_means": RECONSTRUCTED_MEANS,
+        }
 
 
 @dataclass(frozen=True)
@@ -382,7 +604,13 @@ class ForecastIntegrity:
     branch's pre-simulation terminal answer (conditional on pre-resolved mass);
     branches whose initial world did not resolve contribute to ``pre_unresolved_mass``
     instead. ``point_estimate_is_calibrated`` is False when the point estimate depends
-    materially on ungrounded weights (or when there is no point estimate at all).
+    materially on ungrounded weights, when it conditions on a minority of branch mass,
+    or when there is no point estimate at all.
+
+    ``probability_after_simulation`` is the scenario average. Under D2 it is a
+    **diagnostic**: when ``point_estimate_suppressed`` is True the published answer
+    carries no number at all and this record is the only place the average survives.
+    It must never be rendered as the answer.
     """
 
     probability_before_simulation: float | None
@@ -394,6 +622,11 @@ class ForecastIntegrity:
     ungrounded_variables: tuple[str, ...]
     point_estimate_is_calibrated: bool
     counterfactual_note: str
+    # D2/FI-2 and D3/FI-5. Defaults keep hand-built records (tests, replays) valid.
+    point_estimate_suppressed: bool = False
+    suppression_reasons: tuple[str, ...] = ()
+    resolved_mass_share: float = 1.0
+    threshold_straddling_variables: tuple[str, ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -406,11 +639,29 @@ class ForecastIntegrity:
             "ungrounded_variables": list(self.ungrounded_variables),
             "point_estimate_is_calibrated": self.point_estimate_is_calibrated,
             "counterfactual_note": self.counterfactual_note,
+            "point_estimate_suppressed": self.point_estimate_suppressed,
+            "suppression_reasons": list(self.suppression_reasons),
+            "resolved_mass_share": self.resolved_mass_share,
+            "threshold_straddling_variables": list(self.threshold_straddling_variables),
+            "scenario_average_is_diagnostic_only": True,
         }
 
 
 @dataclass(frozen=True)
 class ForecastResult:
+    """The published result.
+
+    ``simulation_probability`` is **the published point estimate**. It is ``None``
+    whenever the run has no honest point estimate to publish — nothing resolved, D2
+    suppression, or the D6 responsibility gate. Every reader that renders an answer
+    reads this field, which is exactly why suppression empties it rather than merely
+    labelling it: two live runs published their scenario average as the headline while
+    the labels beside it already said the number constrained nothing.
+
+    ``scenario_average`` is the weighted-YES-over-resolved figure, always computed and
+    **always diagnostic**. It is not an answer and must never be rendered as one.
+    """
+
     question: str
     contract: ResolutionContract
     integrity_manifest: RealityManifest
@@ -431,6 +682,15 @@ class ForecastResult:
     diagnostics: tuple[tuple[str, str], ...] = ()
     probability_source: str = PROBABILITY_SOURCE
     integrity: ForecastIntegrity | None = None
+    # D2/FI-2: the scenario average, kept for diagnostics, never published as the answer.
+    scenario_average: float | None = None
+    point_estimate_suppressed: bool = False
+    point_estimate_suppression_reason: str = ""
+    # D6/FI-3: the gate refused to publish an answer at all (not merely a number).
+    answer_withheld: bool = False
+    # D1/FI-1 and D6/FI-3.
+    validity: ForecastValidity | None = None
+    responsibility: ResponsibilityReport | None = None
 
     def diagnostics_dict(self) -> dict[str, str]:
         return dict(self.diagnostics)

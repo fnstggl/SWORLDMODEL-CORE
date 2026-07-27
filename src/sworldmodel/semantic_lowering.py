@@ -27,6 +27,7 @@ from .semantic_plan import (
     SemanticChange,
     SemanticPlan,
     SemanticProcess,
+    SemanticState,
     SemanticValue,
     TerminalQuery,
     terminal_relevant_states,
@@ -138,12 +139,41 @@ class SymbolTable:
 
 def build_symbols(plan: SemanticPlan) -> SymbolTable:
     t = SymbolTable()
+    entity_names = {e.name for e in plan.entities}
     for e in plan.entities:
         t.mint(
             "entity", e.name, rule="entity → entities[].entity_id", evidence=e.evidence_claim_ids
         )
     for s in plan.states:
         t.mint("field", s.name, rule="state → fields[].field_id", evidence=s.evidence_claim_ids)
+        if s.kind != "stock":
+            continue
+        # A stock is a quantity held somewhere, so it gets a resource and at least one
+        # holder as well as its readable field. The resource is what the executor
+        # conserves: every move of the stock is a transfer or a consume against these
+        # holders, and one that would overdraw is refused rather than recorded.
+        t.mint(
+            "resource",
+            s.name,
+            rule="stock state → resources[].resource_id (moved by transfer/consume, "
+            "which the executor refuses to overdraw)",
+            evidence=s.evidence_claim_ids,
+        )
+        if s.owner not in entity_names:
+            t.mint(
+                "holder",
+                s.owner or "world",
+                rule="stock owner → resources[].holder_entity_id",
+                evidence=(),
+            )
+        if s.capacity is not None:
+            t.mint(
+                "holder",
+                f"beyond {s.name}",
+                rule="stock capacity → the counterpart holder of the same resource, so "
+                "the ceiling and the floor are both the executor's own conservation",
+                evidence=(),
+            )
     for ev in plan.events:
         t.mint(
             "event",
@@ -237,7 +267,41 @@ def _negate(value: Any) -> Any:
     return {"op": "multiply", "args": [-1, value]}
 
 
-def _lower_change(c: SemanticChange, t: SymbolTable, plan: SemanticPlan) -> list[dict[str, Any]]:
+@dataclass(frozen=True)
+class _Stock:
+    """A declared stock, with the runtime symbols its conservation runs on."""
+
+    state: SemanticState
+    resource_id: str
+    holder: str
+    beyond: str  # the counterpart holder; "" when the stock declares no capacity
+
+
+def _stock_table(plan: SemanticPlan, t: SymbolTable) -> dict[str, _Stock]:
+    """Every stock in the plan, keyed by its semantic name."""
+
+    entity_names = {e.name for e in plan.entities}
+    out: dict[str, _Stock] = {}
+    for s in plan.states:
+        if s.kind != "stock":
+            continue
+        holder = (
+            t.resolve("entity", s.owner)
+            if s.owner in entity_names
+            else t.resolve("holder", s.owner or "world")
+        )
+        out[s.name] = _Stock(
+            state=s,
+            resource_id=t.resolve("resource", s.name),
+            holder=holder,
+            beyond=t.resolve("holder", f"beyond {s.name}") if s.capacity is not None else "",
+        )
+    return out
+
+
+def _lower_change(
+    c: SemanticChange, t: SymbolTable, plan: SemanticPlan, stocks: dict[str, _Stock]
+) -> list[dict[str, Any]]:
     """One universal semantic change → the existing effect operations."""
 
     if c.op == "set":
@@ -252,6 +316,9 @@ def _lower_change(c: SemanticChange, t: SymbolTable, plan: SemanticPlan) -> list
     if c.op in ("increase", "decrease"):
         assert c.amount is not None
         delta = _lower_value(c.amount, t)
+        stock = stocks.get(c.target)
+        if stock is not None:
+            return _lower_stock_move(c.op, delta, stock, t)
         return [
             {
                 "op": "adjust_field",
@@ -328,6 +395,97 @@ def _lower_change(c: SemanticChange, t: SymbolTable, plan: SemanticPlan) -> list
         composable=False,
         smallest_missing=f"a universal runtime meaning for {c.op!r}",
     )
+
+
+def _lower_stock_move(op: str, delta: Any, stock: _Stock, t: SymbolTable) -> list[dict[str, Any]]:
+    """A change to a stock, as a MOVE of quantity plus the reading it leaves behind.
+
+    The move is the authoritative half: ``transfer_resource`` and ``consume_resource``
+    are the runtime's conserved operations, and :meth:`EffectExecutor.can_apply` refuses
+    the whole effect list — never a partial application — when a holder lacks what the
+    move would take. Where the stock declares a capacity, the counterpart holder makes
+    the ceiling the same conservation as the floor: filling past capacity is drawing
+    from a holder that has run out.
+
+    The ``adjust_field`` alongside it is the readable level, not a second truth. It
+    moves only in lockstep with the resource, because both live in one effect list and
+    the executor accepts or refuses that list as a unit — so the field can no more go
+    negative than the resource can.
+    """
+
+    res, holder, beyond = stock.resource_id, stock.holder, stock.beyond
+    move: dict[str, Any]
+    if op == "increase":
+        # Quantity entering a stock comes out of the room above it. The validator
+        # guarantees a capacity for any stock something adds to, so `beyond` exists.
+        move = {
+            "op": "transfer_resource",
+            "resource": res,
+            "from": beyond or t.resolve("holder", f"beyond {stock.state.name}"),
+            "to": holder,
+            "amount": delta,
+        }
+    elif beyond:
+        move = {
+            "op": "transfer_resource",
+            "resource": res,
+            "from": holder,
+            "to": beyond,
+            "amount": delta,
+        }
+    else:
+        move = {"op": "consume_resource", "resource": res, "holder": holder, "amount": delta}
+    return [
+        move,
+        {
+            "op": "adjust_field",
+            "field": t.resolve("field", stock.state.name),
+            "delta": delta if op == "increase" else _negate(delta),
+        },
+    ]
+
+
+def _conservation_guard(effects: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The declarative precondition that makes a non-agent firing obey conservation too.
+
+    An actor's action is dry-run by the executor before it starts, so an overdrawing
+    move never happens. A process occurrence is not: the engine applies its effects
+    directly, which is how a live world subtracted deliveries from an inventory it did
+    not have for a whole quarter. The runtime already has the right mechanism for this —
+    an occurrence's ``condition`` and a node's ``entry_condition``, checked before
+    anything is applied — so the same refusal is compiled from the same effects: the
+    firing happens only if every holder it draws on holds what it takes.
+
+    All-or-nothing, exactly like the executor's dry run: a firing that cannot be made in
+    full is not made in part. Withdrawals from one holder are summed, so two draws in
+    one firing cannot both pass against the same balance.
+    """
+
+    demands: dict[tuple[str, str], list[Any]] = {}
+    for eff in effects:
+        if eff.get("op") == "transfer_resource":
+            key = (str(eff.get("resource")), str(eff.get("from")))
+        elif eff.get("op") == "consume_resource":
+            key = (str(eff.get("resource")), str(eff.get("holder")))
+        else:
+            continue
+        demands.setdefault(key, []).append(eff.get("amount"))
+    tests: list[dict[str, Any]] = []
+    for (res, holder), amounts in sorted(demands.items()):
+        total = amounts[0]
+        for extra in amounts[1:]:
+            total = {"op": "add", "args": [total, extra]}
+        tests.append(
+            {
+                "op": "greater_or_equal",
+                "args": [{"op": "resource", "args": [res, holder]}, total],
+            }
+        )
+    if not tests:
+        return None
+    if len(tests) == 1:
+        return tests[0]
+    return {"op": "and", "args": tests}
 
 
 _KIND_BY_TYPE = {
@@ -655,6 +813,7 @@ def lower_plan(
 
     t = build_symbols(plan)
     node_processes = _node_process_names(plan)
+    stocks = _stock_table(plan, t)
 
     entities: list[dict[str, Any]] = []
     for e in plan.entities:
@@ -704,15 +863,49 @@ def lower_plan(
             "description": desc,
             "evidence_claim_ids": list(s.evidence_claim_ids),
         }
+        if s.kind == "stock":
+            desc = f"{desc} [stock held by {s.owner}" + (
+                f", capacity {s.capacity:g}]" if s.capacity is not None else "]"
+            )
+        elif s.kind == "flow":
+            desc = f"{desc} [rate per {s.period}]"
         if s.initial != UNKNOWN:
             f["initial"] = s.initial
+        f["description"] = desc
         fields.append(f)
+
+    # A stock's conserved half: the resource and the holders the executor checks. The
+    # counterpart holder starts with the room left in the stock, so filling past
+    # capacity and draining below zero are the same refusal from the same machinery.
+    resources: list[dict[str, Any]] = []
+    for name in sorted(stocks):
+        stock = stocks[name]
+        s = stock.state
+        held = float(s.initial) if isinstance(s.initial, (int, float)) else 0.0
+        resources.append(
+            {
+                "resource_id": stock.resource_id,
+                "holder_entity_id": stock.holder,
+                "quantity": held,
+                "description": f"{s.name} held by {s.owner}" + (f" [{s.unit}]" if s.unit else ""),
+            }
+        )
+        if stock.beyond and s.capacity is not None:
+            resources.append(
+                {
+                    "resource_id": stock.resource_id,
+                    "holder_entity_id": stock.beyond,
+                    "quantity": max(0.0, float(s.capacity) - held),
+                    "description": f"room left in {s.name} below its capacity "
+                    f"of {s.capacity:g}" + (f" {s.unit}" if s.unit else ""),
+                }
+            )
 
     actions = []
     for a in plan.affordances:
         effects: list[dict[str, Any]] = []
         for c in a.changes:
-            effects.extend(_lower_change(c, t, plan))
+            effects.extend(_lower_change(c, t, plan, stocks))
         meaning = a.meaning
         if a.preconditions:
             # Free-text preconditions are not mechanically enforceable in this slice;
@@ -780,11 +973,12 @@ def lower_plan(
                         "separately and chained with after_process",
                     )
                 for c in o.changes:
-                    effects.extend(_lower_change(c, t, plan))
+                    effects.extend(_lower_change(c, t, plan, stocks))
             emit_node(
                 {
                     "node_id": node_id,
                     "stage": node_id,
+                    "entry_condition": _conservation_guard(effects),
                     "description": _produced(p.meaning, p),
                     "at": _aware_iso(p.at),
                     "after_node": "",
@@ -803,7 +997,7 @@ def lower_plan(
             for j, o in enumerate(p.occurrences):
                 effects = []
                 for c in o.changes:
-                    effects.extend(_lower_change(c, t, plan))
+                    effects.extend(_lower_change(c, t, plan, stocks))
                 node_id = (
                     t.resolve("node", p.name)
                     if j == 0
@@ -813,6 +1007,7 @@ def lower_plan(
                     {
                         "node_id": node_id,
                         "stage": t.resolve("node", p.name),
+                        "entry_condition": _conservation_guard(effects),
                         "description": _produced(o.description or p.meaning, p),
                         "at": _aware_iso(o.at),
                         "after_node": "",
@@ -847,14 +1042,16 @@ def lower_plan(
             for o in p.occurrences:
                 effects = []
                 for c in o.changes:
-                    effects.extend(_lower_change(c, t, plan))
-                occurrences.append(
-                    {
-                        "at": _aware_iso(o.at),
-                        "description": o.description or p.meaning,
-                        "effects": effects,
-                    }
-                )
+                    effects.extend(_lower_change(c, t, plan, stocks))
+                occurrence: dict[str, Any] = {
+                    "at": _aware_iso(o.at),
+                    "description": o.description or p.meaning,
+                    "effects": effects,
+                }
+                guard = _conservation_guard(effects)
+                if guard is not None:
+                    occurrence["condition"] = guard
+                occurrences.append(occurrence)
             externals.append(
                 {
                     "process_id": t.resolve("external", p.name),
@@ -911,6 +1108,27 @@ def lower_plan(
                 ) + [node_id]
                 node_index[node_id]["after_node"] = predecessor
             prev_in_process = node_id
+
+    # A declared cadence is a claim about the world, and the calendar it produced is
+    # arithmetic on that claim. Both are recorded, so a reader of the executable can see
+    # that thirteen firings came from "every P1W from … to …" rather than from a list
+    # somebody typed — and can check the count without re-deriving it.
+    for p in plan.processes:
+        if p.recurrence is None or not p.occurrences_generated:
+            continue
+        rec = p.recurrence
+        t.records.append(
+            {
+                "semantic": f"{p.name} every {rec.period} from {rec.start} to {rec.end}",
+                "namespace": "recurrence",
+                "runtime_id": t.by_key.get(("node", p.name), "")
+                or t.by_key.get(("external", p.name), ""),
+                "lowering_rule": f"process recurrence → {len(p.occurrences)} enumerated "
+                "occurrence(s), generated deterministically by code; the planner declared "
+                "the cadence and wrote no dates",
+                "evidence_claim_ids": list(p.evidence_claim_ids),
+            }
+        )
 
     uncertainties = []
     for u in plan.uncertainties:
@@ -970,7 +1188,7 @@ def lower_plan(
         "entities": entities,
         "actors": actors,
         "fields": fields,
-        "resources": [],
+        "resources": resources,
         "channels": [],
         "documents": [],
         "actions": actions,
@@ -1022,6 +1240,7 @@ def lower_plan(
                 }
             )
 
+    record = representation_record(plan, t)
     compilation = {
         "subject_entity": plan.subject_entity,
         "resolution_units": plan.resolution_units,
@@ -1030,7 +1249,16 @@ def lower_plan(
         # A first-class section of the compilation, not a note: it is written with the
         # executable, so every run's own artifacts carry the argument for who is in its
         # world and who is not.
-        "representation_record": representation_record(plan, t),
+        "representation_record": record,
+        # FD-26. The standing claims a reviewer is required to audit are lifted to the
+        # top of the compilation as well as living inside the record, because the
+        # artifact a reviewer opens is `compiled_world.json` and a claim they have to
+        # go looking for is a claim that does not get audited. A live actor-free run
+        # supplied a zero-actor justification with four cited claims and the executable
+        # a reviewer read reported it as null. Any claim a reviewer must audit reaches
+        # the artifact the reviewer reads, at the level they read it.
+        "zero_actor_justification": record["zero_actor_justification"],
+        "single_multiplier_exemption": record["single_multiplier_exemption"],
         "world_spec": world_spec,
         "uncertainties": uncertainties,
         "world_facts": [

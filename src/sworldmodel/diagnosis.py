@@ -54,6 +54,13 @@ ROOT_CAUSES = (
     "terminal_never_determined",
     "unexecutable_compilation",
     "repair_did_not_converge",
+    # The compiled world was judged materially wrong as a description of reality — by
+    # its own mechanical checks, by the adversarial reviewer, or both — and bounded
+    # repair did not discharge the finding. Distinct from `compiler_omission` on
+    # purpose: nothing was left out by accident. A world was built, examined, found
+    # unfit, sent back, and still found unfit. The fix is a different world, not a
+    # missing piece added to this one.
+    "world_refused_by_its_own_review",
     "repeated_wake_up_loop",
     "no_progress_detection_failure",
     "provider_failure",
@@ -559,6 +566,22 @@ class RunDiagnosis:
         if gate == "coverage_incomplete":
             out.append(
                 {"cause": "compiler_omission", "why": "the run stopped at the coverage gate"}
+            )
+        if gate == "world_review_blocking_findings_survived":
+            details = self.integrity_and_grounding().get("gate_details") or {}
+            surviving = details.get("surviving_blocking_findings") or []
+            mechanical = details.get("surviving_mechanical_blocking_findings") or []
+            half = (
+                f"computed from the world itself ({mechanical})"
+                if mechanical
+                else "the adversarial reviewer's"
+            )
+            out.append(
+                {
+                    "cause": "world_refused_by_its_own_review",
+                    "why": f"blocking findings — {half} — survived bounded repair against "
+                    f"the world that would have been simulated: {surviving}",
+                }
             )
         if gate == "participants_omitted":
             out.append(

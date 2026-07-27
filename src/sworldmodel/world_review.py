@@ -299,6 +299,15 @@ MECHANICAL_KEYS = (
     "multiplier_lacks_evidence",
     "no_intermediate_production_state",
     "world_skips_the_causal_period",
+    # FD-41. A world claiming the record already answered the question used to short
+    # circuit this whole function to a single PASS, so the entire settled-record class
+    # of run received no mechanical scrutiny at all — its only remaining attack was one
+    # LLM opinion with no mechanical backstop. These three examine the citation the
+    # claim rests on. They do not adjudicate resolution SCOPE (CWF-7, separate work);
+    # they make sure the preresolved path cannot publish on an unexamined citation.
+    "cited_resolution_claims_exist",
+    "cited_resolution_rests_on_the_record",
+    "cited_resolution_subject_matches",
 )
 
 

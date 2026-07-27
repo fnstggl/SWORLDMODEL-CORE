@@ -279,6 +279,11 @@ def cmd_forecast(args: argparse.Namespace) -> int:
             horizon=horizon,
             bundle=refusal.bundle,
             repair_log=refusal.repair_log,
+            # A refusal earned by the pre-rollout review has to carry that review, or
+            # the one artifact that says WHY the run stopped is the one it does not
+            # write. The successful path has always attached it; the refusal path never
+            # did, so a review-blocked run reported a gate code with nothing behind it.
+            world_review=getattr(refusal, "world_review", None),
             failure=refusal.__cause__ or refusal,
             failure_stage=refusal.stage,
             wall_seconds=wall,
@@ -367,6 +372,12 @@ def _write_diagnosis(out: Path | None, diagnosis: RunDiagnosis, refusal: Forecas
         return
     out.mkdir(parents=True, exist_ok=True)
     (out / "diagnosis.json").write_text(canonical_json(diagnosis.as_dict()) + "\n")
+    review = getattr(refusal, "world_review", None)
+    as_dict = getattr(review, "as_dict", None)
+    if callable(as_dict):
+        # The same artifact a completed run writes, under the same name, so a reader
+        # comparing a refused run with a published one reads one file, not two shapes.
+        (out / "world_review.json").write_text(canonical_json(as_dict()) + "\n")
     if refusal.bundle is not None:
         (out / "research_trace.json").write_text(
             canonical_json(refusal.bundle.live_trace or {}) + "\n"

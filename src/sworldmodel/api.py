@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import hashlib
 import time
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any, Protocol
 
@@ -51,7 +51,7 @@ from .tracing import TraceContext
 from .trajectory_audit import audit_trajectory
 from .uncertainty import UNGROUNDED_PROVENANCES
 from .world_compiler import compile_world, compile_world_spec_live, render_evidence
-from .world_review import review_world
+from .world_review import MECHANICAL_KEYS, AuditFinding, WorldReview, review_world
 
 
 def _build_contract(
@@ -852,6 +852,465 @@ def _checkpoint_partial(config: ForecastConfig, exc: BaseException) -> bool:
     return True
 
 
+# ---------------------------------------------------------------------------
+# The pre-rollout world review, as a gate (FD-27, CWF-6)
+#
+# What FD-27 was: the review ran ONCE, against the world as it stood before repair; a
+# blocking review recompiled the world; and the recompiled world — the one that was
+# actually simulated and published — was never reviewed at all. The artifact recorded
+# seven blocking failures beside the disposition "recompiled; the world simulated is not
+# the world reviewed here", which says in words that the record describes a world nobody
+# ran, and the run published a 0.0 forecast on top of it. `should_repair` was read once,
+# to decide whether to attempt a repair; nothing downstream ever consulted the findings
+# again, so no blocking finding could stop anything.
+#
+# What replaces it: review -> repair -> REVIEW THE WORLD THAT RESULTED, bounded, with
+# every round kept; and the run refuses to publish a normal forecast while a blocking
+# finding still stands against the world it would simulate.
+# ---------------------------------------------------------------------------
+
+
+# How many times a blocking review may send the world back to be recompiled. Each round
+# costs one review call plus a full recompile, so the ceiling is deliberately small; the
+# stopping rule that does the real work is progress — a repair that discharges none of
+# the blocking findings is not going to discharge them on the next attempt either.
+_REVIEW_REPAIR_ROUNDS = 2
+
+
+def _world_signature(compiled: CompiledWorld) -> str:
+    """A short, stable fingerprint of the executable world.
+
+    Recorded beside each round's review so a reader can check by eye — and a test can
+    check mechanically — that the review in the artifact is a review OF the world that
+    ran, rather than of one thrown away three recompiles ago.
+    """
+
+    return hashlib.sha256(repr(compiled.spec).encode()).hexdigest()[:16]
+
+
+@dataclass(frozen=True)
+class ReviewRound:
+    """One pre-rollout review: which world it judged, and what the run did about it.
+
+    The disposition on ``review`` is this round's own account of what followed. A round
+    that was repaired says so and points at the round that judged the result; it never
+    claims the repair discharged anything, because only the next round's findings can
+    say that.
+    """
+
+    index: int
+    world_signature: str
+    review: WorldReview
+
+    def as_dict(self) -> dict[str, Any]:
+        out = dict(self.review.as_dict())
+        out["round"] = self.index
+        out["world_signature"] = self.world_signature
+        return out
+
+
+@dataclass(frozen=True)
+class WorldReviewRecord:
+    """Every pre-rollout review this run made, ending with the world it carried forward.
+
+    The last round is the world that was simulated (or, when the gate refuses, the world
+    that would have been). That is the whole point: the review persisted in the artifact
+    describes the simulated world, and the rounds before it show what was raised, what
+    was sent back for repair, and what survived.
+
+    Findings come from two different places and are priced differently (FD-34). The
+    MECHANICAL half is computed from the compiled world with no provider involved, so it
+    blocks unconditionally: a gateway outage is not evidence about a world and must never
+    launder a fact about one. The MODEL half is an opinion, and an opinion that could not
+    be obtained decides nothing.
+
+    It is also the seam the publication machinery consumes. :attr:`world_review_blocking`
+    is exactly the three-valued input the D1/D6 gate asks for — ``None`` when no model
+    opinion could be obtained (never "valid", even when the mechanical half is clean),
+    ``()`` when a full review ran against the simulated world and nothing blocking
+    survived, and the surviving keys otherwise.
+    """
+
+    rounds: tuple[ReviewRound, ...]
+
+    @property
+    def final(self) -> ReviewRound:
+        return self.rounds[-1]
+
+    @property
+    def review(self) -> WorldReview:
+        """The review of the world that was carried forward to simulation."""
+
+        return self.final.review
+
+    @property
+    def simulated_world_signature(self) -> str:
+        return self.final.world_signature
+
+    @property
+    def surviving_blocking(self) -> tuple[AuditFinding, ...]:
+        """Blocking findings still standing against the world that will be simulated."""
+
+        return tuple(f for f in self.review.findings if f.is_blocking)
+
+    @property
+    def surviving_blocking_keys(self) -> tuple[str, ...]:
+        return tuple(sorted(f.key for f in self.surviving_blocking))
+
+    @property
+    def surviving_mechanical_blocking(self) -> tuple[AuditFinding, ...]:
+        """The surviving findings the compiled world decided about itself.
+
+        These need no provider and admit no opinion: whether the terminal is written in
+        one step, whether one uncited uncertain factor decides the answer, whether any
+        state exists between the initial world and its answer, whether the world spans
+        the period in which the outcome is made, and whether a world that claims the
+        record already answered the question cites a record that actually does.
+        """
+
+        return tuple(f for f in self.surviving_blocking if f.key in MECHANICAL_KEYS)
+
+    @property
+    def surviving_model_blocking(self) -> tuple[AuditFinding, ...]:
+        """The surviving findings that are an adversarial reader's opinion."""
+
+        return tuple(f for f in self.surviving_blocking if f.key not in MECHANICAL_KEYS)
+
+    @property
+    def model_opinion_obtained(self) -> bool:
+        """Whether an adversarial opinion was actually obtained about the final world.
+
+        Named for what it is. The mechanical half runs whether or not the provider does,
+        so "the review ran" was never one question.
+        """
+
+        return not self.review.error
+
+    @property
+    def world_review_blocking(self) -> tuple[str, ...] | None:
+        """The publication gate's input: surviving keys, or None when no opinion ran.
+
+        Four states, three values, and the mapping is deliberate:
+
+        * a full review ran and passed                      -> ``()``
+        * a full review ran and something survived          -> those keys
+        * no opinion obtained, mechanical half clean        -> ``None``
+        * no opinion obtained, mechanical half blocking     -> refused upstream; the gate
+          never sees it
+
+        ``None`` is therefore never "nothing blocking" and never "clean": it is "the
+        adversarial half of this review did not happen", and the D1 leg must read
+        not-assessed rather than valid. A mechanically-clean world with no opinion behind
+        it must not be indistinguishable from one that survived an attack.
+        """
+
+        return self.surviving_blocking_keys if self.model_opinion_obtained else None
+
+    @property
+    def causal_simulation_valid(self) -> bool:
+        """D1's second leg as far as this review can decide it.
+
+        False whenever no opinion was obtained, however clean the mechanical half: a
+        world nobody attacked is not a validated world.
+        """
+
+        return self.model_opinion_obtained and not self.surviving_blocking
+
+    @property
+    def blocks_publication(self) -> bool:
+        """Whether a normal forecast may not be published from this world.
+
+        FD-34, on the CTO's ruling. A mechanical finding is a fact computed from the
+        compiled world with no provider involved, so it blocks whether or not the model
+        call succeeded — otherwise a gateway outage converts a computed CRITICAL into an
+        advisory note and the run publishes, which is the bypass this gate exists to
+        close. ``world_review.py``'s own comment already said the mechanical findings
+        survive a failed model call; they now survive into the GATE and not merely into
+        the record.
+
+        An opinion that could not be obtained still decides nothing.
+        """
+
+        return bool(self.surviving_mechanical_blocking) or (
+            self.model_opinion_obtained and bool(self.surviving_blocking)
+        )
+
+    # -- passthroughs, so every existing consumer of a WorldReview keeps working ------
+
+    @property
+    def answers(self) -> tuple[tuple[str, bool, str], ...]:
+        return self.review.answers
+
+    @property
+    def failed_blocking(self) -> tuple[str, ...]:
+        return self.review.failed_blocking
+
+    @property
+    def findings(self) -> tuple[AuditFinding, ...]:
+        return self.review.findings
+
+    @property
+    def concerns(self) -> tuple[str, ...]:
+        return self.review.concerns
+
+    @property
+    def error(self) -> str:
+        return self.review.error
+
+    @property
+    def disposition(self) -> str:
+        return self.review.disposition
+
+    @property
+    def should_repair(self) -> bool:
+        return self.review.should_repair
+
+    def refused(self) -> WorldReviewRecord:
+        """The same record, with the final disposition stating that publication stopped.
+
+        Appended, never substituted: why repair stopped and what the gate then did are
+        two different facts, and a record that keeps only the second cannot be audited.
+        """
+
+        final = self.final
+        keys = ", ".join(self.surviving_blocking_keys)
+        return WorldReviewRecord(
+            self.rounds[:-1]
+            + (
+                replace(
+                    final,
+                    review=replace(
+                        final.review,
+                        disposition=(
+                            f"{final.review.disposition} PUBLICATION REFUSED: this is the "
+                            "world the run would have simulated, and "
+                            f"{len(self.surviving_blocking)} blocking finding(s) survived "
+                            f"repair against it: {keys}."
+                        ),
+                    ),
+                ),
+            )
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        out = dict(self.review.as_dict())
+        out["simulated_world_signature"] = self.simulated_world_signature
+        out["describes_simulated_world"] = True
+        out["rounds"] = [r.as_dict() for r in self.rounds]
+        out["surviving_blocking_findings"] = [f.as_dict() for f in self.surviving_blocking]
+        # Split, because the two halves are priced differently and a reader must be able
+        # to see which half a refusal (or a published caveat) rests on.
+        out["surviving_mechanical_blocking_findings"] = [
+            f.as_dict() for f in self.surviving_mechanical_blocking
+        ]
+        out["model_opinion_obtained"] = self.model_opinion_obtained
+        out["causal_simulation_valid"] = self.causal_simulation_valid
+        return out
+
+
+def _review_round(
+    index: int, compiled: CompiledWorld, review: WorldReview, why: str
+) -> ReviewRound:
+    return ReviewRound(
+        index=index,
+        world_signature=_world_signature(compiled),
+        review=replace(review, disposition=why),
+    )
+
+
+def _review_and_repair(
+    question: str,
+    as_of: datetime,
+    horizon: datetime,
+    bundle: ResearchBundle,
+    compiled: CompiledWorld,
+    config: ForecastConfig,
+    log: RepairLog,
+) -> tuple[ResearchBundle, CompiledWorld, WorldReviewRecord]:
+    """Review the world, repair what the review blocks on, and review what came back.
+
+    One call per round, before the rollout budget is spent. The gates are mechanical and
+    have already passed this world; this catches what they cannot check — a resolution
+    condition that answers a nearby question, a process nobody modeled, an actor present
+    only as decoration.
+
+    The loop ends on the first of: nothing blocking left, a review that could not run,
+    a repair that discharged none of the findings, a recompile that could not be produced
+    or that the gates refused, or the round ceiling. Whatever it ends on, the LAST round
+    judged the world the caller carries forward, and every earlier round is kept.
+    """
+
+    rounds: list[ReviewRound] = []
+    previous: frozenset[str] | None = None
+    for attempt in range(_REVIEW_REPAIR_ROUNDS + 1):
+        view = bundle.evidence_store.view(as_of)
+        review = review_world(
+            compiled,
+            view,
+            config.gateway,
+            question=question,
+            evidence_render=render_evidence(view),
+        )
+        blocking = frozenset(f.key for f in review.findings if f.is_blocking)
+        standing = f"{len(blocking)} blocking finding(s) stand: {sorted(blocking)}"
+
+        # A review whose model call failed still repairs on whatever its mechanical half
+        # decided, and — since FD-34 — those mechanical findings still BLOCK: they are
+        # facts computed from the compiled world, and a provider outage is not evidence
+        # about a world. What the outage costs is the opinion, and only the opinion. The
+        # note rides every disposition of such a round, because "nothing blocking was
+        # found" and "nobody was able to attack it" must never read the same.
+        mechanical = sorted(k for k in blocking if k in MECHANICAL_KEYS)
+        degraded = ""
+        if review.error:
+            degraded = (
+                f" The adversarial half could not run ({review.error}), so no opinion "
+                "about this world was obtained and none is on this record"
+                + (
+                    f"; its mechanical half still decides, and {mechanical} stand."
+                    if mechanical
+                    else "; its mechanical half raised nothing blocking."
+                )
+            )
+
+        stop: str | None = None
+        repaired: ResearchBundle | None = None
+        if not blocking:
+            stop = (
+                "its mechanical half raised no blocking finding against it"
+                if review.error
+                else "the review raised no blocking finding against it"
+            )
+        elif previous is not None and not blocking < previous:
+            stop = f"the previous round's recompile discharged none of what was raised — {standing}"
+        elif attempt == _REVIEW_REPAIR_ROUNDS:
+            stop = f"the {_REVIEW_REPAIR_ROUNDS} repair round(s) are exhausted — {standing}"
+        else:
+            try:
+                repaired = _recompile(
+                    question, as_of, horizon, bundle, config, review.repair_instruction()
+                )
+            except SWorldModelError as exc:
+                # A reasoned, final refusal from the recompile itself (the semantic
+                # review abstained; the evidence supports no faithful world). It is an
+                # answer to this review, and it is recorded as one rather than escaping
+                # as a bare traceback from a call nobody was guarding.
+                stop = (
+                    f"the recompile it asked for was refused ({exc}); the world reviewed "
+                    f"here is the world the run carried forward — {standing}"
+                )
+            if repaired is None and stop is None:
+                stop = (
+                    "the recompile it asked for could not be produced; the world reviewed "
+                    f"here is the world the run carried forward — {standing}"
+                )
+
+        if stop is None and repaired is not None:
+            try:
+                new_bundle, new_compiled = _compile_with_repair(
+                    question, as_of, horizon, repaired, config, log=log
+                )
+            except SWorldModelError as exc:
+                # The review is advisory about WHICH world to build; the mechanical gates
+                # decide whether a world may be built at all. A recompilation they refuse
+                # is worse than the world we already had, which they passed — so that
+                # world is what the run carries forward, with these findings still on it.
+                stop = (
+                    f"the recompile it asked for was refused by the gates ({exc}); the "
+                    f"world reviewed here is the world the run carried forward — {standing}"
+                )
+            else:
+                rounds.append(
+                    _review_round(
+                        attempt,
+                        compiled,
+                        review,
+                        "sent back to be recompiled against exactly these findings; round "
+                        f"{attempt + 1} reviews the world that came back. Nothing here is "
+                        "discharged by the recompile itself — only that round's findings "
+                        f"say what survived.{degraded}",
+                    )
+                )
+                bundle, compiled = new_bundle, new_compiled
+                previous = blocking
+                continue
+
+        rounds.append(
+            _review_round(
+                attempt, compiled, review, _final_disposition(stop or standing) + degraded
+            )
+        )
+        break
+    return bundle, compiled, WorldReviewRecord(tuple(rounds))
+
+
+def _final_disposition(stop: str) -> str:
+    return f"the world reviewed here is the world the run carried forward; {stop}."
+
+
+def _review_refusal(record: WorldReviewRecord) -> WorldIntegrityError:
+    """The refusal a surviving blocking review earns, naming exactly what survived."""
+
+    lines = [
+        "the pre-rollout world review's blocking findings survived repair, and they are "
+        "against the world this run would have simulated — a world its own review calls "
+        "materially wrong is not simulated and published as though it were right:"
+    ]
+    lines += [
+        f"- {f.key} [{f.severity}] ({'computed' if f.key in MECHANICAL_KEYS else 'opinion'}): "
+        f"{f.finding} (evidence basis: {f.evidence_basis})"
+        for f in record.surviving_blocking
+    ]
+    rounds = len(record.rounds)
+    if not record.model_opinion_obtained:
+        lines.append(
+            "No adversarial opinion was obtained for this world; every finding above was "
+            "computed from the compiled world itself, and a provider outage does not "
+            "make a computed fact advisory."
+        )
+    lines.append(
+        f"{rounds} review round(s) ran; the last one judged the world signed "
+        f"{record.simulated_world_signature}. {record.disposition}"
+    )
+    return WorldIntegrityError(
+        "\n".join(lines),
+        details={
+            "failure": "world_review_blocking_findings_survived",
+            # Recompilable exactly when repair never actually got its attempt against
+            # these findings — then a live rerun can still fix them. Once repair ran and
+            # they survived, re-rolling the same compiler over the same evidence is a
+            # reroll, not a repair.
+            "recompilable": rounds == 1,
+            "surviving_blocking_findings": list(record.surviving_blocking_keys),
+            "surviving_mechanical_blocking_findings": sorted(
+                f.key for f in record.surviving_mechanical_blocking
+            ),
+            "model_opinion_obtained": record.model_opinion_obtained,
+            "review_rounds": rounds,
+            "simulated_world_signature": record.simulated_world_signature,
+        },
+    )
+
+
+def _review_limitations(record: WorldReviewRecord) -> tuple[str, ...]:
+    """What a published forecast owes the reader when nobody attacked its world.
+
+    Reachable only when no adversarial opinion was obtained AND the mechanical half found
+    nothing blocking — any surviving mechanical finding refuses the run outright (FD-34),
+    and a completed review that blocks refuses it too. Saying nothing here would let a
+    provider outage read as a world that survived an attack.
+    """
+
+    if record.model_opinion_obtained:
+        return ()
+    return (
+        "no adversarial review of the world that was simulated could be obtained "
+        f"({record.error or 'no opinion was obtained'}); its mechanical checks passed, "
+        "but nothing attacked this world as a description of reality, so the causal "
+        "simulation is NOT validated — treat it as unassessed, not as reviewed.",
+    )
+
+
 def run_forecast(
     question: str, as_of: datetime, horizon: datetime, config: ForecastConfig
 ) -> tuple[ForecastResult, TraceContext]:
@@ -929,37 +1388,25 @@ def run_forecast(
         raise ForecastRefused(
             exc, stage="compilation", bundle=attempted[-1] if attempted else bundle, repair_log=log
         ) from exc
-    contract = _build_contract(question, as_of, horizon, bundle)
-
     # Before the rollout budget: is this obviously not the right world? The gates are
     # mechanical and have already passed it; this catches what they cannot check —
     # a resolution condition that answers a nearby question, a detail nobody sourced, a
-    # date that was plausible rather than published. One call, and a clear "no" goes to
-    # repair rather than into several minutes of simulating the wrong thing.
-    review = review_world(
-        compiled,
-        bundle.evidence_store.view(as_of),
-        config.gateway,
-        question=question,
-        evidence_render=render_evidence(bundle.evidence_store.view(as_of)),
+    # date that was plausible rather than published. A clear "no" goes to repair rather
+    # than into several minutes of simulating the wrong thing, and whatever comes back
+    # from repair is reviewed in its turn: the review that ends up in the artifact is a
+    # review of the world this run actually carries forward.
+    bundle, compiled, review = _review_and_repair(
+        question, as_of, horizon, bundle, compiled, config, log
     )
-    if review.should_repair:
-        outcome = "recompile produced nothing; the reviewed world was simulated"
-        repaired = _recompile(question, as_of, horizon, bundle, config, review.repair_instruction())
-        if repaired is not None:
-            try:
-                bundle, compiled = _compile_with_repair(
-                    question, as_of, horizon, repaired, config, log=log
-                )
-                contract = _build_contract(question, as_of, horizon, bundle)
-                outcome = "recompiled; the world simulated is not the world reviewed here"
-            except SWorldModelError as exc:
-                # The review is advisory. A recompilation that the mechanical gates then
-                # refuse is worse than the world we already had, which they passed.
-                outcome = (
-                    f"recompile refused by the gates ({exc}); the reviewed world was simulated"
-                )
-        review = replace(review, disposition=outcome)
+    if review.blocks_publication:
+        # FD-27. A blocking review that ends in publication is not a gate. The rollout
+        # budget is not spent, no forecast is assembled, and the refusal names the exact
+        # findings that survived repair against the exact world they are about.
+        blocked = _review_refusal(review)
+        refusal = ForecastRefused(blocked, stage="world review", bundle=bundle, repair_log=log)
+        refusal.world_review = review.refused()  # type: ignore[attr-defined]
+        raise refusal from blocked
+    contract = _build_contract(question, as_of, horizon, bundle)
 
     # Is this even the right world? Ordinary uncertainty asks what a value turns out to
     # be; this asks whether the causal structure we compiled is the one that decides the
@@ -1020,8 +1467,25 @@ def run_forecast(
         trace_location=trace_location,
         model_call_count=config.gateway.call_count,
         token_usage=config.gateway.total_tokens,
-        limitations=_limitations(config, run_result) + _structural_limitations(assessment),
+        limitations=_limitations(config, run_result)
+        + _structural_limitations(assessment)
+        + _review_limitations(review),
         diagnostics=(),
+        # D1's second leg. Three-valued by construction: None when no adversarial opinion
+        # could be obtained about the simulated world (never "valid" — nobody attacked
+        # it), () when a full review ran and nothing blocking survived, the surviving keys
+        # otherwise. `blocks_publication` above has already refused every world with a
+        # surviving blocker, so in practice this call sees () or None; the third case is
+        # kept live so that flipping the refusal policy to a published
+        # causal_simulation_valid=false needs no change on either side of the seam.
+        world_review_blocking=review.world_review_blocking,
+        # `responsibility=` is deliberately NOT wired yet: `classify_responsibility`
+        # correctly refuses any content-predicated terminal (count(c, where=...)) because
+        # replaycore.ReplayWorld.get_records() reconstructs collection cardinality only
+        # and hands back empty placeholder dicts, so the mandatory §14 replay tests cannot
+        # run. Wiring it today would withhold the answer on every actor world in the repo
+        # for a defect in the replay core rather than in the forecast. It goes in the
+        # moment `get_records` reconstructs record CONTENT.
     )
     ctx = TraceContext(
         contract=contract,

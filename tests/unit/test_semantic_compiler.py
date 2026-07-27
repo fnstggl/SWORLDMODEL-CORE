@@ -322,6 +322,9 @@ def observatory_plan() -> dict:
                 "unit": "hours",
                 "initial": 210,
                 "why_material": "the terminal reads it",
+                "not_a_stock_because": "the observing log is a record of hours already "
+                "elapsed under clear sky, not a quantity held anywhere: nothing can draw "
+                "hours back out of it and it has no ceiling to fill",
                 "evidence_claim_ids": ["c-o1"],
             },
             {
