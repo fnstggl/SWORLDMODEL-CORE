@@ -2807,9 +2807,20 @@ def validate_semantic_plan(
     deciders = {e.name for e in plan.entities if e.decides}
     for d in sorted(deciders):
         if not any(a.actor == d for a in plan.affordances):
+            # This message used to end "or mark it decides=false", and the same model
+            # writes both the affordance list and the flag. So the cheapest way to
+            # satisfy it was to strip the party of agency and leave it standing in the
+            # world — which is how `phase2/geopolitical2` reached nine entities, one
+            # decider, one affordance and a "verified" integrity verdict. The flag is not
+            # an exit from the world; leaving is.
             errors.append(
                 f"entity {d!r} decides but has no affordance — give it the actions its "
-                "role affords, or mark it decides=false"
+                "role really affords, traceable to what the record says this party does. "
+                "If the record shows it takes no act bearing on this outcome, it does not "
+                "belong in the world at all: remove it and record it under "
+                "excluded_candidates with why its removal cannot change the answer. "
+                "Clearing decides while leaving it in entities does not answer this — it "
+                "turns a participant into scenery, which the society gates refuse"
             )
 
     # Every actor with an affordance needs a moment that can actually invoke it. An

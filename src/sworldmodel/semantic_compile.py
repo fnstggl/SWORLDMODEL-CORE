@@ -408,18 +408,25 @@ deciding entity the genuine alternative affordances its role affords — includi
 ones that would resolve the question NO — and place its real dated occasions to act as
 actor_moment processes with at/deadline inside the window.
 
-A PARTY IN THE WORLD IS A PARTY THAT CAN ACT. Every person, organization, coalition,
-institution or population you put in "entities" must hold at least one affordance: the
-act its own role really affords, traceable to what the record says about that party
-under its own name. A party standing in the world unable to do anything is scenery — it
-gives the world the shape of a many-sided situation while the answer turns on one
-switch, and every gate downstream reads that world as multi-party when it is not. If the
-record shows a party takes no act that could bear on this outcome, it does not belong in
-"entities": put it in excluded_candidates with why its removal cannot change the answer,
-or state what it contributes as a world_fact. Never invent an act to fill a slot. An
-affordance the record does not attribute to that party is a fabricated actor, and a
-fabricated actor is worse than a missing one — if the evidence genuinely supports one
-decider, one decider is the right world and excluded_candidates is where you say so.
+A PARTY IN THE WORLD IS A PARTY THAT CAN ACT. Start from what the record attributes to
+each party under its own name, and give that party the act it describes: urging a
+reassessment, pressing for a level, reaffirming caution, retaining the flexibility to
+increase or pause or reverse, agreeing to an adjustment, acting on the output it alone
+controls. Those are affordances, and the record naming a party doing one is exactly the
+grounding an affordance needs (cite the claim). Every person, organization, coalition,
+institution or population you place in "entities" must end up holding at least one.
+
+There are two ways to fail this and they are not symmetric. Inventing an act the record
+does not attribute to a party is a FABRICATED ACTOR and is the worse failure: it puts a
+capability into the world that nothing supports, and the answer then turns on a power
+you granted. But emptying the world is not the safe alternative. Deleting the parties
+rather than equipping them leaves one actor deciding alone, which is the same defect
+with fewer names in it, and a world whose answer nobody can influence is not a
+simulation of anything. So: equip the parties the record shows acting; exclude only a
+party the record shows taking no act that bears on this outcome, saying so in
+excluded_candidates; and if the outcome genuinely IS one party's decision to take —
+which happens, and is a legitimate world — say that plainly with expected_participants
+matching, rather than compressing several real deciders into one aggregate.
 
 POSITIONS BEFORE OUTCOMES. Where several parties bear on one decision, the world needs
 the state that sits BETWEEN them: what each party has said, conceded, committed to or

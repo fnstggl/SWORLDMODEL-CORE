@@ -1108,13 +1108,23 @@ def test_a_private_event_reaches_its_own_participants() -> None:
     compilation, _ = lower_plan(parse_semantic_plan(data))
     spec = compilation["world_spec"]
     id_by_name = {e["name"]: e["entity_id"] for e in spec["entities"]}
-    both = {id_by_name["Harbormaster of Port Solent"], id_by_name["Night pilots guild"]}
+    speaker = id_by_name["Harbormaster of Port Solent"]
+    briefed = id_by_name["Night pilots guild"]
     creates = [eff for a in spec["actions"] for eff in a["effects"] if eff["op"] == "create_event"]
     assert creates
     for eff in creates:
-        assert set(eff["to"]) == both, "a private event's participants are its audience"
+        # H-4's property, unchanged: the party the briefing is FOR is in the audience,
+        # so the private event reaches somebody rather than nobody.
+        assert briefed in set(eff["to"]), "a private event reaches the participants it briefs"
+        # And the author is not, which this assertion used to require. An audience is who
+        # should learn of a thing and the speaker already knows: addressing the act back
+        # to its own author is delivered, noticed, and re-wakes them as directed
+        # information — 79 of one governor's 80 actor calls, in the live reproduction
+        # `runtime-convergence` diagnosed. `world.observers_of` already skips an actor for
+        # its own act unless it is in the audience; putting it there defeated that guard.
+        assert speaker not in set(eff["to"]), "an author is not an audience for its own act"
         # Proven against the runtime's own audience resolver, not a re-implementation.
-        assert set(_audience("create_event", eff)) == both
+        assert set(_audience("create_event", eff)) == {briefed}
 
 
 def test_a_participantless_private_event_is_refused() -> None:

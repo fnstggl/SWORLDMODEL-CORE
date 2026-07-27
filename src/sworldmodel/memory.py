@@ -69,6 +69,37 @@ class MemoryStream:
         return len(self.nodes)
 
     def add(self, node: ConceptNode) -> ConceptNode:
+        """Add a memory, or return the one already held if this is the same memory.
+
+        "The same memory" is exactly what ``node_id`` already says it is: the same
+        content, of the same kind, created at the same instant, carrying the same tags —
+        and the tags include the source the actor heard it from. Inserting a second copy
+        of that is not the actor learning something twice; it is one perception recorded
+        twice, and it silently destroyed the retrieval window.
+
+        The measured failure: with the branch clock pinned at one instant, an actor
+        re-perceiving identical content produced an identical ``node_id`` inserted N
+        times. ``retrieve`` then scored all N identically and returned k entries of the
+        SAME node — and its refresh loop (``self.nodes.index(node)``) only ever found the
+        first, so the duplicates were never even touched. ``retrieved_memory_ids`` was
+        non-empty in 218 of 235 decision records, which reads as "memory works", while
+        the actor was being shown six copies of one fact. The window was structurally
+        unusable, not merely redundant.
+
+        What this deliberately does NOT collapse is recurrence that carries information.
+        The same fact from two different sources differs in its ``source:`` tag, and the
+        same fact at two different times differs in ``created`` — both keep their own
+        node, because hearing something twice from two people, or twice weeks apart, is
+        corroboration and a real decider weighs it. Only one perception recorded twice
+        is folded.
+        """
+
+        existing = self._index.get(node.node_id)
+        if existing is not None:
+            # Same content, same instant, same source: there is nothing new to record and
+            # nothing to refresh — `last_accessed` on a node this instant created is
+            # already this instant. Reordering the stream for a non-event would be worse.
+            return existing
         self.nodes.insert(0, node)  # newest first
         self._index[node.node_id] = node
         return node
@@ -106,11 +137,22 @@ class MemoryStream:
         Score = w_recency·decay^rank + w_relevance·lexical + w_importance·poignancy,
         each component min-max normalized across candidates. This is an operational
         heuristic; it encodes no social outcome (no "consensus pull").
+
+        Candidates are distinct memories. ``add`` is what keeps the stream free of
+        duplicates, and this is the same invariant asserted where it is consumed: a
+        window of ``top_k`` slots filled with k copies of one node is not a window, and
+        it fails silently — every counter downstream reports k memories retrieved.
         """
 
         if not self.nodes:
             return []
-        candidates = sorted(self.nodes, key=lambda n: n.last_accessed, reverse=True)
+        seen: set[str] = set()
+        candidates: list[ConceptNode] = []
+        for node in sorted(self.nodes, key=lambda n: n.last_accessed, reverse=True):
+            if node.node_id in seen:
+                continue
+            seen.add(node.node_id)
+            candidates.append(node)
         q = _tokens(query)
 
         recency: dict[str, float] = {}

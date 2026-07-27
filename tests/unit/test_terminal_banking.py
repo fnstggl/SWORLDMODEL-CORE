@@ -2,11 +2,13 @@
 
 The defect these exist for (G1, ``artifacts/ab/individual_semantic``): the terminal was
 ``greater_than(event_count('bailey_signals_support_for_further_cut'), 0)``, the agent
-chose the satisfying action on twenty separate invocations, the actor-call budget ran
-out three scheduled events short of the horizon, and the branch reported
-``resolved=False``. The run published **0.0** — the average of the two branches that
-happened to finish, both of which said NO. The system watched the answer happen twenty
-times and published its opposite.
+chose the satisfying action on twenty separate invocations — nineteen of which landed in
+the ledger, one still in flight when the actor-call budget ran out three scheduled events
+short of the horizon — and the branch reported ``resolved=False``. Replayed through the
+real evaluator, that branch's own ledger gives ``unresolved_when -> False``,
+``yes_when -> True``, ``resolved=True outcome=YES``. The run published **0.0**: the
+average of the two branches that happened to finish, both of which said NO. The system
+watched the answer happen nineteen times and published its opposite.
 
 Two things had to be true at once for that. The terminal was read ONCE, at the end, on
 a trajectory that never got there; and a guard that is right in general — a branch cut
@@ -613,8 +615,11 @@ def test_a_budget_stop_is_classified_as_our_failure_not_the_world_s_uncertainty(
     assert diag.unresolved_class == EXECUTION_INCOMPLETE
     assert diag.unresolved_class != UNRESOLVED_WORLD_UNDETERMINED
 
-    # The run-level seam: this is the share of the world we did not manage to run.
+    # The run-level seam: this is the share of the world we did not manage to run, and
+    # the subset of it that therefore has no answer. The second is the mass that flows
+    # into bounds and suppression today dressed as uncertainty about reality.
     assert result.execution_incomplete_mass > 0.0
+    assert result.execution_incomplete_unresolved_mass > 0.0
     assert result.execution_incomplete_branches
     assert all(reason for _, reason in result.execution_incomplete_branches)
 

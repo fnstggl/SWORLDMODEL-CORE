@@ -583,6 +583,7 @@ def run(
         truncated_reason=compiled.scenario_set.truncated_reason,
         diagnostics=diagnostics,
         execution_incomplete_mass=incomplete_mass,
+        execution_incomplete_unresolved_mass=incomplete_unresolved_mass,
         execution_incomplete_branches=tuple(incomplete),
     )
 
