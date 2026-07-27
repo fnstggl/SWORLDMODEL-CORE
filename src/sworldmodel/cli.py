@@ -306,6 +306,7 @@ def cmd_forecast(args: argparse.Namespace) -> int:
         print(f"STOPPED after {wall:.0f}s: {stopped}", file=sys.stderr)
         for cause in diagnosis.root_cause():
             print(f"  root cause: {cause['cause']} — {cause['why']}", file=sys.stderr)
+        _print_unobserved(diagnosis)
         return 124
     except ForecastRefused as refusal:
         # A refusal is a result about the world-supply pipeline, and it is the result
@@ -333,6 +334,7 @@ def cmd_forecast(args: argparse.Namespace) -> int:
         print(f"REFUSED at {refusal.stage}: {refusal.__cause__ or refusal}", file=sys.stderr)
         for cause in diagnosis.root_cause():
             print(f"  root cause: {cause['cause']} — {cause['why']}", file=sys.stderr)
+        _print_unobserved(diagnosis)
         if out is not None:
             print(f"  diagnosis: {out / 'diagnosis.json'}", file=sys.stderr)
         return 1
@@ -402,6 +404,25 @@ def cmd_forecast(args: argparse.Namespace) -> int:
             if f.severity in ("CRITICAL", "HIGH"):
                 print(f"  [{f.severity}] {f.key}: {f.finding}")
     return 0
+
+
+def _print_unobserved(diagnosis: RunDiagnosis) -> None:
+    """Print what the run could not observe, beside what it concluded.
+
+    A run that names three causes and a run that names one because two of its inputs
+    were never measured must not read the same on a console. This was in the artifact
+    only, and an artifact section nobody reads is a section that does not exist: the
+    live run that provoked it published two fabricated causes and the record that would
+    have exposed them was a JSON key.
+    """
+
+    for miss in diagnosis.unobserved():
+        print(
+            f"  NOT OBSERVED: {miss['measurement']} — {miss['why']}; "
+            f"{miss['cause_neither_inferred_nor_ruled_out']} could be neither inferred "
+            "nor ruled out",
+            file=sys.stderr,
+        )
 
 
 def _write_diagnosis(out: Path | None, diagnosis: RunDiagnosis, refusal: ForecastRefused) -> None:

@@ -84,6 +84,7 @@ import argparse
 import concurrent.futures
 import hashlib
 import importlib.util
+import itertools
 import json
 import math
 import statistics
@@ -367,6 +368,14 @@ def society_metrics(compilation: dict[str, Any]) -> dict[str, int]:
     )
 
     return {
+        # NOT in ALL_METRICS, so it is never histogrammed and never counts towards the
+        # multiplicity warning. It is a MODE, not a magnitude: a run that decided the
+        # question was already settled by the pre-cutoff record compiles a world with
+        # no entities and no acts at all, and reports `expected_participants: 0` with a
+        # written justification. Averaging that mode together with the worlds that do
+        # contain a party is how a bimodal compiler gets described by a number that
+        # fits neither half.
+        "zero_actor_justified": int(bool(compilation.get("zero_actor_justification"))),
         "entities": len(entities),
         HEADLINE: len(holders),
         "declared_actors": len(spec.get("actors") or []),
@@ -648,6 +657,27 @@ def minimum_detectable_count(n_a: int, n_b: int, *, baseline: int = 0, alpha: fl
     return n_b + 1
 
 
+def indistinguishable_range(
+    n_a: int, n_b: int, *, baseline: int = 0, alpha: float = 0.05
+) -> tuple[int, int]:
+    """Every count a comparison arm could show and still be inside this arm's noise.
+
+    :func:`minimum_detectable_count` only looks UPWARD from the baseline, which is the
+    right and readable statement while the baseline is 0 — the case this bench is in.
+    It is not the whole truth once the baseline rises: an arm showing dramatically
+    FEWER is equally distinguishable. This returns the closed interval of k in
+    ``0..n_b`` that no test at ``alpha`` could separate, so the report can name both
+    edges rather than only the one above.
+    """
+
+    inside = [
+        k
+        for k in range(n_b + 1)
+        if fisher_exact_two_sided(baseline, n_a - baseline, k, n_b - k) > alpha
+    ]
+    return (min(inside), max(inside)) if inside else (baseline, baseline)
+
+
 def permutation_p(xs: list[int], ys: list[int], *, cap: int = 2_000_000) -> float | None:
     """Exact two-sided permutation p for a difference in means, or None if too big.
 
@@ -657,8 +687,6 @@ def permutation_p(xs: list[int], ys: list[int], *, cap: int = 2_000_000) -> floa
     when the enumeration would exceed ``cap``: a p-value from a shortcut nobody named
     is worse than no p-value.
     """
-
-    import itertools
 
     n1, n2 = len(xs), len(ys)
     if n1 == 0 or n2 == 0:
@@ -721,6 +749,7 @@ def aggregate(spec: BenchSpec, records: list[RunRecord]) -> dict[str, Any]:
         "config": spec.identity(),
         "runs_attempted": len(records),
         "worlds_produced": len(produced),
+        "zero_actor_worlds": sum(1 for r in produced if r.metrics.get("zero_actor_justified")),
         "outcomes": {name: outcomes.get(name, 0) for name in OUTCOMES},
         "failures": dict(sorted(failures.items(), key=lambda kv: (-kv[1], kv[0]))),
         "compiler_sha256": fingerprints[0] if len(fingerprints) == 1 else "",
@@ -832,6 +861,13 @@ def noise_statement(summary: dict[str, Any]) -> list[str]:
             f"{n} runs. {mdc - 1} of {n} or fewer is inside the noise at this N and "
             "must not be reported as an improvement."
         )
+        low, high = indistinguishable_range(n, n, baseline=k)
+        if low > 0:
+            lines.append(
+                f"  It cuts both ways: anything from {low} to {high} of {n} is "
+                f"indistinguishable from this arm's {k} of {n}. Only below {low} or "
+                f"above {high} is a difference this bench can support."
+            )
     lines.append(
         f"  This report shows {len(ALL_METRICS)} metrics. At p<=0.05 each, roughly one "
         "in twenty will look different by chance. Only "
@@ -873,6 +909,15 @@ def render_report(summary: dict[str, Any]) -> str:
         count = summary["outcomes"][name]
         if count:
             out.append(f"    {name:<22} {_bar(count, 20, summary['runs_attempted']):<20} {count}")
+    if summary.get("zero_actor_worlds"):
+        out.append(
+            f"    ^ {summary['zero_actor_worlds']} of {summary['worlds_produced']} worlds "
+            "were compiled as a FACTUAL RESOLUTION — the pre-cutoff record was judged to "
+            "have already settled the question, so the world has no parties and no acts "
+            "by design (expected_participants 0, with a written justification). Those "
+            "runs sit in the 0 bucket below. They are a different mode, not a worse "
+            "society, and a single average across both modes describes neither."
+        )
     if summary["outcomes"]["harness_error"]:
         out.append(
             f"    ^ {summary['outcomes']['harness_error']} of "
@@ -1003,6 +1048,7 @@ def render_comparison(a: dict[str, Any], b: dict[str, Any]) -> str:
     out.append("")
 
     out.append("  COUNT METRICS  (exact two-sided permutation test on the difference of means)")
+    out.append("  a line marked * is distinguishable at p<=0.05; every other line is not")
     for name in ALL_METRICS:
         xs = _values(a, name)
         ys = _values(b, name)
@@ -1010,16 +1056,13 @@ def render_comparison(a: dict[str, Any], b: dict[str, Any]) -> str:
             continue
         ma, mb = sum(xs) / len(xs), sum(ys) / len(ys)
         p = permutation_p(xs, ys)
-        if p is None:
-            verdict = "N too large for exact enumeration — read the distributions"
-        elif p <= 0.05:
-            verdict = f"p={p:.3f} distinguishable"
-        else:
-            verdict = f"p={p:.3f} NOT distinguishable"
+        verdict = "p=  n/a" if p is None else f"p={p:.3f}"
+        mark = "*" if p is not None and p <= 0.05 else " "
         out.append(
-            f"    {name:<24} {ma:>6.2f} vs {mb:>6.2f}   ranges "
-            f"[{min(xs)}..{max(xs)}] vs [{min(ys)}..{max(ys)}]   {verdict}"
+            f"  {mark} {name:<22} {ma:>6.2f} [{min(xs)}..{max(xs)}]  vs "
+            f"{mb:>6.2f} [{min(ys)}..{max(ys)}]   {verdict}"
         )
+    out.append("  n/a: the exact enumeration exceeded the cap — read the distributions instead.")
     out.append("")
     out.append(
         "  Read only the headline as a result. With "
@@ -1076,16 +1119,33 @@ def run_bench(
             hashlib.sha256(f"{spec.bench_seed}:{index}".encode()).hexdigest()[:8],
             16,
         )
-        run_dir = out / f"run_{index:02d}"
-        prepare_run_dir(
-            run_dir,
-            question=spec.question,
-            as_of=spec.as_of,
-            horizon=spec.horizon,
-            mode=spec.mode,
-        )
-        gateway = build_gateway(spec, salt)
-        record = run_once(gateway, spec, store, run_index=index, seed_salt=salt, out_dir=run_dir)
+        try:
+            run_dir = out / f"run_{index:02d}"
+            prepare_run_dir(
+                run_dir,
+                question=spec.question,
+                as_of=spec.as_of,
+                horizon=spec.horizon,
+                mode=spec.mode,
+            )
+            gateway = build_gateway(spec, salt)
+            record = run_once(
+                gateway, spec, store, run_index=index, seed_salt=salt, out_dir=run_dir
+            )
+        except Exception as exc:  # noqa: BLE001
+            # Everything OUTSIDE run_once's own handling — a missing credential, a full
+            # disk, a gateway that would not construct. `pool.map` re-raises on
+            # iteration, so without this one bad run discards nine good ones and the
+            # provider spend that bought them.
+            record = RunRecord(
+                run_index=index,
+                seed_salt=salt,
+                outcome="harness_error",
+                stage="setup",
+                failure=type(exc).__name__,
+                message=str(exc),
+                compiler_sha256=compiler_fingerprint()[0],
+            )
         if verbose:
             summary = (
                 f"{HEADLINE}={record.metrics.get(HEADLINE)} "

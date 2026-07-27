@@ -150,6 +150,21 @@ def main() -> int:
         details = getattr(refusal.__cause__, "details", {}) or {}
         print(f"REFUSED [{args.mode}] at {refusal.stage}: {refusal.__cause__ or refusal}")
         print(f"failure: {details.get('failure')}")
+        # The classification, and — as loudly — what this run could NOT observe. A run
+        # of this harness named `archive_coverage_failure` and `discovery_failure` about
+        # a store whose claims were all admissible and a backend that issues no queries;
+        # both lines were only ever in the JSON, so nobody reading the console saw the
+        # diagnosis at all, let alone that two of its three causes rested on counters no
+        # stage of the run had written.
+        for cause in diagnosis.root_cause():
+            print(f"  root cause: {cause['cause']} — {cause['why']}")
+        for miss in diagnosis.unobserved():
+            print(
+                f"  NOT OBSERVED: {miss['measurement']} — {miss['why']}; "
+                f"{miss['cause_neither_inferred_nor_ruled_out']} could be neither "
+                "inferred nor ruled out"
+            )
+        print(f"repair attempts: {len(diagnosis.integrity_and_grounding()['repair_attempts'])}")
         print(f"wall: {wall:.0f}s  calls: {gateway.call_count}")
         return 1
     except Exception as stopped:  # noqa: BLE001 — every ending owes a diagnosis

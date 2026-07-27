@@ -364,7 +364,7 @@ def test_a_diagnosis_that_could_not_observe_something_says_so() -> None:
     assert d.as_dict()["unobserved"] == d.unobserved()
 
     # The run still names the mechanism it DID observe.
-    assert [c["cause"] for c in d.root_cause()] == ["over_strict_grounding_gate"]
+    assert [c["cause"] for c in d.root_cause()] == ["actor_not_attested_by_evidence"]
 
     # A run whose research actually ran claims nothing unobserved.
     d.bundle = dc_replace(  # type: ignore[arg-type]
@@ -377,3 +377,101 @@ def test_a_diagnosis_that_could_not_observe_something_says_so() -> None:
         },
     )
     assert d.unobserved() == []
+
+
+# --------------------------------------------------------------------------- #
+# 3. No root cause asserts more than the run observed.
+# --------------------------------------------------------------------------- #
+
+
+def test_no_root_cause_is_a_verdict_on_whether_a_check_should_have_fired() -> None:
+    """``over_strict_grounding_gate`` said the grounding gate had been wrong. Nothing
+    in a run measures that, and in the run that provoked this the gate reported *"every
+    claim assigned to this actor was checked and none of them mentions it"* — a gate
+    behaving exactly as designed, filed under a name saying it had misbehaved. The same
+    shape sat on the verifier twice, and a fourth was in the vocabulary unemitted."""
+
+    from sworldmodel.diagnosis import ROOT_CAUSES
+
+    verdicts = [
+        c
+        for c in ROOT_CAUSES
+        if "too_strict" in c or "too_weak" in c or "over_strict" in c or "under_strict" in c
+    ]
+    assert verdicts == [], (
+        "a root cause may state what the run observed, never whether a component "
+        f"should have behaved as it did: {verdicts}"
+    )
+
+
+def test_the_ungrounded_actor_cause_quotes_the_gate_rather_than_judging_it() -> None:
+    """The cause is now the gate's finding restated, carrying its own words — so the
+    reader decides whether the gate was too strict, with the reason in front of them."""
+
+    reason = (
+        "seven_opecplus_countries (Seven_OPECPlus_Countries): no surviving citation "
+        "attaches this actor to the world — every claim assigned to this actor was "
+        "checked and none of them mentions it"
+    )
+    d = _frozen_diagnosis()
+    d.failure = WorldIntegrityError(
+        "actors are not grounded in cited evidence — simulation refused",
+        details={
+            "failure": "actors_ungrounded",
+            "recompilable": True,
+            "ungrounded_actors": [reason],
+        },
+    )
+    cause = next(c for c in d.root_cause() if c["cause"] == "actor_not_attested_by_evidence")
+    assert reason in cause["why"], "the gate's own reason must travel with the cause"
+    assert "1 compiled actor(s)" in cause["why"]
+    assert "strict" not in cause["why"], "the cause must not judge the gate for the reader"
+
+
+def test_a_contradiction_between_verified_claims_is_not_a_verdict_on_the_verifier() -> None:
+    """``claim_verification_too_weak`` asserted the verifier had let something through.
+    What was observed is that two claims which BOTH passed disagree — and this
+    repository's own repair module argues the commonest case is not a verification
+    defect at all, but the uncertainty the simulation exists to resolve."""
+
+    d = _frozen_diagnosis()
+    d.failure = WorldIntegrityError(
+        "decisive evidence contradictions block rollout",
+        details={
+            "failure": "decisive_evidence_contradiction",
+            "recompilable": True,
+            "contradictions": ["the board has five members <> the board has nine members"],
+        },
+    )
+    causes = {c["cause"]: c["why"] for c in d.root_cause()}
+    assert "verified_claims_contradict_each_other" in causes
+    assert "five members" in causes["verified_claims_contradict_each_other"], (
+        "the contradiction itself must be quoted, so a reader can judge whether it is one"
+    )
+
+
+def test_a_wake_up_loop_is_named_only_when_one_was_measured() -> None:
+    """*The event loop did not settle* was asserted for EVERY simulation-stage failure,
+    off nothing but the stage. W3 counts re-decisions per branch; the cause is claimed
+    only on a positive count, and a simulation that failed some other way says so."""
+
+    class _Ran(RunDiagnosis):
+        convergence: dict[str, int] = {"repeat_decisions": 0}
+
+        def runtime(self) -> dict[str, Any]:
+            return {"ran": True, "actor_invocations": 12, "convergence": self.convergence}
+
+    d = _Ran(
+        question="q",
+        as_of=AS_OF_DT,
+        horizon=HORIZON_DT,
+        failure=RuntimeError("something in the runtime"),
+        failure_stage="simulation",
+    )
+    assert [c["cause"] for c in d.root_cause()] == ["unclassified"], (
+        "a simulation failure with no measured repeat must not be called a wake-up loop"
+    )
+
+    d.convergence = {"repeat_decisions": 7}
+    cause = next(c for c in d.root_cause() if c["cause"] == "repeated_wake_up_loop")
+    assert "7 actor call(s)" in cause["why"] and "12 invocation(s)" in cause["why"]

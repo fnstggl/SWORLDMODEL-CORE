@@ -24,7 +24,7 @@ from typing import Any
 
 from .compiled import CompiledWorld
 from .engine import RunResult
-from .errors import SWorldModelError
+from .errors import GatewayError, SWorldModelError
 from .repair import RepairLog
 from .research import ResearchBundle
 from .world_compiler import terminal_producers
@@ -32,6 +32,19 @@ from .world_compiler import terminal_producers
 # The classification vocabulary. A run's root cause must be expressible in these terms;
 # "research recall" is deliberately absent, because it names a symptom and every one of
 # these names a mechanism that can be found and fixed.
+#
+# A name here states what the run OBSERVED, never a verdict on whether a component
+# should have behaved as it did. Three of these were verdicts —
+# `over_strict_grounding_gate`, `claim_verification_too_strict`,
+# `claim_verification_too_weak` — and each was emitted unconditionally from the gate
+# code alone, so a run asserted that a check had been wrong without measuring anything
+# about whether it had. A live OPEC+ run refused because *"every claim assigned to this
+# actor was checked and none of them mentions it"* and filed itself under
+# `over_strict_grounding_gate`: the gate reads as having been exactly right, and the
+# diagnosis pre-empted the reader's judgement with the opposite one. Whether a check
+# was too strict or too weak is a judgement for a reader with the evidence in front of
+# them; the diagnosis's job is to put it there. The three replacements below restate
+# the observation and carry the refusing component's own reason verbatim.
 ROOT_CAUSES = (
     "query_planning_failure",
     "discovery_failure",
@@ -41,15 +54,17 @@ ROOT_CAUSES = (
     "fetch_failure",
     "document_parsing_failure",
     "claim_extraction_failure",
-    "claim_verification_too_weak",
-    "claim_verification_too_strict",
+    "verified_claims_contradict_each_other",
+    "no_extracted_claim_passed_verification",
     "entity_resolution_failure",
     "actor_discovery_failure",
     "organization_process_discovery_failure",
     "compiler_omission",
     "incorrect_representation_scale",
-    "over_strict_grounding_gate",
-    "under_strict_integrity_gate",
+    "actor_not_attested_by_evidence",
+    # `under_strict_integrity_gate` was the fourth verdict and is gone rather than
+    # renamed: nothing ever emitted it, and leaving a verdict in a vocabulary that no
+    # longer holds any is how one gets written again.
     "terminal_supplied_rather_than_produced",
     "terminal_never_determined",
     "unexecutable_compilation",
@@ -333,6 +348,10 @@ class RunDiagnosis:
             "unresolved_mass": round(sum(b.weight for b in r.branch_outcomes if not b.resolved), 6),
             "truncated_mass": r.truncated_mass,
             "truncated_reason": r.truncated_reason,
+            # W3's measurement, summed over branches. Without it "the event loop did
+            # not settle" was an assertion no number in the record supported; with it,
+            # a re-decision that actually happened is counted and can be pointed at.
+            "convergence": _convergence(r),
             "terminal_producer_lineage": self._lineage(),
             "per_branch": {
                 bid: {
@@ -461,11 +480,14 @@ class RunDiagnosis:
         research_recorded = self._discovery_ran()
 
         if ext["claims_stored"] == 0 and ext["claim_candidates"] > 0:
+            # What is observed is that nothing survived verification, and the reasons
+            # the verifier gave. Whether it was RIGHT to reject them is a reading of
+            # those reasons, which is the reader's to make and not this table's.
             out.append(
                 {
-                    "cause": "claim_verification_too_strict",
-                    "why": f"{ext['claim_candidates']} candidate claim(s) extracted, none stored: "
-                    f"{ext['verification_rejection_reasons']}",
+                    "cause": "no_extracted_claim_passed_verification",
+                    "why": f"{ext['claim_candidates']} candidate claim(s) extracted, none stored; "
+                    f"the verifier's own reasons were {ext['verification_rejection_reasons']}",
                 }
             )
         if ext["extraction_calls"] and ext["calls_returning_nothing"] == ext["extraction_calls"]:
@@ -529,13 +551,30 @@ class RunDiagnosis:
                     "why": "no URL on any requested authoritative domain was reached",
                 }
             )
-        if gate in ("no_causal_producer", "actors_ungrounded"):
+        if gate == "no_causal_producer":
+            out.append(
+                {"cause": "actor_discovery_failure", "why": f"the run stopped at the {gate} gate"}
+            )
+        if gate == "actors_ungrounded":
+            # The grounding gate reports exactly which actors carried no surviving
+            # citation and why, so the cause is that finding, restated — with the
+            # gate's own words attached. It used to be `over_strict_grounding_gate`,
+            # which asserts the gate should not have fired. Nothing in the run measures
+            # that, and the live refusal this replaces read "every claim assigned to
+            # this actor was checked and none of them mentions it" — a gate behaving
+            # exactly as designed, filed under a name saying it had misbehaved.
+            details = self.integrity_and_grounding().get("gate_details") or {}
+            named = [str(a) for a in (details.get("ungrounded_actors") or [])]
             out.append(
                 {
-                    "cause": "actor_discovery_failure"
-                    if gate == "no_causal_producer"
-                    else "over_strict_grounding_gate",
-                    "why": f"the run stopped at the {gate} gate",
+                    "cause": "actor_not_attested_by_evidence",
+                    "why": (
+                        f"{len(named)} compiled actor(s) carried no surviving citation "
+                        f"attaching them to this world — {'; '.join(named)}"
+                        if named
+                        else "the grounding gate found a compiled actor with no "
+                        "surviving citation attaching it to this world"
+                    ),
                 }
             )
         if gate in (
@@ -630,10 +669,25 @@ class RunDiagnosis:
                 }
             )
         if gate == "decisive_evidence_contradiction":
+            # `claim_verification_too_weak` said the verifier had let something through
+            # it should have caught. What was observed is that two claims which BOTH
+            # passed verification disagree — and this repository's own repair module
+            # argues the commonest case is not a verification defect at all: "a
+            # disagreement about what *will* happen is the uncertainty the simulation
+            # exists to resolve, so it is not decisive at all". The contradiction is
+            # quoted so a reader can decide which kind this one is.
+            details = self.integrity_and_grounding().get("gate_details") or {}
+            pairs = [str(c) for c in (details.get("contradictions") or [])]
             out.append(
                 {
-                    "cause": "claim_verification_too_weak",
-                    "why": "two verified claims contradict each other about a matter of fact",
+                    "cause": "verified_claims_contradict_each_other",
+                    "why": (
+                        "claims that both passed verification disagree about a matter of "
+                        f"fact — {'; '.join(pairs)}"
+                        if pairs
+                        else "two claims that both passed verification disagree about a "
+                        "matter of fact"
+                    ),
                 }
             )
         if gate == "coverage_incomplete":
@@ -689,7 +743,32 @@ class RunDiagnosis:
             )
         rt = self.runtime()
         if rt.get("ran") and self.failure_stage == "simulation":
-            out.append({"cause": "repeated_wake_up_loop", "why": "the event loop did not settle"})
+            # This used to name a wake-up loop for EVERY simulation-stage failure, off
+            # nothing but the stage: "the event loop did not settle" was asserted about
+            # runs in which nothing had been observed to repeat. W3 counts the actual
+            # mechanism per branch, so the cause is claimed only when a re-decision was
+            # measured, and quotes the count. A simulation that failed some other way
+            # falls through to "no rule here recognised the mechanism", which is the
+            # true statement about it.
+            conv = rt.get("convergence") or {}
+            repeats = int(conv.get("repeat_decisions") or 0)
+            if repeats:
+                out.append(
+                    {
+                        "cause": "repeated_wake_up_loop",
+                        "why": f"{repeats} actor call(s) re-produced the previous decision "
+                        f"unchanged from an unchanged situation, out of "
+                        f"{rt.get('actor_invocations', 0)} invocation(s)",
+                    }
+                )
+            elif isinstance(self.failure, GatewayError):
+                out.append(
+                    {
+                        "cause": "provider_failure",
+                        "why": "the runtime was running and a provider call failed: "
+                        f"{str(self.failure).splitlines()[0] if str(self.failure) else ''}",
+                    }
+                )
         # A completed run that resolved nothing is not a clean run. It exits zero and
         # reports "unresolved", which is honest, and it is also the shape a live Tesla
         # run took when an effect stored a formula instead of computing it — a world
@@ -745,6 +824,23 @@ def _audit_dict(audit: Any) -> dict[str, Any] | None:
 
     as_dict = getattr(audit, "as_dict", None)
     return as_dict() if callable(as_dict) else None
+
+
+def _convergence(result: RunResult) -> dict[str, int]:
+    """The run's measured re-decision counts, summed over its branches.
+
+    Absent per-branch diagnostics give zeros, which is correct here and not a repeat of
+    the defect above: a run with no branch diagnostics made no measured re-decision, and
+    the caller claims a wake-up loop only on a POSITIVE count, never on the zero.
+    """
+
+    keys = ("self_echo_wakes_suppressed", "non_decision_wakes_refused", "repeat_decisions")
+    out = dict.fromkeys(keys, 0)
+    for diag in result.diagnostics.values():
+        conv = getattr(diag, "convergence", None)
+        for key in keys:
+            out[key] += int(getattr(conv, key, 0) or 0)
+    return out
 
 
 def _measured(trace: dict[str, Any], key: str) -> int | None:

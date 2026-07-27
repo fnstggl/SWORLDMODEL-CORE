@@ -368,6 +368,39 @@ def test_the_bench_reads_one_acting_party_out_of_a_single_decider_world() -> Non
     assert record.metrics["send_effects"] == 0
 
 
+def test_a_factual_resolution_world_is_named_as_a_mode_not_scored_as_a_bad_society() -> None:
+    """Live finding from the N=10 OPEC+ baseline: some runs decide the pre-cutoff record
+    already settled the question and compile a world with NO entities and NO acts at
+    all, carrying `expected_participants: 0` and a written justification. Every gate
+    admits it. It lands in the 0 bucket of the headline, which is correct — nothing in
+    it can act — but it is a different MODE from a causal world that came out thin, and
+    averaging the two describes neither. The mode is flagged separately and is kept out
+    of `ALL_METRICS`, so it is never histogrammed and never inflates the multiplicity
+    warning."""
+
+    settled = {
+        "zero_actor_justification": {"no_material_decision": "the outcome already occurred"},
+        "expected_participants": 0,
+        "world_spec": {"entities": [], "actions": [], "actors": []},
+    }
+    causal = {"world_spec": {"entities": [{"entity_id": "e0"}], "actions": [], "actors": []}}
+
+    assert bench.society_metrics(settled)["zero_actor_justified"] == 1
+    assert bench.society_metrics(settled)["parties_holding_acts"] == 0
+    assert bench.society_metrics(causal)["zero_actor_justified"] == 0
+    assert "zero_actor_justified" not in bench.ALL_METRICS
+
+    summary = bench.aggregate(
+        _spec(),
+        [
+            _record("compiled", parties_holding_acts=0, zero_actor_justified=1),
+            _record("refused_gates", "coverage_incomplete", parties_holding_acts=1),
+        ],
+    )
+    assert summary["zero_actor_worlds"] == 1
+    assert "FACTUAL RESOLUTION" in bench.render_report(summary)
+
+
 def test_parties_holding_acts_counts_who_may_act_not_who_was_labelled_an_actor() -> None:
     """`phase2/geopolitical2` declared nine entities, one actor and one action. Counting
     entities marked ``is_actor``, or ``len(actors)``, both answer a different question
@@ -663,6 +696,21 @@ def test_the_minimum_detectable_split_is_what_the_bench_promises_a_reader() -> N
     assert bench.minimum_detectable_count(5, 5) == 4
     assert bench.minimum_detectable_count(10, 10) == 5
     assert bench.minimum_detectable_count(3, 3) > 3
+
+
+def test_detectability_is_stated_in_both_directions_once_the_baseline_leaves_zero() -> None:
+    """`minimum_detectable_count` only looks upward, which is the readable statement
+    while the baseline is 0 — where this compiler currently sits. It is not the whole
+    truth at a higher baseline: an arm showing dramatically FEWER is equally
+    distinguishable, and the interval names both edges. At a baseline of 0 the interval
+    starts at 0, which is why the upward sentence alone is honest there."""
+
+    assert bench.indistinguishable_range(10, 10, baseline=0) == (0, 4)
+    assert bench.indistinguishable_range(10, 10, baseline=10) == (6, 10)
+    low, high = bench.indistinguishable_range(10, 10, baseline=5)
+    assert low > 0 and high < 10
+    assert bench.fisher_exact_two_sided(5, 5, low - 1, 10 - (low - 1)) <= 0.05
+    assert bench.fisher_exact_two_sided(5, 5, low, 10 - low) > 0.05
 
 
 def test_the_permutation_test_refuses_rather_than_approximating() -> None:
