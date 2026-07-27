@@ -389,7 +389,12 @@ def test_no_root_cause_is_a_verdict_on_whether_a_check_should_have_fired() -> No
     in a run measures that, and in the run that provoked this the gate reported *"every
     claim assigned to this actor was checked and none of them mentions it"* — a gate
     behaving exactly as designed, filed under a name saying it had misbehaved. The same
-    shape sat on the verifier twice, and a fourth was in the vocabulary unemitted."""
+    shape sat on the verifier twice, and two more sat in the vocabulary unemitted.
+
+    A dead name that models the wrong idea is not neutral — it is a template, which is
+    how discovery language came to sit on a gate that observes no retrieval. So the two
+    that nothing emitted are gone rather than kept "in case", and named here so that
+    re-adding one is a decision somebody has to argue for."""
 
     from sworldmodel.diagnosis import ROOT_CAUSES
 
@@ -402,6 +407,16 @@ def test_no_root_cause_is_a_verdict_on_whether_a_check_should_have_fired() -> No
         "a root cause may state what the run observed, never whether a component "
         f"should have behaved as it did: {verdicts}"
     )
+    # Each of these asserts that some component should have behaved otherwise — a
+    # judgement no run can make about itself, however the sentence is worded.
+    retired = {
+        "over_strict_grounding_gate",
+        "under_strict_integrity_gate",
+        "claim_verification_too_strict",
+        "claim_verification_too_weak",
+        "no_progress_detection_failure",
+    }
+    assert not (retired & set(ROOT_CAUSES)), sorted(retired & set(ROOT_CAUSES))
 
 
 def test_the_ungrounded_actor_cause_quotes_the_gate_rather_than_judging_it() -> None:
@@ -475,3 +490,74 @@ def test_a_wake_up_loop_is_named_only_when_one_was_measured() -> None:
     d.convergence = {"repeat_decisions": 7}
     cause = next(c for c in d.root_cause() if c["cause"] == "repeated_wake_up_loop")
     assert "7 actor call(s)" in cause["why"] and "12 invocation(s)" in cause["why"]
+
+
+def test_an_empty_world_is_not_evidence_that_retrieval_failed_to_find_anyone() -> None:
+    """``no_causal_producer`` said ``actor_discovery_failure``: retrieval failed to find
+    the actors. Nothing at that gate observes retrieval — it observes a compiled world
+    with no producer in it, which is what its two neighbouring gates already report.
+
+    The distinction the run CAN make is preserved and comes first: where the search
+    record shows searches coming back empty, discovery is named from that record."""
+
+    class _Compiled(RunDiagnosis):
+        """Research that reached sources and read them; only the world is empty."""
+
+        def discovery(self) -> dict[str, Any]:
+            return {
+                "urls_considered_count": 9,
+                "official_domain_urls_found": ["https://x.test/a"],
+                "queries_used": 6,
+                "search_failures": [],
+                "discovery_ran": True,
+            }
+
+        def fetching(self) -> dict[str, Any]:
+            return {"fetched_count": 7, "rejected_count": 1, "rejection_reasons": {}}
+
+        def extraction(self) -> dict[str, Any]:
+            return {
+                "claims_stored": 11,
+                "claim_candidates": 14,
+                "claims_admissible_at_cutoff": 11,
+                "extraction_calls": 7,
+                "calls_returning_nothing": 0,
+                "verification_rejection_reasons": {},
+            }
+
+        def runtime(self) -> dict[str, Any]:
+            return {"ran": False, "reason": "the world never compiled"}
+
+    d = _Compiled(
+        question="q",
+        as_of=AS_OF_DT,
+        horizon=HORIZON_DT,
+        failure=WorldIntegrityError(
+            "nothing in the compiled world can produce the outcome",
+            details={"failure": "no_causal_producer", "recompilable": True},
+        ),
+        failure_stage="compilation",
+    )
+    causes = [c["cause"] for c in d.root_cause()]
+    assert causes == ["compiler_omission"], (
+        "a run that watched its searches succeed, fetched, and stored claims cannot "
+        f"report that discovery failed to find anyone: {causes}"
+    )
+    assert d.unobserved() == [], "nothing here went unmeasured; the world was simply empty"
+
+    # And a blocked channel is still named from the search record, ahead of the world.
+    class _Blocked(_Compiled):
+        def discovery(self) -> dict[str, Any]:
+            return {
+                **_Compiled.discovery(self),
+                "search_failures": [{"error": "search returned no result links"}] * 4,
+            }
+
+    blocked = _Blocked(
+        question="q",
+        as_of=AS_OF_DT,
+        horizon=HORIZON_DT,
+        failure=d.failure,
+        failure_stage="compilation",
+    )
+    assert [c["cause"] for c in blocked.root_cause()] == ["discovery_failure", "compiler_omission"]

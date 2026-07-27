@@ -77,7 +77,11 @@ ROOT_CAUSES = (
     # missing piece added to this one.
     "world_refused_by_its_own_review",
     "repeated_wake_up_loop",
-    "no_progress_detection_failure",
+    # `no_progress_detection_failure` went with `under_strict_integrity_gate`, for the
+    # same reason and by the same rule: it asserts that a detector SHOULD have fired
+    # and did not, which no run can observe about itself. Both were dead, and a dead
+    # name that models the wrong idea is a template for writing it again — which is
+    # exactly how discovery language ended up on a gate that observes no retrieval.
     "provider_failure",
     "budget_configuration_failure",
     "external_information_unavailable",
