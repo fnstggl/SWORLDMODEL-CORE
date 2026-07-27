@@ -16,6 +16,7 @@ JSON), then the refusal is real and carries the exact unresolved reasons.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 from typing import Any
 
@@ -43,6 +44,65 @@ from .semantic_plan import (
     validate_semantic_plan,
 )
 from .world_compiler import _normalize_compilation, render_evidence
+
+# Names in a claim's entity list that are not parties at all: dates, years, quantities,
+# numbered instances of a meeting. Filtered out of the per-name brief because a heading
+# for "2.2 million barrels per day" is noise, not a participant. Deliberately narrow —
+# anything it is unsure of stays in, because the brief is evidence for the planner to
+# read, never an instruction about who must be in the world.
+_NOT_A_NAME = re.compile(
+    r"^\s*(?:\d|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)",
+    re.IGNORECASE,
+)
+
+
+def participant_brief(view: EvidenceView, *, max_names: int = 24, max_claims: int = 8) -> str:
+    """The same verified claims, re-projected under the names they attest.
+
+    ``render_evidence`` lists claims in authority order, which is the right ordering for
+    judging what is established and the wrong one for seeing what any single party does:
+    a party's acts are scattered across the list, and one line naming eight countries
+    reads as a fact about the group rather than as eight facts about its members. A live
+    OPEC+ compile put nine parties in the world and gave eight of them nothing to do,
+    while the record it was reading attributes a standing position to Iraq and a
+    declared flexibility to increase, pause or reverse to all seven meeting participants.
+
+    So this adds no information and asserts nothing: every line is a claim already in the
+    view, printed under each name that claim attests, with the excerpt where the excerpt
+    says more than the proposition. What it changes is that a party with nothing under
+    its own heading is *visible* as a party with nothing to do — which is exactly the
+    judgement the planner has to make about whether it belongs in the world at all.
+    """
+
+    claims = view.available()
+    by_name: dict[str, list[Any]] = {}
+    for c in claims:
+        for name in c.entities:
+            n = name.strip()
+            if not n or _NOT_A_NAME.match(n):
+                continue
+            by_name.setdefault(n, []).append(c)
+    if not by_name:
+        return ""
+    ordered = sorted(by_name, key=lambda n: (-len(by_name[n]), n))[:max_names]
+    lines = [
+        "WHAT THE RECORD SAYS ABOUT EACH NAME IT ATTESTS. These are the same claims as "
+        "above, grouped by the names each one names — no new evidence, and no claim "
+        "about who belongs in the world. Read it to see what the record actually "
+        "attributes to each name: which acts it takes, which authority it is said to "
+        "hold, and where it appears only as a name in someone else's sentence. An "
+        "affordance you give a party must be traceable to a line under that party's own "
+        "heading.",
+    ]
+    for name in ordered:
+        lines.append(f"- {name}")
+        for c in sorted(by_name[name], key=lambda c: (-int(c.authority_level), c.id))[:max_claims]:
+            lines.append(f"    {c.id} | {c.proposition}")
+            excerpt = (c.supporting_excerpt or "").strip()
+            if excerpt and excerpt[:60] != c.proposition[:60]:
+                lines.append(f'      "{excerpt[:400]}"')
+    return "\n".join(lines)
+
 
 # The exact output format, stated rather than guessed. Object types are universal world
 # structure; every real-world meaning inside them is open-ended natural language.
@@ -243,6 +303,12 @@ CONSISTENCY REQUIREMENTS (checked mechanically; a violation costs a revision rou
 - every operational / scheduled_release process needs at least one occurrence with
   "at" or "after_process";
 - every entity with decides=true needs at least one affordance and cited evidence;
+- every person / organization / coalition / institution / population entity holds at
+  least one affordance — a party that can do nothing belongs in excluded_candidates or
+  in world_facts, not in the world;
+- a world with two or more deciding entities carries at least one channel between
+  participants: an affordance with a "send" to another party, or one recording an event
+  that reaches another party;
 - a quantity anything decreases is a stock, or says in not_a_stock_because why it may go
   below zero; a stock starts at a known amount, is never "set", and declares a capacity
   if anything adds to it; a flow declares a positive ISO-8601 period;
@@ -340,7 +406,38 @@ ACTORS ARE REAL OCCUPANTS OF REAL ROLES. A verified office and authority is suff
 grounding (cite the claims); a name with nothing behind it is not an actor. Give each
 deciding entity the genuine alternative affordances its role affords — including the
 ones that would resolve the question NO — and place its real dated occasions to act as
-actor_moment processes with at/deadline inside the window."""
+actor_moment processes with at/deadline inside the window.
+
+A PARTY IN THE WORLD IS A PARTY THAT CAN ACT. Every person, organization, coalition,
+institution or population you put in "entities" must hold at least one affordance: the
+act its own role really affords, traceable to what the record says about that party
+under its own name. A party standing in the world unable to do anything is scenery — it
+gives the world the shape of a many-sided situation while the answer turns on one
+switch, and every gate downstream reads that world as multi-party when it is not. If the
+record shows a party takes no act that could bear on this outcome, it does not belong in
+"entities": put it in excluded_candidates with why its removal cannot change the answer,
+or state what it contributes as a world_fact. Never invent an act to fill a slot. An
+affordance the record does not attribute to that party is a fabricated actor, and a
+fabricated actor is worse than a missing one — if the evidence genuinely supports one
+decider, one decider is the right world and excluded_candidates is where you say so.
+
+POSITIONS BEFORE OUTCOMES. Where several parties bear on one decision, the world needs
+the state that sits BETWEEN them: what each party has said, conceded, committed to or
+refused so far. Declare that intermediate state, give each participant the act by which
+it moves its own part of it — advocating a level, resisting one, signalling a position,
+committing, withholding agreement, acting unilaterally on what it alone controls — and
+let the party that performs the final act read it. An affordance whose only change is to
+set the state the terminal reads IS the answer rather than a route to it: the world then
+contains one decision, however many names are standing around it.
+
+PARTICIPANTS MUST BE ABLE TO TELL EACH OTHER. A world whose occupants cannot communicate
+is not a model of a social situation. Where two or more entities decide, at least one of
+them must hold an affordance that carries information TO another — a
+{"op":"send","target":"<what is communicated>","recipients":["<other parties>"],
+"detail":"..."} change, or a declared event whose participants include them — so a
+position can propagate: one party signals, another sees it, and can decide differently
+because of it. Model the channels the record shows are really there (a meeting, a
+statement, a notified decision), not invented back-channels."""
 
 
 def _plan_prompt(
@@ -350,6 +447,7 @@ def _plan_prompt(
     evidence: str,
     *,
     checklist: str = "",
+    brief: str = "",
     extra_instruction: str = "",
     prior_plan: dict[str, Any] | None = None,
     corrections: list[str] | None = None,
@@ -363,6 +461,7 @@ def _plan_prompt(
         f"QUESTION: {question}",
         f"as_of: {as_of.isoformat()}   horizon: {horizon.isoformat()}",
         f"EVIDENCE (id | proposition = value [meta]):\n{evidence}",
+        brief,
         (
             "WHAT VERIFIED EVIDENCE CONTAINS. Every causally material item below must "
             "appear in the plan — as an entity, state, process, uncertainty, or a "
@@ -411,7 +510,14 @@ _REVIEW_CHECKLIST = """Check, against the evidence only:
     would removing it really change what it says it would?
 14. Is any excluded candidate's "why_immaterial" actually false on this evidence?
 15. Does any uncertainty alternative carry mass without carrying meaning — a filler
-    value, a residual label, a value the record never names?"""
+    value, a residual label, a value the record never names?
+16. Does every party in the world hold an act the record actually attributes to it — and
+    conversely, is any affordance an act the record never says that party takes? Both are
+    failures: a party that can do nothing is scenery, and an invented capability is a
+    fabricated actor.
+17. Can a position propagate? If two or more parties decide, is there a real channel by
+    which one learns what another has done — or does each decide in isolation while the
+    outcome rests on one party's single act?"""
 
 
 def _review_prompt(
@@ -472,6 +578,7 @@ def _call_planner(
     evidence: str,
     *,
     checklist: str = "",
+    brief: str = "",
     extra_instruction: str,
     prior: dict[str, Any] | None,
     corrections: list[str] | None,
@@ -486,6 +593,7 @@ def _call_planner(
                 horizon,
                 evidence,
                 checklist=checklist,
+                brief=brief,
                 extra_instruction=extra_instruction,
                 prior_plan=prior,
                 corrections=corrections,
@@ -555,6 +663,7 @@ def semantic_compile_live(
 
     evidence = render_evidence(view)
     checklist = evidence_checklist(view, as_of=as_of, horizon=horizon)
+    brief = participant_brief(view)
     known = frozenset(c.id for c in view.available())
     responses: list[Any] = []
 
@@ -568,6 +677,7 @@ def semantic_compile_live(
             horizon,
             evidence,
             checklist=checklist,
+            brief=brief,
             extra_instruction=extra_instruction,
             prior=prior,
             corrections=corrections,
@@ -586,6 +696,7 @@ def semantic_compile_live(
                 horizon,
                 evidence,
                 checklist=checklist,
+                brief=brief,
                 extra_instruction=extra_instruction,
                 prior=raw,
                 corrections=[f"fix the plan's shape: {e}" for e in exc.errors[:12]],

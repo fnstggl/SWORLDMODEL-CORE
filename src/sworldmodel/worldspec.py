@@ -105,6 +105,239 @@ def true_expr() -> Expr:
 
 
 # ---------------------------------------------------------------------------
+# Structural monotonicity of an expression
+# ---------------------------------------------------------------------------
+#
+# WHY THIS IS COMPUTED AND NEVER DECLARED. The runtime has one guard that refuses to
+# report a resolved outcome for a branch that stopped before its schedule was empty:
+# reporting one would claim we watched the process finish when we stopped watching.
+# That reasoning is correct for `field('deliveries') > 400000` — more simulation
+# genuinely could move the number — and wrong for `event_count(X) > 0`, where the
+# events already happened and no further simulation can un-happen them. The whole
+# distinction is *monotonicity*, and the only safe place to get it from is the shape of
+# the expression itself. A `monotone: true` flag on a compiled world would be the same
+# shape as `terminal_sensitivity` (FD-36): self-declared by the planner, checked in one
+# direction, and evaded by declaring the value that nothing tests.
+#
+# The direction of a sub-expression is how its VALUE may move as the world evolves:
+#
+#   MONOTONE_UP      never decreases (for booleans: False may become True, never back)
+#   MONOTONE_DOWN    never increases
+#   MONOTONE_FIXED   never changes
+#   MONOTONE_UNKNOWN anything
+#
+# Only two things in this world model are structurally append-only: the record
+# collections (``world.apply`` only ever ``.append``s to them) and the event history
+# (an applied event is never removed and its status never leaves APPLIED). Everything
+# else — fields, resources, document fields, the stage, the clock — is rewritable, so
+# every expression that reads one is UNKNOWN and keeps the conservative behaviour.
+#
+# Deliberate carve-outs, each of which costs only conservatism:
+#   * ``sum`` is UNKNOWN even over an append-only collection: a negative summand makes
+#     an append-only total fall, and nothing here can know the sign.
+#   * ``multiply``/``divide``/``abs`` are UNKNOWN: a sign flip inverts the direction.
+#   * ``now``/``stage`` are UNKNOWN, so the temporal operators are too. The clock does
+#     advance monotonically, but nothing this analysis exists for needs it, and a
+#     direction that has to be right for banking to be sound is not worth widening for
+#     a case nobody has.
+#   * ``equals``/``not_equals``/``contains`` are UNKNOWN: a count passing through 3
+#     satisfies ``equals(count, 3)`` on the way and falsifies it immediately after.
+
+MONOTONE_UP = "non_decreasing"
+MONOTONE_DOWN = "non_increasing"
+MONOTONE_FIXED = "fixed"
+MONOTONE_UNKNOWN = "unknown"
+
+# Operators that read state the world may rewrite. A ``where`` predicate containing one
+# is not a property of the record in front of it — it can disqualify records that
+# already matched — so the aggregate over it is not append-only either.
+_MUTABLE_READ_OPS = frozenset(
+    {
+        "field",
+        "stage",
+        "now",
+        "resource",
+        "document_field",
+        "count",
+        "sum",
+        "values",
+        "exists",
+        "event_count",
+    }
+)
+
+# The operators a ``where`` predicate may use and still be a pure function of one
+# record. A whitelist, not a blacklist: an operator this analysis has never heard of
+# must not be assumed harmless.
+_RECORD_LOCAL_OPS = frozenset(
+    {
+        "const",
+        "item",
+        "horizon",
+        "as_of",
+        "equals",
+        "not_equals",
+        "greater_than",
+        "less_than",
+        "greater_or_equal",
+        "less_or_equal",
+        "contains",
+        "and",
+        "or",
+        "not",
+        "all",
+        "any",
+        "before",
+        "after",
+        "duration",
+        "add",
+        "subtract",
+        "multiply",
+        "divide",
+        "min",
+        "max",
+        "abs",
+        "round",
+    }
+)
+
+# The append-only aggregates, and the term namespace each one grows out of. The
+# namespace matches ``world_compiler._expr_terms`` so a banked cause and the
+# compile-time producer gate name the same thing the same way.
+_APPEND_ONLY_AGGREGATES = {"count": "collection", "exists": "collection", "event_count": "event"}
+
+
+def expression_monotonicity(expr: Any) -> str:
+    """Which way this expression's value can move as the world evolves.
+
+    Total and conservative: anything not proven to move in one direction is
+    ``MONOTONE_UNKNOWN``. A bare literal (an ``args`` entry that is not an
+    :class:`Expr`) is ``MONOTONE_FIXED``.
+    """
+
+    if not isinstance(expr, Expr):
+        return MONOTONE_FIXED
+    op, args = expr.op, expr.args
+
+    if op in ("const", "horizon", "as_of"):
+        return MONOTONE_FIXED
+
+    if op in _APPEND_ONLY_AGGREGATES:
+        # The collection/event-type being aggregated must be a compile-time literal.
+        # ``count(field('which_list'))`` counts a DIFFERENT list once the field moves,
+        # so its growth is not the collection's growth.
+        if not args or _literal_name(args[0]) is None:
+            return MONOTONE_UNKNOWN
+        where = args[1] if len(args) > 1 else None
+        return MONOTONE_UP if _record_local(where) else MONOTONE_UNKNOWN
+
+    # ``and``/``or`` are monotone INCREASING in every argument, so they carry a common
+    # direction through and destroy a mixed one.
+    if op in ("and", "or"):
+        return _combine([expression_monotonicity(a) for a in args])
+
+    if op == "not":
+        return _invert(expression_monotonicity(args[0])) if args else MONOTONE_UNKNOWN
+
+    # Comparison: increasing in the side that must be larger, decreasing in the other.
+    # This is where direction is won or lost — ``count(x) > 0`` is monotone toward YES
+    # and ``count(x) < 3`` is monotone toward NO, and they differ only here.
+    if op in ("greater_than", "greater_or_equal"):
+        if len(args) < 2:
+            return MONOTONE_UNKNOWN
+        return _combine(
+            [expression_monotonicity(args[0]), _invert(expression_monotonicity(args[1]))]
+        )
+    if op in ("less_than", "less_or_equal"):
+        if len(args) < 2:
+            return MONOTONE_UNKNOWN
+        return _combine(
+            [_invert(expression_monotonicity(args[0])), expression_monotonicity(args[1])]
+        )
+
+    # Arithmetic that cannot flip a direction whatever the operands' signs.
+    if op in ("add", "min", "max"):
+        return _combine([expression_monotonicity(a) for a in args]) if args else MONOTONE_UNKNOWN
+    if op == "subtract":
+        if not args:
+            return MONOTONE_UNKNOWN
+        return _combine(
+            [expression_monotonicity(args[0])]
+            + [_invert(expression_monotonicity(a)) for a in args[1:]]
+        )
+
+    return MONOTONE_UNKNOWN
+
+
+def monotone_sources(expr: Any) -> tuple[str, ...]:
+    """The append-only terms an expression's growth actually rests on.
+
+    Namespaced ``collection:<name>`` / ``event:<type>``, matching the compiler's term
+    vocabulary. Only aggregates this analysis proved append-only are listed, so the
+    result is exactly the set of things a caller can go looking for a cause in.
+    """
+
+    out: set[str] = set()
+
+    def walk(node: Any) -> None:
+        if not isinstance(node, Expr):
+            return
+        space = _APPEND_ONLY_AGGREGATES.get(node.op)
+        if space is not None and expression_monotonicity(node) == MONOTONE_UP:
+            name = _literal_name(node.args[0])
+            if name:
+                out.add(f"{space}:{name}")
+        for arg in node.args:
+            walk(arg)
+
+    walk(expr)
+    return tuple(sorted(out))
+
+
+def _literal_name(arg: Any) -> str | None:
+    """The compile-time string an argument names, or None if the world decides it."""
+
+    if isinstance(arg, str):
+        return arg or None
+    if isinstance(arg, Expr) and arg.op == "const" and arg.args:
+        value = arg.args[0]
+        return str(value) if isinstance(value, str) and value else None
+    return None
+
+
+def _record_local(where: Any) -> bool:
+    """Whether a ``where`` predicate reads only the record in front of it."""
+
+    if where is None or not isinstance(where, Expr):
+        return True  # absent, or a bare literal
+    if where.op in _MUTABLE_READ_OPS or where.op not in _RECORD_LOCAL_OPS:
+        return False
+    return all(_record_local(a) for a in where.args)
+
+
+def _combine(directions: list[str]) -> str:
+    """The direction of a function that is monotone increasing in every argument."""
+
+    if any(d == MONOTONE_UNKNOWN for d in directions):
+        return MONOTONE_UNKNOWN
+    if all(d == MONOTONE_FIXED for d in directions):
+        return MONOTONE_FIXED
+    if all(d in (MONOTONE_UP, MONOTONE_FIXED) for d in directions):
+        return MONOTONE_UP
+    if all(d in (MONOTONE_DOWN, MONOTONE_FIXED) for d in directions):
+        return MONOTONE_DOWN
+    return MONOTONE_UNKNOWN
+
+
+def _invert(direction: str) -> str:
+    if direction == MONOTONE_UP:
+        return MONOTONE_DOWN
+    if direction == MONOTONE_DOWN:
+        return MONOTONE_UP
+    return direction
+
+
+# ---------------------------------------------------------------------------
 # Effect — one safe universal world operation with (possibly bound) parameters
 # ---------------------------------------------------------------------------
 

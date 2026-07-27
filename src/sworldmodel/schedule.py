@@ -28,6 +28,7 @@ quietly completed.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any
@@ -52,6 +53,49 @@ VALID_ORIGINS = frozenset({ORIGIN_PROCESS, ORIGIN_EXTERNAL, ORIGIN_CONSEQUENCE, 
 # ``(at, microstep)`` and the winner fell to content-hash order of entry ids: two
 # spelled-differently-but-equivalent compiled worlds produced opposite branch states.
 KIND_SCENARIO_RELEASE = "scenario_release_due"
+
+
+# ---------------------------------------------------------------------------
+# How many actor calls a world of this size, over a window of this length, may spend
+# ---------------------------------------------------------------------------
+#
+# The bound lives here because it is a property of the branch's *window*: the runtime
+# advances event to event over a real calendar, and how much can legitimately happen in
+# that window scales with how long it is and how many people are in it. A flat constant
+# gave a nine-participant world over ten weeks exactly the budget of a two-participant
+# world over two weeks (`artifacts/ab/individual_semantic` and
+# `artifacts/phase2/geopolitical2` are both nine- and two-participant worlds that hit
+# the same 80), which is not a bound on the world, it is a bound on nothing in
+# particular.
+#
+# These are POLICY, not a model of behaviour. Nothing here predicts how often a person
+# decides — invocation count is an output of the trajectory, and an actor that nothing
+# reaches is never invoked at all. They are the point past which we would rather report
+# an incomplete run than keep spending model calls, and reaching one is a statement
+# about the simulator, never about the world.
+ACTOR_CALLS_PER_ACTOR_PER_WEEK = 4
+
+# The floor is the historical flat budget. Keeping it as the floor rather than replacing
+# it means no world gets *less* than it had: the change can only give a bigger world
+# more room, never take room from a small one.
+ACTOR_CALLS_FLOOR = 80
+
+# The outermost stop. A compile that would ask for tens of thousands of model calls per
+# branch has a defect the budget should not fund.
+ACTOR_CALLS_CEILING = 1000
+
+
+def actor_call_budget(*, participants: int, horizon_days: float) -> int:
+    """The actor-call bound for a world of ``participants`` people over ``horizon_days``.
+
+    Scales with participants × horizon, floored at the historical flat budget and capped.
+    A window shorter than a week still counts as a week: a two-day question with nine
+    participants is a dense two days, not a fractional one.
+    """
+
+    weeks = max(1.0, horizon_days / 7.0)
+    scaled = math.ceil(max(0, participants) * weeks * ACTOR_CALLS_PER_ACTOR_PER_WEEK)
+    return max(ACTOR_CALLS_FLOOR, min(ACTOR_CALLS_CEILING, int(scaled)))
 
 
 def _ordering_class(entry: ScheduledEntry) -> int:

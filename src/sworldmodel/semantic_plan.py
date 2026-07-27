@@ -47,6 +47,12 @@ STATE_TYPES = ("quantity", "category", "boolean", "text")
 PROCESS_KINDS = ("actor_moment", "operational", "scheduled_release")
 VISIBILITIES = ("public", "private")
 
+# The structural types that name a PARTY — something with interests that can hold a
+# position and take an act. The remainder ("market", "system", "object") name mechanisms:
+# a world moves them, they do not decide. The distinction is what lets the society gates
+# ask "can this party act?" of Saudi Arabia and not of the Strait of Hormuz.
+AGENT_STRUCTURAL_TYPES = ("person", "organization", "coalition", "institution", "population")
+
 # What KIND of thing a state is, independent of the datatype it is stored in. The
 # vocabulary had only datatypes, so a physical quantity and a thermometer reading were
 # the same object and the only way to change either was bare arithmetic on a field — no
@@ -133,6 +139,8 @@ SEMANTIC_DEFECTS = (
     "ZERO_ACTOR_WORLD_UNJUSTIFIED",
     "ZERO_ACTOR_CLAIM_CONTRADICTED",
     "DECORATIVE_ACTOR",
+    "INERT_PARTICIPANT",
+    "NO_PARTICIPANT_CHANNEL",
     "REPRESENTATION_RECORD_INCOMPLETE",
     "UNCERTAINTY_ALTERNATIVE_UNDESCRIBED",
     "DEGENERATE_FILLER_ALTERNATIVE",
@@ -1624,6 +1632,150 @@ def _actor_admissibility_errors(plan: SemanticPlan, cited: Any) -> list[str]:
     return errors
 
 
+def _event_audience(ev: SemanticEvent, deciders: set[str]) -> set[str]:
+    """Who a declared event reaches: its named participants, or everyone if it is a
+    public event that names none.
+
+    Mirrors what lowering actually emits — participants become the effect's ``to`` list,
+    and a public event without them is a broadcast — so a check written here and the
+    delivery the runtime performs cannot drift apart.
+    """
+
+    audience = {who for _role, who in ev.participants}
+    if not audience and ev.visibility == "public":
+        return set(deciders)
+    return audience
+
+
+def _information_reach(plan: SemanticPlan) -> dict[str, set[str]]:
+    """Which entities each actor's own acts carry information to.
+
+    Unconditional, unlike the reachability walk inside
+    :func:`_actor_admissibility_errors`: that one asks whether an actor who cannot touch
+    the terminal at least reaches somebody who can, so it stops looking at an affordance
+    the moment that affordance writes the terminal itself. This one asks a different
+    question — whether the world contains a channel between participants at all — and an
+    act that both announces a decision and tells the others about it is exactly such a
+    channel.
+    """
+
+    deciders = {e.name for e in plan.entities if e.decides}
+    reach: dict[str, set[str]] = {}
+    events_by_name = {ev.name: ev for ev in plan.events}
+    for a in plan.affordances:
+        for c in a.changes:
+            if c.op == "send":
+                reach.setdefault(a.actor, set()).update(set(c.recipients) - {a.actor})
+            elif c.op == "record_event":
+                ev = events_by_name.get(c.target)
+                if ev is not None:
+                    reach.setdefault(a.actor, set()).update(
+                        _event_audience(ev, deciders) - {a.actor}
+                    )
+    return reach
+
+
+def _claims_a_multi_party_situation(plan: SemanticPlan) -> bool:
+    """Whether the plan itself says this outcome turns on more than one party.
+
+    Read off the plan's own two declarations and nothing else: ``expected_participants``
+    (how many decision-relevant actors the evidence names) and ``represents_count`` on a
+    deciding entity (how many real members one object stands for). Both are the planner's
+    own claims, so a world that says it is settled by one party is never judged against a
+    society it never claimed to be — which is the whole point. If the evidence really
+    supports one decider, one decider stays legal here.
+    """
+
+    if (plan.expected_participants or 0) >= 2:
+        return True
+    return any(e.decides and (e.represents_count or 0) >= 2 for e in plan.entities)
+
+
+def _society_errors(plan: SemanticPlan) -> list[str]:
+    """W4 / W5: a world that says it has several parties in it must be a society.
+
+    A live OPEC+ compile produced nine entities and one action. That action set the one
+    boolean the terminal read, so the eight other parties — including the two whose
+    disagreement decides real quota policy — could not advocate, resist, defect, stall or
+    bargain, and none of them could tell another anything. The world had the *form* of a
+    many-sided situation and the *arithmetic* of a single switch, and every gate passed
+    it: the existing gates all ask about the entities that DECIDE, and this world said
+    only one of them did while separately declaring eight decision-relevant participants
+    and putting represents_count 8 on the aggregate that absorbed them.
+
+    That contradiction is what these two defects are keyed to, and they are keyed to
+    nothing else:
+
+    INERT_PARTICIPANT — the plan declares a many-party situation, and at most one party
+    in it can act. The others are names in the entity list. The correction is never
+    "invent an act": an affordance the record does not support is a fabricated actor, and
+    that is the worse failure of the two. It is to give each party the act the record
+    does attribute to it, or to move it out of the world into excluded_candidates, where
+    an omission has to be argued for.
+
+    NO_PARTICIPANT_CHANNEL — the plan declares a many-party situation, two or more
+    parties decide, and not one of them can tell another anything. Positions cannot
+    propagate, so nobody can react to what anybody else did and the trajectory is several
+    monologues sharing a clock.
+
+    Both are conditioned on the plan's OWN claim to be multi-party, because a gate that
+    refuses correct worlds is worse than the hole it closes. A world genuinely settled by
+    one decider (a harbormaster with sole authority), a mechanism modelled as an
+    institution (a recharge district whose canals a process runs), an audience for a
+    private briefing, and a justified actor-free world all state one participant or none
+    — and none of them is judged here at all.
+    """
+
+    errors: list[str] = []
+    if not _claims_a_multi_party_situation(plan):
+        return errors
+
+    deciders = {e.name for e in plan.entities if e.decides}
+    acting = {a.actor for a in plan.affordances}
+    parties = [
+        e
+        for e in plan.entities
+        if e.structural_type in AGENT_STRUCTURAL_TYPES
+        and e.representation_scale != "external_process"
+    ]
+    inert = [e.name for e in parties if e.name not in acting]
+    if len(parties) >= 2 and len([e for e in parties if e.name in acting]) <= 1:
+        errors.append(
+            f"INERT_PARTICIPANT: this plan declares an outcome several parties bear on, "
+            f"and then gives {sorted(inert)} nothing to do — they hold no affordance at "
+            "all, so they cannot advocate, resist, commit, withhold or act on what they "
+            "themselves control, and the answer rests on one party's own act. A world "
+            "shaped like a many-sided situation whose arithmetic is a single switch "
+            "reads as multi-party to every gate downstream while containing one "
+            "decision. Correction boundary: give each of these parties the act its own "
+            "role really affords — traceable to what the record says about that party by "
+            "name — and the intermediate state that act moves; or, where the record shows "
+            "a party takes no act bearing on this outcome, remove it from the world and "
+            "record it under excluded_candidates with why its removal cannot change the "
+            "answer; or, if this outcome genuinely IS one party's decision, say so by "
+            "lowering expected_participants and dropping the aggregate represents_count. "
+            "Do NOT invent an affordance to fill a slot: a capability the evidence does "
+            "not support is a fabricated actor, which is worse than a missing one"
+        )
+
+    if len(deciders) >= 2:
+        reach = _information_reach(plan)
+        if not any(targets & (deciders - {actor}) for actor, targets in reach.items()):
+            errors.append(
+                f"NO_PARTICIPANT_CHANNEL: {sorted(deciders)} all decide, and not one of "
+                "them can tell another anything — no affordance sends information to "
+                "another party, and none records an event that reaches one. Nothing any "
+                "participant does can be observed by anyone who could respond to it, so "
+                "no position propagates, no coalition forms and nobody changes their "
+                "mind: the trajectory is several monologues that happen to share a "
+                "clock. Correction boundary: give at least one participant the act by "
+                "which its position actually reaches the others — a 'send' change naming "
+                "them as recipients, or a declared event whose participants include them "
+                "— modelling the channel the record shows is really there"
+            )
+    return errors
+
+
 def _relabelled_from(plan: SemanticPlan, state: str, seen: frozenset[str]) -> set[str] | None:
     """What ``state`` ultimately rests on if it is only a rename, or None if it is built.
 
@@ -2948,6 +3100,7 @@ def validate_semantic_plan(
     errors += _representation_record_errors(plan)
     errors += _alternative_quality_errors(plan, cited)
     errors += _actor_admissibility_errors(plan, cited)
+    errors += _society_errors(plan)
     errors += _one_step_operational_errors(plan, cited)
     errors += _straddling_errors(plan, cited)
     return errors

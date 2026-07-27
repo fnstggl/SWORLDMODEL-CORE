@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 
-from .actors import ActorState, OngoingAction
+from .actors import ACTION_FAILED, ACTION_REJECTED, ActorState, OngoingAction
 from .effects import EffectExecutor
 from .errors import UndeterminedExpressionError
 from .expressions import evaluate
@@ -319,7 +319,7 @@ class ActionExecutor:
                 self._note(
                     world,
                     actor,
-                    "action_rejected",
+                    ACTION_REJECTED,
                     {
                         "mode": "novel_action",
                         "reason": resolution.reason,
@@ -343,6 +343,14 @@ class ActionExecutor:
         )
 
     # -- refusals ---------------------------------------------------------------
+    #
+    # A refusal and a failure are the two things the environment says *about* an actor's
+    # own attempt, and they are the only events carrying an actor's id that are genuinely
+    # news to that actor: it did not know its intention would be turned down, or that the
+    # world would move out from under an action already begun. They are minted from
+    # ``actors.ACTION_REJECTED``/``ACTION_FAILED``, which is the same pair
+    # ``actors.is_self_echo`` exempts from self-echo suppression — one definition, so the
+    # verdict can never quietly become the echo the wake filter drops.
 
     def _reject(
         self, world: WorldState, actor: ActorState, action_id: str, reason: str
@@ -350,7 +358,7 @@ class ActionExecutor:
         ev = self._note(
             world,
             actor,
-            "action_rejected",
+            ACTION_REJECTED,
             {"mode": "compiled_action", "action_id": action_id, "reason": reason},
         )
         return TurnOutcome(
@@ -364,7 +372,7 @@ class ActionExecutor:
     def _fail(
         self, world: WorldState, actor: ActorState, action_id: str, reason: str
     ) -> TurnOutcome:
-        ev = self._note(world, actor, "action_failed", {"action_id": action_id, "reason": reason})
+        ev = self._note(world, actor, ACTION_FAILED, {"action_id": action_id, "reason": reason})
         return TurnOutcome(
             events=[ev], status="failed", reason=reason, mode="compiled_action", action_id=action_id
         )

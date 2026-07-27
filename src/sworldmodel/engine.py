@@ -45,7 +45,7 @@ from .errors import GatewayError, UndeterminedExpressionError
 from .executor import KIND_ACTION_COMPLETION, ActionExecutor
 from .expressions import evaluate
 from .gateway import ModelGateway
-from .models import BranchOutcome, BranchWeight, Event, TrajectorySummary, Visibility
+from .models import BranchOutcome, BranchWeight, Event, EventStatus, TrajectorySummary, Visibility
 from .schedule import (
     KIND_SCENARIO_RELEASE,
     ORIGIN_ACTOR_PLAN,
@@ -57,7 +57,18 @@ from .schedule import (
 )
 from .uncertainty import Scenario, weights_grounded
 from .world import Delivery, WorldState
-from .worldspec import Effect, ProcessNode, TerminalExpression, WakeRule, WorldSpec
+from .worldspec import (
+    MONOTONE_DOWN,
+    MONOTONE_FIXED,
+    MONOTONE_UP,
+    Effect,
+    ProcessNode,
+    TerminalExpression,
+    WakeRule,
+    WorldSpec,
+    expression_monotonicity,
+    monotone_sources,
+)
 
 # Structural schedule-entry kinds. These are runtime mechanics, not domain event types:
 # what a "message" or a "vote" is lives entirely in compiled data.
@@ -159,16 +170,89 @@ def wake_cause_class(wake_reason: str) -> str:
     return WAKE_CAUSE_UNCLASSIFIED
 
 
+# A branch either ran until the world had nothing left to do inside the window, or WE
+# stopped it. The second is not uncertainty about the world; it is a fact about this
+# simulator, and it must be priced as one everywhere downstream.
+EXECUTION_COMPLETE = "complete"
+EXECUTION_INCOMPLETE = "EXECUTION_INCOMPLETE"
+
+# Why a branch's mass never reached an answer. ``WORLD_UNDETERMINED`` is honest
+# uncertainty — the world ran to the end of its own schedule and the terminal still
+# could not be read. ``EXECUTION_INCOMPLETE`` is a failed run.
+UNRESOLVED_WORLD_UNDETERMINED = "WORLD_UNDETERMINED"
+
+# Budget scaling (see RunBudget.for_world).
+_ACTOR_CALLS_FLOOR = 80
+_ACTOR_CALLS_CEILING = 400
+_ROUNDS_PER_ACTOR_PER_WEEK = 3
+_ACTOR_RESPONSE_ALLOWANCE = 8
+_EVENTS_PER_ACTOR_CALL = 5
+_BATCHES_PER_ACTOR_CALL = 6
+
+
 @dataclass(frozen=True)
 class RunBudget:
     """Hard stops that bound a trajectory. Reaching one *ends* the branch and marks it
     unresolved with the reason; it never forces a decision, inserts a default action or
-    resolves a terminal that the world did not reach."""
+    resolves a terminal that the world did not reach.
+
+    The defaults are the FLOOR, not the budget. A flat ceiling is a statement that every
+    world costs the same to simulate, and it is false in the one direction that matters:
+    a nine-participant world over ten weeks got the same 80 actor calls as a
+    two-participant world over two weeks, so the budget — not the world — decided who
+    got to act. Callers that do not pin a budget get :meth:`for_world`.
+    """
 
     max_events: int = 600
-    max_actor_calls: int = 80
+    max_actor_calls: int = _ACTOR_CALLS_FLOOR
     max_batches: int = 400
     no_progress_batches: int = 8
+
+    @classmethod
+    def for_world(cls, *, participants: int, horizon_days: float) -> RunBudget:
+        """A budget sized to the world, not to the last world anybody looked at.
+
+        The formula, and why each term is there:
+
+        ``participants x (ROUNDS_PER_WEEK x weeks + RESPONSE_ALLOWANCE)``
+
+        * **per participant**, because an actor that never gets an invocation is a
+          participant the run has silently deleted. The budget must be able to reach
+          every one of them, and the roster is known before the run starts.
+        * **rounds per week x weeks**, because occasions to act arrive with the calendar:
+          a ten-week window genuinely offers more of them than a two-week window. Three
+          per week is deliberately below any plausible real cadence — it is a budget,
+          not a schedule, and nothing forces those invocations to be used.
+        * **a flat response allowance**, because acting is not the only reason to be
+          woken: an actor also has to be able to answer what reaches it. This is the
+          term that a purely calendar-derived budget lacks, and its absence is what made
+          a busy exchange starve the participants who had not spoken yet.
+
+        The result is clamped to ``[80, 400]``. The floor is the old flat value, so no
+        world is ever given LESS than it had. The ceiling is not a safety margin — it is
+        the point past which "we ran out of calls" is the correct diagnosis and buying
+        more of them would only hide it. Exhaustion is reported as
+        ``EXECUTION_INCOMPLETE``, and a run carrying material incomplete mass is a
+        failed run rather than a forecast.
+
+        ``max_events`` and ``max_batches`` scale with the call budget for one reason:
+        raising the actor-call ceiling alone moves the stop from one budget to the next
+        and changes nothing a reader can see. Measured on the multiparty run, an
+        invocation that acts costs about two ledger events (start, completion, its
+        effects, the notices) — five is headroom, six batches likewise.
+        """
+
+        weeks = max(1.0, horizon_days / 7.0)
+        per_actor = _ROUNDS_PER_ACTOR_PER_WEEK * weeks + _ACTOR_RESPONSE_ALLOWANCE
+        calls = int(max(1, participants) * per_actor)
+        calls = max(_ACTOR_CALLS_FLOOR, min(_ACTOR_CALLS_CEILING, calls))
+        defaults = cls()
+        return cls(
+            max_events=max(defaults.max_events, calls * _EVENTS_PER_ACTOR_CALL),
+            max_actor_calls=calls,
+            max_batches=max(defaults.max_batches, calls * _BATCHES_PER_ACTOR_CALL),
+            no_progress_batches=defaults.no_progress_batches,
+        )
 
 
 @dataclass(frozen=True)
@@ -177,6 +261,45 @@ class TerminalEvaluation:
     outcome: str | None  # "YES" | "NO" | None
     reason: str
     highlights: tuple[tuple[str, str], ...] = ()
+
+
+@dataclass(frozen=True)
+class BankedTerminal:
+    """A monotone terminal, recorded at the instant the world satisfied it.
+
+    A banked YES is final. The claim it makes is narrow and provable: the terminal was
+    TRUE at ``at``, its expression is structurally monotone in the satisfying direction
+    (see :func:`sworldmodel.worldspec.expression_monotonicity`), and the terms it grew
+    out of are append-only — so nothing the rest of the simulation could have done, and
+    nothing that stopping early prevented, can make it false again.
+
+    It carries its own cause because a bank that cannot say what made it true is
+    indistinguishable from an assertion: ``caused_by_event_ids`` are the ledger events
+    that wrote the append-only terms in ``sources``.
+    """
+
+    at: str
+    outcome: str  # always "YES"
+    sources: tuple[str, ...]
+    caused_by_event_ids: tuple[str, ...]
+    cause_count: int
+    world_version: int
+    batches_elapsed: int
+    actor_calls_elapsed: int
+    reason: str
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "at": self.at,
+            "outcome": self.outcome,
+            "sources": list(self.sources),
+            "caused_by_event_ids": list(self.caused_by_event_ids),
+            "cause_count": self.cause_count,
+            "world_version": self.world_version,
+            "batches_elapsed": self.batches_elapsed,
+            "actor_calls_elapsed": self.actor_calls_elapsed,
+            "reason": self.reason,
+        }
 
 
 @dataclass
@@ -218,6 +341,20 @@ class BranchDiagnostics:
     stop_reason: str = "schedule exhausted"
     pending_beyond_horizon: list[dict[str, Any]] = field(default_factory=list)
     unfired_in_horizon: int = 0
+    # W2. ``execution_status`` is EXECUTION_COMPLETE only when the branch ran until the
+    # world had nothing further scheduled inside the window. Every other stop — any
+    # budget, the no-progress guard, a provider failure — is EXECUTION_INCOMPLETE and
+    # names the limit we hit in ``execution_limit``. ``unresolved_class`` is the seam
+    # aggregation prices: "" when the branch resolved, otherwise EXECUTION_INCOMPLETE
+    # (our failure) or UNRESOLVED_WORLD_UNDETERMINED (genuine uncertainty).
+    execution_status: str = EXECUTION_COMPLETE
+    execution_limit: str = ""
+    unresolved_class: str = ""
+    # W1. The monotone terminal this branch banked, if any, and the record of a bank
+    # that the horizon evaluation went on to contradict — which is a defect in the
+    # monotonicity analysis and must never be silent.
+    banked_terminal: BankedTerminal | None = None
+    bank_contradicted: str = ""
 
 
 @dataclass
@@ -230,6 +367,20 @@ class RunResult:
     truncated_mass: float
     truncated_reason: str
     diagnostics: dict[str, BranchDiagnostics] = field(default_factory=dict)
+    # The branch weight this run could not simulate to the end of its own schedule. This
+    # is not unresolved mass and it must never be averaged into one: it is the share of
+    # the world we did not manage to run. A run carrying material incomplete mass is a
+    # failed run, not a forecast; where the threshold sits is the caller's decision.
+    #
+    # The two numbers are different questions and a gate wants both. ``..._mass`` is
+    # "how much of this world did we fail to run" — a reliability statement, true even
+    # of a branch whose answer is nonetheless known because a monotone terminal banked
+    # it. ``..._unresolved_mass`` is the subset that has no answer AND has none because
+    # of us: mass that today flows into bounds and suppression dressed as uncertainty
+    # about reality, when it is nothing of the kind.
+    execution_incomplete_mass: float = 0.0
+    execution_incomplete_unresolved_mass: float = 0.0
+    execution_incomplete_branches: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass
@@ -262,9 +413,19 @@ def run(
     concurrently. This is a wall-clock decision only: nothing about a trajectory depends
     on which other branches were running at the time, and results are assembled in
     scenario order so the output is identical either way.
+
+    A caller that does not pin a ``budget`` gets one sized to this world's roster and
+    window (:meth:`RunBudget.for_world`) rather than a flat constant. A pinned budget is
+    honoured exactly as given.
     """
 
-    budget = budget or RunBudget()
+    budget = budget or RunBudget.for_world(
+        participants=len(compiled.base_world.actors),
+        horizon_days=(
+            compiled.base_world.contract.horizon - compiled.base_world.contract.as_of
+        ).total_seconds()
+        / 86400.0,
+    )
     scenarios = list(compiled.scenario_set.scenarios)
     workers = max(1, min(max_concurrent_branches, len(scenarios)))
 
@@ -328,6 +489,11 @@ def run(
             world = _finalize(world, compiled.spec.terminal, effects, ledger, diag)
         except GatewayError as exc:
             diag.stop_reason = f"provider_failure: {exc}"
+            # A branch we could not finish because the provider was unreachable is the
+            # same statement as a branch we could not finish because we ran out of
+            # calls: the world did not fail to determine its answer, we failed to ask.
+            diag.execution_status = EXECUTION_INCOMPLETE
+            diag.execution_limit = "provider unreachable"
             return _BranchRun(
                 scenario,
                 world,
@@ -387,6 +553,26 @@ def run(
             )
             summaries.append(_summary(br.world, br.scenario))
 
+    # W2 — the two kinds of "no answer" are priced apart here, once, from the branch
+    # table and its diagnostics. ``unresolved_class`` is per-branch and is the seam
+    # aggregation reads; ``execution_incomplete_mass`` is the run-level fact that makes
+    # a run with too much of it a failed run rather than a wide forecast.
+    incomplete: list[tuple[str, str]] = []
+    incomplete_mass = 0.0
+    incomplete_unresolved_mass = 0.0
+    for br, outcome in zip(runs, branch_outcomes, strict=True):
+        diag = br.diagnostics
+        if diag.execution_status == EXECUTION_INCOMPLETE:
+            incomplete.append((br.scenario.scenario_id, diag.execution_limit or diag.stop_reason))
+            incomplete_mass += br.scenario.weight
+        if outcome.resolved:
+            diag.unresolved_class = ""
+        elif diag.execution_status == EXECUTION_INCOMPLETE:
+            diag.unresolved_class = EXECUTION_INCOMPLETE
+            incomplete_unresolved_mass += br.scenario.weight
+        else:
+            diag.unresolved_class = UNRESOLVED_WORLD_UNDETERMINED
+
     return RunResult(
         branch_outcomes=tuple(branch_outcomes),
         trajectory_summaries=tuple(summaries),
@@ -396,6 +582,8 @@ def run(
         truncated_mass=compiled.scenario_set.truncated_mass,
         truncated_reason=compiled.scenario_set.truncated_reason,
         diagnostics=diagnostics,
+        execution_incomplete_mass=incomplete_mass,
+        execution_incomplete_branches=tuple(incomplete),
     )
 
 
@@ -591,15 +779,25 @@ def _event_loop(
     last_digest = (world.state_digest(), world.time, world.information_digest())
     last_queued_here = world.schedule.pending_at(world.time)
 
+    # W1. The terminal is watched CONTINUOUSLY, not once at the end. The structural
+    # analysis runs once here — it depends only on the compiled expression — so a
+    # terminal that can never be banked costs the loop nothing at all.
+    watch = _bankable(spec.terminal)
+    _bank_monotone_terminal(world, spec.terminal, watch, diag)
+
     while True:
         if diag.batches >= budget.max_batches:
-            diag.stop_reason = f"batch budget exhausted ({budget.max_batches})"
+            _stop_on_budget(diag, f"batch budget exhausted ({budget.max_batches})", "max_batches")
             break
         if diag.events >= budget.max_events:
-            diag.stop_reason = f"event budget exhausted ({budget.max_events})"
+            _stop_on_budget(diag, f"event budget exhausted ({budget.max_events})", "max_events")
             break
         if sum(diag.actor_call_counts.values()) >= budget.max_actor_calls:
-            diag.stop_reason = f"actor-call budget exhausted ({budget.max_actor_calls})"
+            _stop_on_budget(
+                diag,
+                f"actor-call budget exhausted ({budget.max_actor_calls})",
+                "max_actor_calls",
+            )
             break
 
         schedule, batch = world.schedule.pop_batch(horizon=horizon)
@@ -627,6 +825,11 @@ def _event_loop(
             )
             produced.extend(evs)
         diag.events += len(produced)
+
+        # The moment the world satisfies a monotone terminal, that fact is banked. It
+        # is checked here — after the batch has been applied — so the instant recorded
+        # is the instant the world reached it, not the instant we happened to stop.
+        _bank_monotone_terminal(world, spec.terminal, watch, diag)
 
         # No progress means the world stops *changing*, not that it stops emitting.
         #
@@ -663,10 +866,12 @@ def _event_loop(
         if digest == last_digest and not draining:
             stale_batches += 1
             if stale_batches >= budget.no_progress_batches:
-                diag.stop_reason = (
+                _stop_on_budget(
+                    diag,
                     f"no progress: {stale_batches} consecutive batches left the world "
                     f"state unchanged ({len(produced)} event(s) in the last batch, none "
-                    "of which altered anything the world records)"
+                    "of which altered anything the world records)",
+                    "no_progress_batches",
                 )
                 break
         else:
@@ -677,7 +882,26 @@ def _event_loop(
         e.as_dict() for e in world.schedule.beyond_horizon(horizon=horizon)[:50]
     ]
     diag.unfired_in_horizon = world.schedule.pending_count(horizon=horizon)
+    if diag.unfired_in_horizon > 0 and diag.execution_status != EXECUTION_INCOMPLETE:
+        # Leaving in-horizon work unfired is the definition of not finishing, whatever
+        # the loop believed its reason for stopping was.
+        _stop_on_budget(diag, diag.stop_reason, "unfired in-horizon entries")
     return world
+
+
+def _stop_on_budget(diag: BranchDiagnostics, reason: str, limit: str) -> None:
+    """Record a stop that WE imposed.
+
+    Exhaustion used to be one more ``stop_reason`` string among several, indistinguishable
+    at a glance from the schedule running out — which is the one stop that means the
+    branch actually finished. The two say opposite things about the run, and only one of
+    them is about the world, so they are recorded as different things here rather than
+    left for a reader to tell apart by reading prose.
+    """
+
+    diag.stop_reason = reason
+    diag.execution_status = EXECUTION_INCOMPLETE
+    diag.execution_limit = limit
 
 
 def _merge_decisions(batch: tuple[ScheduledEntry, ...]) -> tuple[ScheduledEntry, ...]:
@@ -1699,6 +1923,111 @@ def _need_deadline_entries(actor: ActorState) -> list[ScheduledEntry]:
 # ---------------------------------------------------------------------------
 
 
+def _bankable(terminal: TerminalExpression) -> tuple[str, ...] | None:
+    """The append-only terms this terminal could be banked on, or None if it cannot be.
+
+    Three structural conditions, all computed from the compiled expression and none of
+    them declarable by whoever wrote it:
+
+    1. ``yes_when`` is monotone NON-DECREASING — once true, no further evolution of the
+       world can make it false. ``event_count(X) > 0`` qualifies; ``event_count(X) < 3``
+       is monotone the other way and must never be banked as a YES; ``field(x) > 4e5``
+       is not monotone at all and keeps the conservative behaviour.
+    2. ``unresolved_when`` is monotone NON-INCREASING — once the world is determinate,
+       it stays determinate. Without this a branch could bank while determinate and
+       finish indeterminate, and the bank would be asserting an answer over a world
+       that had gone back to not having one.
+    3. It rests on at least one append-only term. An expression that is monotone only
+       because it is constant has nothing to point at, and a bank that cannot name its
+       own cause is an assertion.
+    """
+
+    if expression_monotonicity(terminal.yes_when) != MONOTONE_UP:
+        return None
+    if expression_monotonicity(terminal.unresolved_when) not in (MONOTONE_DOWN, MONOTONE_FIXED):
+        return None
+    return monotone_sources(terminal.yes_when) or None
+
+
+def _bank_monotone_terminal(
+    world: WorldState,
+    terminal: TerminalExpression,
+    sources: tuple[str, ...] | None,
+    diag: BranchDiagnostics,
+) -> None:
+    """Record a monotone terminal at the instant the world satisfied it.
+
+    G1, in one branch of one real run: the agent chose the satisfying action on twenty
+    separate invocations, the actor-call budget ran out three scheduled events short of
+    the horizon, and the branch reported ``resolved=False``. The run published 0.0 from
+    the two branches that happened to finish. The system watched the answer happen
+    twenty times and published its opposite, because the terminal was read once, at the
+    end, on a trajectory that never got there.
+
+    A banked YES is final. Nothing here overrides the conservative behaviour for
+    anything else: the bank is only reachable through :func:`_bankable`, and it is only
+    taken when the world can also produce the events that caused it.
+    """
+
+    if sources is None or diag.banked_terminal is not None:
+        return
+    try:
+        if bool(evaluate(terminal.unresolved_when, world)):
+            return
+        if not bool(evaluate(terminal.yes_when, world)):
+            return
+    except UndeterminedExpressionError:
+        return
+
+    causes = _monotone_witnesses(world, sources)
+    if not causes:
+        # Satisfied, monotone — and nothing in this branch's ledger produced it. That is
+        # an initial condition, which ``pre_resolved`` already reports; it is not
+        # something this trajectory watched happen, so it is not banked.
+        return
+
+    named = ", ".join(sources)
+    diag.banked_terminal = BankedTerminal(
+        at=world.time.isoformat(),
+        outcome="YES",
+        sources=sources,
+        caused_by_event_ids=tuple(e.event_id for e in causes),
+        cause_count=len(causes),
+        world_version=world.version,
+        batches_elapsed=diag.batches,
+        actor_calls_elapsed=sum(diag.actor_call_counts.values()),
+        reason=(
+            f"the terminal was satisfied at {world.time.isoformat()} by {len(causes)} "
+            f"event(s) on append-only term(s) [{named}], and its expression cannot "
+            "decrease; no later truncation can un-happen them"
+        ),
+    )
+
+
+def _monotone_witnesses(world: WorldState, sources: tuple[str, ...]) -> tuple[Event, ...]:
+    """The ledger events that wrote the append-only terms a bank rests on.
+
+    Matching mirrors :meth:`WorldState.get_events` and the ``append_record`` path in
+    :meth:`WorldState.apply` exactly. If the two ever disagreed, a bank could name a
+    cause the evaluator never counted, or count one it could not name.
+    """
+
+    want_events = {t.split(":", 1)[1] for t in sources if t.startswith("event:")}
+    want_collections = {t.split(":", 1)[1] for t in sources if t.startswith("collection:")}
+    out: list[Event] = []
+    for ev in world.event_history:
+        if ev.status is not EventStatus.APPLIED:
+            continue
+        data = ev.payload_dict
+        wrote_event = ev.kind in want_events or str(data.get("event_type", "")) in want_events
+        wrote_record = (
+            ev.kind == "append_record" and str(data.get("collection", "")) in want_collections
+        )
+        if wrote_event or wrote_record:
+            out.append(ev)
+    return tuple(out)
+
+
 def _finalize(
     world: WorldState,
     terminal: TerminalExpression,
@@ -1710,22 +2039,65 @@ def _finalize(
     # horizon. This is the end of the question's window, not a jump over live events.
     world = world.with_time(world.contract.horizon)
     evaluation = evaluate_terminal(world, terminal)
+    banked = diag.banked_terminal
 
     # A branch that stopped with things still due to happen did not reach its end; it
     # was cut short. Reporting a resolved outcome for it would claim we watched the
     # process finish when we stopped watching, which is forced completion wearing the
     # terminal evaluator's clothes. The mass stays unresolved and widens the bounds.
-    if diag.unfired_in_horizon > 0 and evaluation.resolved:
+    #
+    # That reasoning is exactly right for `field('deliveries') > 400000`: more
+    # simulation genuinely could move the number, so an evaluation taken where we
+    # stopped is a claim about a process we did not watch. It is exactly WRONG for
+    # `event_count(X) > 0`. Truncation cannot un-happen twenty events that already
+    # happened, and refusing the answer there does not withhold a claim — it publishes
+    # the opposite one. The distinction is monotonicity, and it is computed from the
+    # expression's own structure (:func:`_bankable`), never declared by whoever wrote
+    # the world. A banked YES was watched happening, with the causing events named.
+    if diag.unfired_in_horizon > 0 and evaluation.resolved and banked is None:
         evaluation = TerminalEvaluation(
             resolved=False,
             outcome=None,
             reason=(
                 f"trajectory cut short with {diag.unfired_in_horizon} scheduled events "
                 f"still due before the horizon ({diag.stop_reason}); the process did not "
-                "run to its end, so its outcome is not known"
+                "run to its end, so its outcome is not known — the simulator stopped "
+                "before the world did, which is a failure of this run and not "
+                "uncertainty about the world"
             ),
             highlights=evaluation.highlights,
         )
+
+    if banked is not None:
+        if evaluation.resolved and evaluation.outcome == "YES":
+            evaluation = TerminalEvaluation(
+                resolved=True,
+                outcome="YES",
+                reason=f"{evaluation.reason}; banked at {banked.at}: {banked.reason}",
+                highlights=evaluation.highlights,
+            )
+        else:
+            # The monotonicity analysis said this could not come undone, and the world
+            # at the horizon disagrees. One of the two is wrong and it is not safe to
+            # guess which, so the branch resolves nothing and says precisely that. A
+            # check that can be wrong silently is a check that reads like an approval.
+            diag.bank_contradicted = (
+                f"banked YES at {banked.at} on [{', '.join(banked.sources)}] but the "
+                f"horizon evaluation says "
+                f"{evaluation.outcome if evaluation.resolved else 'unresolved'}"
+            )
+            evaluation = TerminalEvaluation(
+                resolved=False,
+                outcome=None,
+                reason=(
+                    "a monotone terminal banked at "
+                    f"{banked.at} is contradicted by the evaluation at the horizon "
+                    f"({evaluation.reason}); the monotonicity analysis and the world "
+                    "disagree, so this branch resolves nothing"
+                ),
+                highlights=evaluation.highlights,
+            )
+
     world = world.set_terminal(evaluation)
     ev = effects.raw_event(
         world,
@@ -1734,7 +2106,15 @@ def _finalize(
         payload={
             "event_type": "result_recorded",
             "text": evaluation.reason,
-            "data": {"outcome": evaluation.outcome or "unresolved", "stop": diag.stop_reason},
+            # The banked fact belongs in the trace, not only in the diagnostics: a
+            # forensic replay has to be able to see WHEN the answer became true and
+            # WHAT made it true without re-deriving either.
+            "data": {
+                "outcome": evaluation.outcome or "unresolved",
+                "stop": diag.stop_reason,
+                "execution_status": diag.execution_status,
+                "banked_terminal": banked.as_dict() if banked else None,
+            },
         },
         visibility=Visibility.PUBLIC,
     )

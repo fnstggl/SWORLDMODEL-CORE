@@ -423,8 +423,22 @@ def _lower_change(
     plan: SemanticPlan,
     stocks: dict[str, _Stock],
     flows: dict[str, Period],
+    *,
+    author: str = "",
 ) -> list[dict[str, Any]]:
-    """One universal semantic change → the existing effect operations."""
+    """One universal semantic change → the existing effect operations.
+
+    ``author`` is the semantic name of the entity performing this change when it belongs
+    to an affordance, and empty for a process occurrence, which the environment performs.
+    An audience is *who should learn of a thing*, and the author already knows: emitting
+    it re-delivers an act to the actor that just performed it, which the runtime then
+    counts as directed information and wakes them for. Diagnosis by ``runtime-convergence``,
+    reproduced live on a compiled world: a governor spent 79 of its 80 actor calls on
+    ``directed_information`` wakes, every one of them the echo of its own act, and the
+    branch died unresolved on budget with the terminal still due. ``world.observers_of``
+    already skips an actor for its own act *unless* it is in the audience — so this
+    lowering was defeating a guard the runtime already had.
+    """
 
     if c.op == "set":
         assert c.value is not None  # validator guarantees
@@ -485,8 +499,16 @@ def _lower_change(
             # private event whose participants lived only in `data` had an empty
             # audience, so visible_to returned False for everyone and the briefing
             # reached nobody, including its own participants. The participants ARE the
-            # audience, so they are emitted where delivery actually looks.
-            create["to"] = sorted({t.resolve("entity", who) for _, who in ev.participants})
+            # audience, so they are emitted where delivery actually looks — minus the
+            # one who performed the act, who does not need to be told what they just
+            # did. An event nobody but its author took part in therefore carries no "to"
+            # at all: its declared visibility still governs who can see it, and a private
+            # act whose only participant was its author genuinely informs nobody else.
+            audience = {t.resolve("entity", who) for _, who in ev.participants}
+            if author:
+                audience -= {t.resolve("entity", author)}
+            if audience:
+                create["to"] = sorted(audience)
         if ev.information_created:
             data["information_created"] = ev.information_created
         return [
@@ -499,12 +521,23 @@ def _lower_change(
             },
         ]
     if c.op == "send":
+        # Same rule, one difference in how far it may go: `deliver_information` with an
+        # empty audience is treated as PUBLIC by the executor, so dropping the author
+        # from a message addressed only to itself would turn a note nobody was meant to
+        # read into a broadcast. The author is removed only while somebody else is left
+        # to receive it; a send with no other recipient stays exactly as declared and is
+        # answered by the validator, not by silently changing what it means.
+        to = [t.resolve("entity", r) for r in c.recipients]
+        if author:
+            others = [r for r in to if r != t.resolve("entity", author)]
+            if others:
+                to = others
         return [
             {
                 "op": "deliver_information",
                 "text": c.detail or c.target,
                 "info_fields": {},
-                "to": [t.resolve("entity", r) for r in c.recipients],
+                "to": to,
             }
         ]
     if c.op == "schedule":
@@ -979,7 +1012,10 @@ def lower_plan(
     for a in plan.affordances:
         effects: list[dict[str, Any]] = []
         for c in a.changes:
-            effects.extend(_lower_change(c, t, plan, stocks, flows))
+            # The affordance's own actor is the author of every change it makes; the
+            # three process paths below pass none, because the environment performs
+            # those and there is nobody to leave out of the audience.
+            effects.extend(_lower_change(c, t, plan, stocks, flows, author=a.actor))
         meaning = a.meaning
         if a.preconditions:
             # Free-text preconditions are not mechanically enforceable in this slice;

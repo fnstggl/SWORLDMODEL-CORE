@@ -29,6 +29,7 @@ from typing import Any
 
 from .errors import GatewayError
 from .gateway import GatewayRequest, GatewayResponse, ModelGateway
+from .ids import content_id
 from .memory import MemoryStream
 from .prompts import render_decision_prompt, render_reflect_prompt
 from .worldspec import ActionChoice, ActorSpec, EntitySpec
@@ -44,6 +45,49 @@ PLAN_ABANDONED = "abandoned"
 PLAN_DISPOSITIONS = frozenset(
     {"continue", "revise", "interrupt", "replace", "complete", "abandon", "none"}
 )
+
+# Event kinds the ENVIRONMENT mints *about* an actor's own attempt: the world's verdict
+# on what it tried. They carry the acting actor's id, but they are not that actor's
+# doing — a refusal or a failure is news to the person refused, and it is the one thing
+# an actor learns about its own action that it did not already know. Named here, next to
+# the self-echo rule that exempts them, because the two must never drift apart;
+# :mod:`sworldmodel.executor` mints them from these same constants.
+ACTION_REJECTED = "action_rejected"
+ACTION_FAILED = "action_failed"
+WORLD_VERDICT_KINDS = frozenset({ACTION_REJECTED, ACTION_FAILED})
+
+
+def is_self_echo(actor_id: str, event_actor_id: str | None, event_kind: str) -> bool:
+    """Is this event the world reflecting an actor's own act back at that actor?
+
+    An agent learning of its own action is not news. Left unchecked it is a feedback
+    loop with no damping — act, the act creates an event, the event is information, the
+    information is delivered, the agent wakes, acts again — and it is what consumed a
+    whole branch of ``artifacts/ab/individual_semantic``: 43 of 51 wakes were
+    ``directed_information``, twenty of them producing the identical signal, because the
+    compiled effect addressed the event to its own participants (see
+    ``semantic_lowering``: ``create["to"] = the event's participants``) and the actor was
+    a participant in its own act.
+
+    The boundary matters and it is drawn narrowly, at the *author* of the event:
+
+    * An actor is NOT woken by an event it produced itself. That is the bare echo.
+    * An actor IS woken by another agent's reaction to its action — the event's author is
+      somebody else, so it is not an echo at all. That is the social dynamic this
+      runtime exists to simulate and nothing here touches it.
+    * An actor IS woken by the world's verdict on its own attempt
+      (:data:`WORLD_VERDICT_KINDS`). A refusal or a failure carries the one fact the
+      actor could not already know: that what it set out to do did not happen.
+
+    Nothing about noticing changes. The event is still delivered, still noticed, still
+    remembered — only the *wake* is withheld, because visibility, delivery, notice and
+    reconsideration are four separate transitions and this is a statement about the last
+    one alone.
+    """
+
+    if not actor_id or event_actor_id != actor_id:
+        return False
+    return event_kind not in WORLD_VERDICT_KINDS
 
 
 @dataclass(frozen=True)
@@ -309,6 +353,11 @@ class ActorState:
     noticed_event_ids: frozenset[str] = frozenset()
     # Events delivered to this actor and available, but not yet noticed.
     available_event_ids: frozenset[str] = frozenset()
+    # The situation this actor last decided from and what it decided — the material for
+    # recognising a re-decision. See :func:`situation_key` and :func:`intent_key`.
+    last_situation_key: str = ""
+    last_intent_key: str = ""
+    repeat_decisions: int = 0
 
     @property
     def actor_id(self) -> str:
@@ -402,6 +451,7 @@ class ActorState:
                 self.last_decision_time.isoformat() if self.last_decision_time else None
             ),
             "decision_count": self.decision_count,
+            "repeat_decisions": self.repeat_decisions,
         }
 
 
@@ -436,6 +486,246 @@ def _memory_seeds(spec: ActorSpec) -> tuple[Any, ...]:
     return tuple(seeds)
 
 
+# ---------------------------------------------------------------------------
+# Convergence: recognising a re-decision, and reporting where the calls went
+# ---------------------------------------------------------------------------
+
+
+def _jsonable(value: Any) -> Any:
+    """Reduce an arbitrary world value to something ``canonical_json`` can serialize.
+
+    World fields carry whatever the compiled world put in them. A key that raised on an
+    unusual value would turn a diagnostic into a branch-killing exception, so unknown
+    types degrade to their ``repr`` rather than escaping.
+    """
+
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(v) for v in value]
+    if isinstance(value, dict):
+        return {str(k): _jsonable(v) for k, v in sorted(value.items(), key=lambda kv: str(kv[0]))}
+    return repr(value)
+
+
+def external_information(actor_id: str, observations: tuple[Observation, ...]) -> list[str]:
+    """What this actor has learned from **outside itself**, keyed on content.
+
+    Two deliberate choices, both of which decide where the convergence line falls:
+
+    * Observations the actor itself produced are excluded. Its own act echoing back is
+      not something it learned (:func:`is_self_echo` states the same boundary for wakes).
+    * The key is the message's *content* — who said it, of what kind, saying what, with
+      which typed fields — and never its event id. Information is what it says, not
+      which envelope carried it, so the same reminder arriving twice under fresh ids
+      does not read as two things learned. The §9 wake-novelty measurement already keys
+      novelty this way; keying on ids instead would let a nagging cascade re-qualify as
+      new information on every repetition.
+    """
+
+    seen: set[str] = set()
+    for obs in observations:
+        if obs.source == actor_id:
+            continue
+        seen.add(
+            content_id("info", obs.source, obs.kind, obs.summary, _jsonable(dict(obs.info_fields)))
+        )
+    return sorted(seen)
+
+
+def situation_key(actor: ActorState, view: LocalView) -> str:
+    """A stable digest of the *material* situation this actor is deciding from.
+
+    "Material" is doing real work here. The raw :class:`LocalView` can never repeat: it
+    carries fresh event ids on every wake, which is exactly why 51 invocations of one
+    branch produced 51 distinct prompt hashes while the actor was demonstrably deciding
+    the same thing twenty times. ``prompt_hash`` therefore cannot detect a repeat, and
+    this key is what can.
+
+    What is in it is everything that could legitimately make the same intent a *new*
+    decision — the clock, the stage, the readable world, the menu the world is offering,
+    what reached the actor from anybody else, and the actor's own mind (its plan and how
+    many times it has revised it, what it is carrying out, what it has undertaken, what
+    it is waiting on, what it believes and wants). What is deliberately NOT in it is
+    bookkeeping that turns over whether or not anything happened: event ids, the world's
+    version counter (which the actor's own deliveries increment), and anything the actor
+    itself produced.
+
+    Two decisions with the same key were taken from a world that had not moved and from
+    an actor that had not changed its mind, with nothing having reached it in between.
+    """
+
+    plan = actor.plan
+    ongoing = actor.current_action
+    return content_id(
+        "sit",
+        view.actor_id,
+        view.branch_time.isoformat(),
+        view.stage,
+        view.role,
+        sorted(view.authority),
+        # WHY the actor was called. A commitment falling due at the same instant as an
+        # opportunity is a different cause, and a different cause is a real reason to
+        # ask again even when nothing else has moved.
+        view.trigger_kind,
+        sorted(view.public_facts),
+        _jsonable(view.observed_fields()),
+        sorted(str(a.get("action_id", "")) for a in view.feasible_actions),
+        bool(view.allow_novel),
+        external_information(view.actor_id, view.observations),
+        (
+            [plan.plan_id, plan.goal, plan.status, plan.revision_count]
+            + [s.description for s in plan.steps]
+            if plan is not None
+            else None
+        ),
+        [ongoing.action_id, ongoing.status] if ongoing is not None else None,
+        sorted(c.text for c in actor.open_commitments()),
+        sorted(n.question for n in actor.open_needs()),
+        sorted(actor.beliefs),
+        sorted(actor.goals),
+        sorted(actor.unresolved_questions),
+    )
+
+
+def intent_key(choice: ActionChoice) -> str:
+    """A stable digest of *what an actor decided to do* — the act, not the account of it.
+
+    The rationale is excluded on purpose. Two invocations that take the identical action
+    with differently-worded reasoning are the same decision, and keying on the prose
+    would let a loop escape detection simply by varying how it explains itself.
+    """
+
+    return content_id(
+        "int",
+        choice.mode,
+        choice.action_id,
+        _jsonable(dict(choice.params)),
+        choice.target,
+        choice.novel_description.strip(),
+        choice.novel_intended_effect.strip(),
+        choice.novel_target,
+        _jsonable(dict(choice.novel_params)),
+    )
+
+
+@dataclass(frozen=True)
+class NonDecision:
+    """A wake that cannot produce a decision, recognised *before* the model is called.
+
+    Nothing about the actor's material situation differs from the one it last decided
+    from: same instant, same cause, same readable world, same menu, same mind, and
+    nothing has reached it from anybody else since. Asking again is not asking a person
+    to reconsider; it is asking the same question twice at one timestamp, which the
+    runtime already treats as a defect elsewhere (``Schedule.drop_matching`` and
+    ``_merge_decisions`` both exist to stop exactly that).
+    """
+
+    situation_key: str
+    prior_intent_key: str
+    reason: str
+
+
+def check_non_decision(actor: ActorState, view: LocalView) -> NonDecision | None:
+    """Recognise a wake with no material cause, or return ``None``.
+
+    **A genuine repetition always survives.** A central banker really can signal support
+    twice and a negotiator really can repeat a demand; the line is not how many times an
+    actor does something, it is whether anything happened in between. Because the clock,
+    the readable world, the feasible menu, everything that reached the actor from anyone
+    else, and the actor's own plan and beliefs are all in :func:`situation_key`, *any* of
+    them moving makes the next identical act a new decision — however many times it has
+    already been taken. Only a re-ask from a world that has not moved at all, at the very
+    same instant, for the very same reason, is refused.
+    """
+
+    if not actor.last_intent_key:
+        return None
+    key = situation_key(actor, view)
+    if key != actor.last_situation_key:
+        return None
+    return NonDecision(
+        situation_key=key,
+        prior_intent_key=actor.last_intent_key,
+        reason=(
+            f"nothing material has changed for {actor.actor_id!r} since it decided at "
+            f"{view.branch_time.isoformat()}: same trigger ({view.trigger_kind or 'none'}), "
+            "same readable world, same feasible actions, same plan and commitments, and "
+            "nothing has reached it from anybody else — so this wake has no cause the "
+            "actor has not already answered"
+        ),
+    )
+
+
+@dataclass
+class ConvergenceDiagnostics:
+    """Where a branch's actor calls went, and which of them were the loop.
+
+    Without this a run that spins reads exactly like a run that deliberates — the OPEC+
+    branch and the reference multiparty world both just show "N invocations" — and no
+    artifact tells them apart. Every number here is a count of a mechanism that actually
+    fired, per actor, so a reader can see which participant was looping and what it cost.
+    """
+
+    self_echo_wakes_suppressed: int = 0
+    non_decision_wakes_refused: int = 0
+    repeat_decisions: int = 0
+    by_actor: dict[str, dict[str, int]] = field(default_factory=dict)
+
+    def _bump(self, actor_id: str, counter: str) -> None:
+        row = self.by_actor.setdefault(
+            actor_id,
+            {
+                "self_echo_wakes_suppressed": 0,
+                "non_decision_wakes_refused": 0,
+                "repeat_decisions": 0,
+            },
+        )
+        row[counter] += 1
+
+    def record_self_echo(self, actor_id: str) -> None:
+        """A wake that would have fired *only* on what this actor produced itself."""
+
+        self.self_echo_wakes_suppressed += 1
+        self._bump(actor_id, "self_echo_wakes_suppressed")
+
+    def record_non_decision(self, actor_id: str) -> None:
+        """A wake refused before any model call, its situation unchanged since the last."""
+
+        self.non_decision_wakes_refused += 1
+        self._bump(actor_id, "non_decision_wakes_refused")
+
+    def record_repeat(self, actor_id: str) -> None:
+        """A call that was made and re-produced the previous decision unchanged."""
+
+        self.repeat_decisions += 1
+        self._bump(actor_id, "repeat_decisions")
+
+    def summary(self) -> str:
+        """One human-readable line, carried on the stop reason when a budget runs out.
+
+        Exhaustion has to be loud about *why* the calls went: 80 calls spent deliberating
+        and 80 spent re-deciding one thing are the same number and completely different
+        runs.
+        """
+
+        return (
+            f"{self.repeat_decisions} of the calls made were repeat decisions; "
+            f"{self.self_echo_wakes_suppressed} wake(s) were withheld as self-echo and "
+            f"{self.non_decision_wakes_refused} refused as non-decisions"
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "self_echo_wakes_suppressed": self.self_echo_wakes_suppressed,
+            "non_decision_wakes_refused": self.non_decision_wakes_refused,
+            "repeat_decisions": self.repeat_decisions,
+            "by_actor": {k: dict(v) for k, v in sorted(self.by_actor.items())},
+        }
+
+
 @dataclass
 class DecisionResult:
     """Everything one actor invocation produced."""
@@ -449,6 +739,11 @@ class DecisionResult:
     plan_after: dict[str, Any] | None = None
     retrieved_memory_ids: list[str] = field(default_factory=list)
     noticed_obs_ids: list[str] = field(default_factory=list)
+    # The situation this decision was taken from, what it decided, and whether that pair
+    # exactly repeats the actor's previous decision.
+    situation_key: str = ""
+    intent_key: str = ""
+    is_repeat: bool = False
 
 
 class ActorRuntime:
@@ -509,6 +804,22 @@ class ActorRuntime:
         choice = self._to_choice(dresp.data, actor)
         disposition = self._disposition(dresp.data)
 
+        # Was this a decision, or the same decision again? Detected exactly, from the
+        # situation the actor decided from and what it decided — never from the prompt
+        # hash, which differs on every invocation because the view carries fresh event
+        # ids. A repeat is recorded and its action still runs: the runtime does not
+        # cancel an intention it disagrees with, and a monotone terminal that the repeat
+        # satisfies must still be satisfied. What a repeat loses is momentum — it wakes
+        # nobody by itself (see :func:`is_self_echo`), and the next wake from a situation
+        # that still has not moved is refused (see :func:`check_non_decision`).
+        sit_key = situation_key(actor, view)
+        int_key = intent_key(choice)
+        is_repeat = bool(
+            actor.last_intent_key
+            and sit_key == actor.last_situation_key
+            and int_key == actor.last_intent_key
+        )
+
         new_actor = self._apply_cognitive_updates(
             actor,
             dresp.data,
@@ -516,6 +827,12 @@ class ActorRuntime:
             now=now,
             noticed_ids=noticed_ids,
             view=view,
+        )
+        new_actor = replace(
+            new_actor,
+            last_situation_key=sit_key,
+            last_intent_key=int_key,
+            repeat_decisions=actor.repeat_decisions + (1 if is_repeat else 0),
         )
 
         # 4. reflect — only when the actor itself says its understanding changed. There
@@ -529,6 +846,18 @@ class ActorRuntime:
             new_actor = replace(new_actor, beliefs=beliefs)
 
         context["retrieved_memory_ids"] = [n.node_id for n in retrieved]
+        # Added AFTER the prompt was rendered, so the convergence record reaches the
+        # trace (``local_view.convergence`` in actor_decisions.jsonl) without ever
+        # reaching the actor: a person is not told they are repeating themselves.
+        context["convergence"] = {
+            "situation_key": sit_key,
+            "intent_key": int_key,
+            "repeat_of_previous_decision": is_repeat,
+            "repeat_decisions_so_far": new_actor.repeat_decisions,
+            "self_produced_observations_noticed": sum(
+                1 for o in new_obs if o.source == actor.actor_id
+            ),
+        }
         return DecisionResult(
             choice=choice,
             actor=new_actor,
@@ -539,6 +868,9 @@ class ActorRuntime:
             plan_after=new_actor.plan.as_dict() if new_actor.plan else None,
             retrieved_memory_ids=[n.node_id for n in retrieved],
             noticed_obs_ids=[o.obs_id for o in new_obs],
+            situation_key=sit_key,
+            intent_key=int_key,
+            is_repeat=is_repeat,
         )
 
     # -- context / prompt --------------------------------------------------------

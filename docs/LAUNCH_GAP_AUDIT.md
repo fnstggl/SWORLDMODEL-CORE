@@ -171,6 +171,140 @@ outcome — not calibration alone. A run that gets the right number for the wron
 
 ---
 
+## CORRECTIONS — adversarial review of this audit (vision-adversary)
+
+Every claim below was reproduced independently. Two of this audit's judgements did not
+survive, and one of its rankings was wrong.
+
+### The central inference was WRONG: the fixture's convergence came from the test, not the runtime
+
+This audit claimed *"the runtime can do everything the vision needs — proven, not asserted"*
+on the strength of `_worlds.scheduled_multiparty_world`. The adversary read that world's
+driver (`tests/invariants/test_scheduling.py:95-100`) and found the convergence is
+hand-written:
+
+```python
+if ctx["actor_id"] == "member_0" and ctx["stage"] == "preparation":
+    return act("circulate_note", {"text": "a note for the others"})
+```
+
+`ctx["actor_id"] == "member_0"` hardcodes that **exactly one named agent ever
+communicates, exactly once**. Removing that single `if` collapses the same world:
+
+```
+V3  audit's exact driver, 5 members   -> actor_calls 23  resolved=True  outcome=YES
+V3b audit's exact driver, 9 members   -> actor_calls 43  resolved=True  outcome=YES
+V1  per-actor guard REMOVED, 5 members-> actor_calls 80  BUDGET EXHAUSTED  resolved=False
+V2b any may speak, self-limited, 9    -> actor_calls 81  BUDGET EXHAUSTED  resolved=False
+```
+
+**Scale is not the problem** — nine participants resolve fine *with* the guard. The
+runtime has never been shown to converge without a human-written decision function. So
+"the compiler is the bottleneck and the runtime is ready" is not established, and the
+ordering principle below must not be read as "the runtime is fine."
+
+### G1 is CONFIRMED — build on it
+
+Reconstructed from the branch's own ledger, running the real evaluator:
+
+```
+event_count('bailey_signals_support_for_further_cut') = 19
+unresolved_when -> False   yes_when -> True
+evaluate_terminal WOULD return: resolved=True outcome=YES
+forecast.json ACTUALLY reported: resolved=False outcome=None
+published simulation_probability: 0.0
+```
+
+The intents did produce the events — 20 started, none rejected, 19 landed (one in flight at
+truncation). This audit said "twenty events"; it is nineteen. Immaterial to the argument.
+
+**But W1's ranking was wrong.** Across all 28 runs / 59 branches, the truncation guard has
+discarded a resolved evaluation **exactly once** — this branch. Only 4 of 28 terminals use
+`event_count`; **zero** use `count` or `exists`; 24 of 28 are `equals(field(...), True)`,
+which W1 deliberately leaves alone. W1 is a one-branch fix in the corpus as it stands. It
+becomes common once worlds get bigger, so it still ships — but W2 has corpus-wide reach and
+should carry the weight.
+
+### W1 has a real wrong-banking case: `unresolved_when` is never checked
+
+Both legs monotone, both built from the "safe" ops:
+
+```
+yes_when        : event_count('board_approves_merger') > 0     -> non_decreasing
+unresolved_when : count('formal_challenges') > 0               -> non_decreasing
+  t1 board approves      <-- banked YES
+  t2 challenge filed     -> terminal says UNRESOLVED
+```
+
+Banking must also require `unresolved_when` to be non-increasing or fixed: once
+determinable, always determinable.
+
+### One claim in this audit was itself wrong, and I withdraw it
+
+The corpus-wide `action_started 89 / action_completed 3` ratio is **not** evidence that
+actions fail to complete. `action_completed` was added in `db8929e` (Phase 2); the runs
+showing zero were made at `f30ff03`, before it existed. Their effects (`create_event`,
+`append_record`, `set_field`) all land in the ledger immediately after each start. Actions
+complete. Anyone re-deriving that statistic across commits will reach the same false
+conclusion — it is a dating artifact, not a defect.
+
+---
+
+## WHAT THIS AUDIT MISSED — ranked by leverage (vision-adversary)
+
+**M1 · Agents are blind to their own actions, and this invalidates W3's proposed
+mechanism.** `WorldState.view_for` (`world.py:223-261`) builds observations only from
+`self.deliveries` where `d.actor_id == actor_id`, and an actor is never a recipient of its
+own delivery. Measured: `member_0` circulated a note **15 times**; on invocation #16 its
+view held `0 observations mentioning member_0`, `0 such memories`, one overwritten
+`current_action` slot, no commitments, no plan. W3 was told to detect "an actor re-deciding
+from an unchanged local view" — the view changes every time (other members' notes,
+`world_version` 0 → 350). **The agent repeats itself because it cannot see that it already
+acted.** Fix the view, not the loop.
+
+**M2 · No theory of mind at all.** `view_for` never reads `self.actors`, so other agents'
+`beliefs`, `goals` and `plan` are in scope and never touched; `relationships` is `{}` in
+every record and never reaches a prompt. An agent can see what another *has done* and has no
+representation that others exist, want anything, or will do anything. Five soliloquies, not
+a society. No W-item builds this.
+
+**M3 · The `decides=false` escape hatch is G2's actual root cause.**
+`semantic_plan.py:2655-2661`'s own error text offers the way out — *"give it the actions its
+role affords, or mark it decides=false"* — and the same model writes both the affordances and
+the flag. `phase2/geopolitical2`: 9 entities, 1 `decides:true`, 1 affordance,
+`integrity_verdict: "verified"`. `prompts.py:272` already declares scenery actors a refusal;
+`decides=false` makes the entity invisible to the only check that exists.
+
+**M4 · Memory collapses to one duplicated item in exactly the runs that loop.**
+`MemoryStream.add` (`memory.py:71-73`) inserts with no dedup, and `node_id` (`memory.py:88`)
+includes `created` — constant when the clock is pinned. Identical content at one instant
+yields an identical id inserted N times; `retrieve(top_k=6)` returned **six copies of one
+node**. `retrieved_memory_ids` is non-empty in 218/235 records, which reads as "memory
+works"; the content is one fact repeated.
+
+**M5 · Inter-actor communication has never once happened.** The six `deliver_information`
+events are junk — four have `actor_id = None` (environment drops), two have `text = ""`.
+Genuine inter-actor communications in the entire artifact tree: **zero**. Upstream cause:
+across all 18 semantic plans the affordance `changes` use exactly one op, `{'set': 5}` — the
+planner has **never emitted a `send`**, though `semantic_lowering.py:501-509` maps it
+correctly. W5 is therefore not "gate that communication exists" but "make the planner able to
+express a channel at all."
+
+**M6 · Evidence certifies contradictory stores as verified.** `individual_semantic`'s 13
+claims flatly contradict each other; `0 of 13` carry `contradiction_ids`,
+`unresolved_conflicts: []`, `evidence_coverage: 1.0`, `integrity_verdict: "verified"`.
+`EvidenceStore.contradictions()` (`evidence.py:151-163`) warns in its own docstring that
+reporting "no conflicts" from an empty result requires detection to have run. It did not.
+Separately, that world's `verified_roles` appear in **none** of the 13 claims and the MPC — a
+compiled participant holding an affordance — appears in **zero** evidence. Retrieval is
+lexical overlap (`evidence.py:219-234`) with no axis for disposition, incentive or reaction.
+
+**M7 · `allow_novel` is hardcoded `false` on all 40 compiled process nodes**
+(`semantic_lowering.py:1061,1089`) against a spec default of `True`. The novel path has still
+fired 22 times because `engine.py:1532` only enforces the flag when there are zero feasible
+compiled actions — so escape from pre-enumeration works *in spite of* the compiler, and the
+flag meant to govern it does not govern it.
+
 ## The ordering principle for this phase
 
 Every phase so far made it harder to publish a bad answer. **None made it more likely to
