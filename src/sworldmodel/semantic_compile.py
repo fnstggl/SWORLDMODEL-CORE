@@ -75,22 +75,22 @@ def participant_brief(
     its own heading is *visible* as a party with nothing to do — which is exactly the
     judgement the planner has to make about whether it belongs in the world at all.
 
-    Headings are ordered by how many claims name each one, most-attested first. That
-    looked like a bug and was tested as one: it puts OPEC+ and its sixteen claims above
-    every member country, a ranking by prominence read before the planner has considered
-    anybody, in a decision that is precisely about whether the group or its members are
-    the parties. Held against an alphabetical variant and a no-brief control on the same
-    store, same question, same cutoff, one planner call each, the ordering did the
-    opposite of what was suspected:
+    Headings are ordered by how many claims name each one, most-attested first, which
+    puts OPEC+ and its sixteen claims above every member country. That looked like a bug
+    — a ranking by prominence read before the planner has considered anybody, in a
+    decision that is precisely about whether the group or its members are the parties.
 
-        claim-count order  ->  seven member countries, each a deciding entity
-        alphabetical       ->  one coalition standing for seven
-        no brief at all    ->  one coalition standing for seven
+    **The ordering is not known to matter, and this docstring used to say it did.** It
+    recorded a three-arm probe as showing ``claim-count order -> seven member countries,
+    each a deciding entity``. No artifact supports that. The three probe files still on
+    disk hold three entities, one decider and one party holding acts for the claim-count
+    arm — the same as the alphabetical arm and the same as the no-brief control. The
+    correction is in ``docs/LAUNCH_GAP_AUDIT.md``; the claim is repeated here only so
+    that nobody reads the sentence it replaced and believes the experiment was run.
 
-    So the brief earns its place — without it the planner compresses — and this ordering
-    is the one that surfaces the members. Reverted to it rather than kept on the theory.
-    (One sample per arm, so the direction is worth more than the margin; what is solid is
-    that alphabetical is not an improvement.)
+    What is actually established about the brief: nothing, at n=1 per arm. It is kept
+    because grouping claims under the names they attest is a faithful re-projection that
+    adds no information and asserts nothing, not because any measurement chose it.
     """
 
     claims = view.available()

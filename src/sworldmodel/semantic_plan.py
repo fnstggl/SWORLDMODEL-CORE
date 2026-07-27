@@ -1585,6 +1585,16 @@ def _exclusion_quality_errors(plan: SemanticPlan) -> list[str]:
     So an exclusion now costs what an inclusion costs: an argument per name. It cannot
     refuse a world that is right — every correct exclusion can be written out in full,
     and writing it out is all this asks.
+
+    WHAT IT DID NOT DO, MEASURED. This rule, ``_aggregate_errors`` and
+    ``_absorbed_party_errors`` were benched together against a fresh N=10 control at the
+    same commit, same store, same question, same bench seed. The planner complied with
+    every one of them — in the treated arm each exclusion names one party and states what
+    the record attributes to it, and each aggregate carries its justification — and built
+    the same world anyway: ``parties_holding_acts`` 0 in 5 of 5 worlds against 1 in 8 for
+    the control, Fisher exact p = 1.000. The asymmetry was real, measurable and is now
+    closed; closing it did not change what the planner builds. Do not re-run this
+    experiment expecting the metric to move, and do not read these rules as a fix for it.
     """
 
     errors: list[str] = []
@@ -2012,6 +2022,15 @@ def _absorbed_party_errors(
     Both are satisfiable by writing a sentence, never by inventing a participant, and
     the check does nothing at all when the caller supplies no claim entity lists — the
     validator never guesses at evidence it was not handed.
+
+    ITS PRICE, MEASURED. In the N=10 treated arm this rule refused one plan outright
+    (the arm produced 5 worlds against the control's 8, and 2 of the 3 lost runs are
+    attributable to these rules — this one and the rewritten participant-count message).
+    Neither refusal hit a world that was right: both plans read a claim naming seven
+    countries as authority for one party while six of them appeared nowhere. But the
+    attrition is real, it is the denominator the headline is measured over, and at this
+    N it is itself inside the noise (8/10 vs 5/10, Fisher exact p = 0.35). Anyone
+    tightening this further should bench the denominator, not only the headline.
     """
 
     if not claim_entities:
