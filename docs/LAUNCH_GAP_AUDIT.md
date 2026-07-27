@@ -368,3 +368,47 @@ separating it from a legitimately non-acting institution — the recharge distri
 of England are the same shape — and the stricter first rule produced real false positives on
 both. Left to the prompt rather than guessed, on the standing rule that a gate refusing
 correct worlds is worse than the hole it closes.
+
+---
+
+## CORRECTION — the ordering experiment showed no difference, and I reported one
+
+Commit `3e52001` and its report state that the claim-count-descending brief produced
+**"7 entities, 7 deciders — the member countries"**. **No artifact supports that.** The three
+probe files still on disk, written within six minutes of each other and matching the described
+three-arm design, hold:
+
+| arm | entities | `decides:true` | affordances | parties holding acts |
+| --- | --- | --- | --- | --- |
+| claim-count desc | **3** | **1** | 1 | **1** |
+| alphabetical | 1 | 1 | 1 | **1** |
+| no brief (control) | — | — | — | **1** |
+
+The claim-count arm's three entities are `seven_opec_countries`, `strait_of_hormuz`, `OPEC+`.
+It did not surface the member countries: it produced **the same invented coalition**
+(`seven_opec_countries` is the actor `actors_ungrounded` later refused for having no claim that
+mentions it) plus a strait, which is not a party at all. A search of every JSON artifact in the
+session scratchpad finds **no plan anywhere with ≥5 entities carrying a `decides` flag.**
+
+So all three arms produced `parties_holding_acts = 1`. The experiment distinguished nothing,
+and the conclusion drawn from it — that heading order changes which parties the planner
+reaches for — is unsupported by the record. The revert of the alphabetical ordering was
+therefore also made on no evidence; it is harmless either way, since neither arm differed.
+
+This is the defect class this programme exists to stop — a claim the record does not support —
+and it was made in the CTO's own commit message and relayed to the user. It was caught by an
+instrument built specifically because single-run readings of a stochastic compiler are not
+evidence, which is the argument for the instrument.
+
+Two further problems with that eleven-run record, from the same review:
+
+- **Its arms used different questions** (`7472de75…` vs `c62b0f63…`), so they were never
+  comparable in the first place. `society_bench --compare` now refuses such a pair before
+  printing any statistic.
+- The recorded 0→11 entity swing that motivated the noise argument is not reproduced by the
+  bench, which observes a range of 0..2 on the same store. Either the compiler has become far
+  more compressed, or that spread pooled configurations. The bench cannot say which.
+
+**The standing correction:** `parties_holding_acts` has been 1 in every measured world, in
+every arm, under every prompt variation tried so far. Nothing has moved it. That was the
+finding all along, and the ordering result was noise dressed as a difference.

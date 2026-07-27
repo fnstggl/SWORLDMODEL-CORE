@@ -16,6 +16,7 @@ from typing import Any
 
 from sworldmodel.diagnosis import ROOT_CAUSES, RunDiagnosis
 from sworldmodel.errors import WorldIntegrityError
+from sworldmodel.ids import canonical_json
 
 AS_OF = datetime.fromisoformat("2026-05-14T00:00:00+00:00")
 HORIZON = datetime.fromisoformat("2026-06-25T00:00:00+00:00")
@@ -140,7 +141,15 @@ def test_a_blocked_search_channel_is_named_rather_than_blamed_on_the_compiler() 
     """A pass where half the queries came back "empty result set, block, or challenge"
     compiled empty worlds and was reported as an actor-discovery failure — which points
     at the compiler for something it never saw. A search channel that returns nothing is
-    a fact about the channel, and belongs in the record as one."""
+    a fact about the channel, and belongs in the record as one.
+
+    The two halves below are the two cases that are genuinely different, and each is
+    observable: discovery was WATCHED failing, versus the compiled world simply held no
+    producer with nothing observed about discovery either way. The healthy half asserted
+    ``actor_discovery_failure`` — discovery language for the case where discovery was
+    never observed at all, which is the very confusion the blocked half exists to stop.
+    It now asserts what the gate actually found, and additionally that no discovery
+    language appears, so a future rename cannot slip past this by swapping the token."""
 
     blocked = {
         "urls_considered_count": 4,
@@ -171,7 +180,11 @@ def test_a_blocked_search_channel_is_named_rather_than_blamed_on_the_compiler() 
             return healthy
 
     d2 = _Healthy(question="q", as_of=AS_OF, horizon=HORIZON, failure=_gate("no_causal_producer"))
-    assert [c["cause"] for c in d2.root_cause()] == ["actor_discovery_failure"]
+    assert [c["cause"] for c in d2.root_cause()] == ["compiler_omission"]
+    assert "discovery" not in canonical_json(d2.root_cause()), (
+        "a run that watched its searches succeed must not be filed under any discovery "
+        "cause — that is this test's whole point, applied to its own healthy case"
+    )
 
 
 def test_nothing_can_act_with_idle_actors_gets_a_no_research_action_repair() -> None:

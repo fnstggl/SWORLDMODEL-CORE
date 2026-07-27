@@ -552,8 +552,20 @@ class RunDiagnosis:
                 }
             )
         if gate == "no_causal_producer":
+            # What was observed is a compiled world holding nothing that could produce
+            # the outcome — which is what its two neighbouring gates already report as
+            # `compiler_omission`. It said `actor_discovery_failure`, which asserts that
+            # RETRIEVAL failed to find the actors, and nothing at this gate observes
+            # retrieval at all. Where discovery genuinely was observed to fail, the
+            # discovery rules above say so from the search record itself and say so
+            # first — so the distinction the run can actually make is preserved, and the
+            # one it cannot make is no longer asserted.
             out.append(
-                {"cause": "actor_discovery_failure", "why": f"the run stopped at the {gate} gate"}
+                {
+                    "cause": "compiler_omission",
+                    "why": f"the compiled world contains no mechanism at all ({gate}) — "
+                    "no actor and no process in it could have produced any outcome",
+                }
             )
         if gate == "actors_ungrounded":
             # The grounding gate reports exactly which actors carried no surviving
