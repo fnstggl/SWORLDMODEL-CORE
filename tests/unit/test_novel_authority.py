@@ -56,7 +56,7 @@ from sworldmodel.novel import (
     terminal_terms,
     world_standing,
 )
-from sworldmodel.world import WorldState
+from sworldmodel.world import Event, WorldState
 from sworldmodel.world_compiler import build_base_world
 from sworldmodel.worldspec import (
     ActionChoice,
@@ -486,6 +486,52 @@ def test_a_declaration_can_only_add_a_requirement() -> None:
     assert tightened.required_authority == ("report_output", "sign_the_annual_return")
 
 
+def test_a_declared_refusal_still_records_the_worlds_own_verdict() -> None:
+    """The condition that makes checking the declaration first safe rather than merely
+    convenient.
+
+    Both gates bind here: the operator does not hold the token the interpreter declared,
+    AND the field it wants is one only the quarterly run produces. The declared token is
+    what fires, because a proposal failing its own stated requirement is the more
+    specific thing to hand back — but the world's structural verdict must still be on the
+    record, or the ordering silently costs a reader the stronger reason.
+
+    This is the shape that made the ordering a real question: an early return taken
+    before ``world_standing`` is computed would leave nothing behind, and no other test
+    in this file would notice.
+    """
+
+    resolution = _propose(
+        [{"op": "set_field", "field": "production_target_met", "value": True}],
+        declared=["sign_the_annual_return"],
+    )
+
+    assert not resolution.executed
+    # The declared requirement is what fired.
+    assert "lacks authority" in resolution.reason
+    # ...and the world's verdict is still there to be read, unfired but recorded.
+    (standing,) = resolution.standing
+    assert standing.standing == STANDING_ENVIRONMENT
+    assert standing.environment_producers == ("process_node:quarterly_run",)
+    assert standing.refusal(), "the world's own refusal was not preserved on the record"
+    assert "only the environment produces" in standing.refusal()
+
+
+def test_a_permitted_resolution_records_the_standing_it_relied_on() -> None:
+    """The same property in the other direction. A permitted novel action must say which
+    route it acted by, not merely that it ran: "it was allowed" and "it was allowed
+    because this actor holds this compiled route" are different claims, and only the
+    second can be audited afterwards."""
+
+    resolution = _propose([{"op": "set_field", "field": "reported_output", "value": 412}])
+
+    assert resolution.executed
+    (standing,) = resolution.standing
+    assert standing.standing == STANDING_ACTOR
+    assert standing.satisfied_by == "report_output"
+    assert not standing.refusal()
+
+
 # ---------------------------------------------------------------------------
 # 4. "Found nothing" and "did not look" are now different answers.
 # ---------------------------------------------------------------------------
@@ -619,6 +665,73 @@ def test_the_gate_fires_inside_a_real_run() -> None:
     assert "only the environment produces" in refused[0].validation_reason
     for world in result.final_worlds.values():
         assert world.get_field("external_signal") != 99
+
+
+# ---------------------------------------------------------------------------
+# 5. Acting is not succeeding — including when the effect is stamped in the future.
+# ---------------------------------------------------------------------------
+
+
+def test_a_scheduled_novel_effect_is_carried_rather_than_dropped() -> None:
+    """An effect stamped in the future has not happened; it is scheduled.
+
+    ``resolve_novel`` discarded the deferred list, so a novel ``schedule_event``
+    produced ZERO events and was still reported "authorized and executed" — the actor
+    told its intention had become a consequence when nothing whatever had occurred.
+    That is this module's own promise broken in the permissive direction, and it is the
+    mirror image of the authority hole: there an invented act reached the world it had
+    no standing over, here an invented act was told it had reached a world it never
+    touched.
+    """
+
+    spec = _spec()
+    world = _world(spec)
+    gateway = _gateway(
+        [{"op": "schedule_event", "event_type": "a_future_thing", "after_seconds": 86400}]
+    )
+    resolution, produced = resolve_novel(
+        actor=_actor(world),
+        choice=ActionChoice(mode="novel_action", novel_description="schedule something"),
+        world=world,
+        spec=spec,
+        gateway=gateway,
+        executor=EffectExecutor(),
+        seed=0,
+    )
+
+    immediate = [x for x in produced if isinstance(x, Event)]
+    assert resolution.executed, resolution.reason
+    # Nothing happened NOW — which is correct, and was the whole of what used to survive.
+    assert immediate == []
+    # ...and the thing that WILL happen is on the resolution rather than lost.
+    assert len(resolution.deferred) == 1
+    when, effect = resolution.deferred[0]
+    assert when > world.time
+    assert effect.op == "schedule_event"
+
+
+def test_the_scheduled_effect_reaches_the_turn_outcome() -> None:
+    """The other half of the same path. A deferral that stops at the resolution is a
+    deferral nobody schedules, so the fix is only real if it survives the executor."""
+
+    from sworldmodel.executor import ActionExecutor
+
+    spec = _spec()
+    world = _world(spec)
+    gateway = _gateway(
+        [{"op": "schedule_event", "event_type": "a_future_thing", "after_seconds": 86400}]
+    )
+    outcome = ActionExecutor(gateway, EffectExecutor())._execute_novel(
+        _actor(world),
+        ActionChoice(mode="novel_action", novel_description="schedule something"),
+        world,
+        spec,
+        0,
+    )
+
+    assert outcome.status == "executed"
+    assert outcome.events == []
+    assert len(outcome.deferred) == 1, "the scheduled effect was dropped between the two"
 
 
 def test_the_terminal_terms_include_both_legs() -> None:
