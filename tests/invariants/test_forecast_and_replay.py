@@ -523,27 +523,50 @@ def test_an_operational_process_that_accumulates_output_is_not_an_announcement()
 
 
 def test_a_review_that_could_not_run_can_never_kill_a_run_that_passed_the_gates() -> None:
-    """A FAULT in the review is not a verdict about the world.
+    """A FAULT in the OPINION half is not a verdict about the world.
 
-    The review runs after every mechanical gate has already passed the world, so a fault
-    here can only ever destroy a run that was otherwise sound — which is what happened: a
-    live Bank of England run compiled a real world, cleared every gate, and died in the
-    review's own summary helper because a compiled `at` is an ISO string and the helper
-    assumed a datetime.
+    A live Bank of England run compiled a real world, cleared every gate, and then died
+    in the review's own summary helper because a compiled `at` is an ISO string and the
+    helper assumed a datetime. An opinion about a world must never be able to kill a
+    sound one, so that half stays advisory and this test guards the helper that caused it.
 
-    This is about the review that could not RUN, and it is deliberately not the same
-    question as what a review that ran gets to decide: a completed review's blocking
-    findings do stop publication (FD-27, CWF-6, and
-    ``tests/unit/test_publication_gate.py``). Something nobody was able to look at is
-    never priced as something that passed, and never as something that failed either.
+    FD-45 narrowed the scope of this invariant, and the narrowing is the point. It used
+    to cover a fault ANYWHERE in the review, including the mechanical pass — which meant
+    a crash in the mechanical checks silently yielded zero findings for every operational
+    world in the system, both CRITICALs included, and the run published. The mechanical
+    half is not an opinion: it is computed from the compiled world with no provider
+    involved, so a fault in it is a fact about our own code and must be treated as one.
+    That case is the sibling test below.
+
+    The dividing line: a MODEL that could not be reached is advisory; a GATE that could
+    not run is not. Neither is ever priced as something that passed.
     """
 
-    from sworldmodel.world_review import _when, review_world
+    from sworldmodel.world_review import _when
 
     # Compiled times arrive as ISO strings, not datetimes. Both must render.
     assert _when("2026-06-25T00:00:00+00:00") == "2026-06-25T00:00:00+00:00"
     assert _when(AS_OF) == AS_OF.isoformat()
     assert _when(None) is None and _when("") is None
+
+
+def test_a_mechanical_pass_that_could_not_run_is_never_priced_as_one_that_passed() -> None:
+    """FD-45. A gate that cannot run must never read as a gate that ran and approved.
+
+    ``review_world`` catches every exception from ``mechanical_world_checks`` so a broken
+    check can never kill a sound run. That catch used to substitute an empty tuple, which
+    is indistinguishable from "looked, found nothing" — and it was live: a transient
+    undefined name in the FD-33 refactor made ``mechanical_world_checks`` raise while
+    ``review_world(...).findings`` returned zero findings and zero blocking, for a world
+    that must produce five. The suite could not see it, because the resulting failures
+    read as assertion errors about severities rather than as "the function raised".
+
+    So the fault must become a finding that names itself, and it must block. This is the
+    same rule as FD-34, where a provider outage was laundering mechanical facts into
+    advisory notes; here the launderer is a crash in our own code.
+    """
+
+    from sworldmodel.world_review import review_world
 
     class Malformed:
         @property
@@ -551,8 +574,10 @@ def test_a_review_that_could_not_run_can_never_kill_a_run_that_passed_the_gates(
             raise RuntimeError("compiled world is malformed")
 
     review = review_world(Malformed(), None, None, question="q", evidence_render="")
-    assert "could not run" in review.error
-    assert not review.should_repair  # a review that did not happen demands no repair
+    assert "could not run" in review.error  # no opinion was obtained either
+    keys = {answer[0] for answer in review.answers}
+    assert "mechanical_checks_could_not_run" in keys
+    assert review.should_repair  # the empty tuple used to make this False, and publish
 
 
 def test_the_persisted_review_always_judges_the_world_that_was_simulated() -> None:

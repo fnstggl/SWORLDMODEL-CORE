@@ -196,6 +196,11 @@ def emit(run: Path, out: Path, label: str) -> dict[str, Any]:
                 "terminal_evaluated_via": b["terminal_evaluated_via"],
                 "fields_read": b["final_fields"],
                 "event_type_counts": b["final_event_type_counts"],
+                # A terminal such as `count('positions', equals(item('value'),
+                # 'hold')) >= 5` is decided by what the records CONTAIN, not by how
+                # many there are. Emitting only the counts left a reviewer unable to
+                # check such an answer at all (FD-42).
+                "records_read": b["final_records"],
                 "recomputed_resolved": b["recomputed_resolved"],
                 "recomputed_outcome": b["recomputed_outcome"],
                 "published_outcome": b["published_outcome"],

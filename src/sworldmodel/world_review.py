@@ -305,6 +305,10 @@ MECHANICAL_KEYS = (
     # often a process really happens is asserted by the number of occurrences somebody
     # typed, and this says so instead of passing quietly.
     "recurrence_is_declared",
+    # FD-45. The mechanical pass faulted and therefore decided nothing. Listed here so
+    # the callers that separate computed facts from model opinion classify it as the
+    # computed fact it is: that this world's operational-depth attacks were never run.
+    "mechanical_checks_could_not_run",
     # FD-41. A world claiming the record already answered the question used to short
     # circuit this whole function to a single PASS, so the entire settled-record class
     # of run received no mechanical scrutiny at all — its only remaining attack was one
@@ -319,6 +323,19 @@ MECHANICAL_KEYS = (
 
 def _mech(key: str, severity: str, finding: str, basis: str) -> AuditFinding:
     return AuditFinding(key=key, severity=severity, finding=finding, evidence_basis=basis)
+
+
+def _check_could_not_run(key: str, why: str, basis: str, *, severity: str) -> AuditFinding:
+    """One phrasing for every check that declines, so declining can never read as a pass.
+
+    Two different things reach this: a check whose input does not exist yet (no compiled
+    recurrence declaration to verify a cadence against) and a check that faulted (FD-45).
+    They differ only in how bad it is to proceed, which is what ``severity`` carries. What
+    they must never differ in is being visible — an empty finding set and a PASS both read
+    as "examined and approved", and neither is true of a gate that did not run.
+    """
+
+    return _mech(key, severity, f"this check could NOT run: {why}", basis)
 
 
 def _dated_effects(spec: Any) -> list[tuple[str, str, Any]]:
@@ -534,7 +551,9 @@ def _effect_write(eff: Any) -> tuple[str | None, set[str]]:
     return name, _reads_fields(value)
 
 
-def _field_writers(spec: Any) -> tuple[dict[str, list[tuple[str, Any]]], dict[str, list[tuple[str, Any]]]]:
+def _field_writers(
+    spec: Any,
+) -> tuple[dict[str, list[tuple[str, Any]]], dict[str, list[tuple[str, Any]]]]:
     """Every field write in the world, as (what mechanisms do, what actors do).
 
     Each maps field id -> [(label, effect)]. Kept apart rather than merged because the
@@ -1007,7 +1026,9 @@ def mechanical_world_checks(
     # key: it collapsed the review from five checks to one, and the four it surrendered
     # were the ones that catch the shape underneath. An actor writing the terminal is a
     # reason to scrutinise HOW it decides, not a reason to stop asking.
-    actor_terms = sorted(t.split(":", 1)[1] for t in (action_written & terms) if t.startswith("field:"))
+    actor_terms = sorted(
+        t.split(":", 1)[1] for t in (action_written & terms) if t.startswith("field:")
+    )
 
     effects = _dated_effects(spec)
     findings: list[AuditFinding] = []
@@ -1234,16 +1255,18 @@ def _cadence_finding(
             "computed from the compiled world: occurrences of each external process "
             "grouped by the write they repeat",
         )
-    undeclared = sorted({f"{pid} ('{what}' x{len(occ)})" for pid, what, occ, p in repeating if p is None})
+    undeclared = sorted(
+        {f"{pid} ('{what}' x{len(occ)})" for pid, what, occ, p in repeating if p is None}
+    )
     if undeclared:
-        return _mech(
+        return _check_could_not_run(
             "recurrence_is_declared",
-            "MEDIUM",
-            f"this check could NOT run: {undeclared} repeat by enumeration and declare no "
-            "recurrence period, so how often the process really happens is asserted by "
-            "the number of occurrences that were typed and nothing verifies it",
+            f"{undeclared} repeat by enumeration and declare no recurrence period, so how "
+            "often the process really happens is asserted by the number of occurrences "
+            "that were typed and nothing verifies it",
             "computed from the compiled world: no compiled process carries a recurrence "
             "declaration to check the enumerated occurrences against",
+            severity="MEDIUM",
         )
     wrong = sorted(
         f"{pid} ('{what}')"
@@ -1333,6 +1356,44 @@ def _from_findings(findings: tuple[AuditFinding, ...]) -> WorldReview:
     )
 
 
+def _mechanical_or_fault(compiled: CompiledWorld, evidence: Any) -> tuple[AuditFinding, ...]:
+    """The mechanical checks, or a blocking finding saying they could not be computed.
+
+    FD-45. This used to be a bare ``except Exception: mechanical = ()``, and the reason it
+    was written that way is still true of the half below it: an *opinion* about a world
+    must never be able to kill a sound run, which is what happened when a live Bank of
+    England run compiled a real world, cleared every gate, and then died in this module's
+    own summary helper because a compiled ``at`` is an ISO string rather than a datetime.
+
+    It is not true of the mechanical half. These findings are facts computed from the
+    compiled world with no provider involved, so a fault in computing them is a fact
+    about our own code — and swallowing it published, silently, worlds that owed five
+    blocking findings and produced none. It was caught live: a ``NameError`` in the check
+    pass, and ``review_world(...).findings`` came back empty with ``blocking = []``, which
+    reads exactly like a world that was examined and approved.
+
+    So the catch stays and the silence goes. A pass that cannot complete emits a blocking
+    finding naming the fault, for the same reason an undeclared recurrence reports that it
+    could not be verified: a gate that cannot run must never read as a gate that ran and
+    approved.
+    """
+
+    try:
+        return mechanical_world_checks(compiled, evidence)
+    except Exception as exc:  # noqa: BLE001 — reported as a blocking finding, never swallowed
+        return (
+            _check_could_not_run(
+                "mechanical_checks_could_not_run",
+                f"computing them raised {type(exc).__name__}: {exc} — not one of the "
+                "operational-depth attacks was decided, so nothing here says this world "
+                "survived them",
+                "computed from the compiled world: the mechanical check pass itself "
+                "faulted before it could reach a verdict",
+                severity="CRITICAL",
+            ),
+        )
+
+
 def review_world(
     compiled: CompiledWorld,
     evidence: EvidenceView,
@@ -1343,18 +1404,19 @@ def review_world(
 ) -> WorldReview:
     """Ask whether this is the right world.
 
-    Never raises. This is an advisory step that runs *after* every mechanical gate has
-    already passed the world, so a fault here can only ever destroy a run that was
-    otherwise sound — which is exactly what happened: a live Bank of England run
+    Never raises. The model-opinion half is advisory and runs *after* every mechanical
+    gate has already passed the world, so a fault in it can only ever destroy a run that
+    was otherwise sound — which is exactly what happened: a live Bank of England run
     compiled a real world, cleared every gate, and then died in this function's own
     summary helper because a compiled ``at`` is an ISO string rather than a datetime.
     An opinion about a world must never be able to stop it.
+
+    The mechanical half is not an opinion and is not treated as one: see
+    :func:`_mechanical_or_fault`, which converts a fault there into a blocking finding
+    rather than into silence.
     """
 
-    try:
-        mechanical = mechanical_world_checks(compiled, evidence)
-    except Exception:  # noqa: BLE001 — a check that cannot run blocks nothing
-        mechanical = ()
+    mechanical = _mechanical_or_fault(compiled, evidence)
     try:
         return _review(
             compiled,

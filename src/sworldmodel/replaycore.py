@@ -710,10 +710,16 @@ def _eval_rendered(
     raise Unreconstructable(f"unsupported terminal operator {op!r}")
 
 
-def _eval_ast(node: Any, fields: dict[str, Any], counts: dict[str, int]) -> Any:
+def _eval_ast(
+    node: Any,
+    fields: dict[str, Any],
+    counts: dict[str, int],
+    records: Mapping[str, Sequence[Mapping[str, Any]]] | None,
+    events: Mapping[str, Sequence[Mapping[str, Any]]] | None,
+) -> Any:
     """Evaluate the executable terminal AST with the engine's own evaluator."""
 
-    return evaluate(parse_expr(node), ReplayWorld(fields, counts))
+    return evaluate(parse_expr(node), ReplayWorld(fields, counts, records=records, events=events))
 
 
 def reevaluate_terminal(
@@ -721,6 +727,9 @@ def reevaluate_terminal(
     rendered: Mapping[str, Any],
     fields: dict[str, Any],
     counts: dict[str, int],
+    *,
+    records: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
+    events: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
 ) -> tuple[bool, str | None, str]:
     """(resolved, outcome, how) for one REPLAYED branch state. Never guesses.
 
@@ -730,14 +739,23 @@ def reevaluate_terminal(
     grammar for runs that persisted no executable world. The live terminal evaluator
     stays in :mod:`sworldmodel.engine`; this one exists so a reviewer can re-run the
     recorded question without the engine or a model.
+
+    ``records`` / ``events`` are the reconstructed content from :func:`replay`. They
+    are what a content-predicated terminal reads; without them such a terminal
+    evaluates over blanks and answers NO (FD-42), so pass the whole
+    :class:`ReplayState`.
     """
 
     if terminal is not None:
         how = "executable AST (compiled_world.json)"
         try:
-            yes = bool(_eval_ast(terminal.get("yes_when"), fields, counts))
+            yes = bool(_eval_ast(terminal.get("yes_when"), fields, counts, records, events))
             unres_node = terminal.get("unresolved_when")
-            unres = bool(_eval_ast(unres_node, fields, counts)) if unres_node is not None else False
+            unres = (
+                bool(_eval_ast(unres_node, fields, counts, records, events))
+                if unres_node is not None
+                else False
+            )
         except UndeterminedExpressionError:
             # The terminal reads something this replayed state never determined. The
             # engine reports that as an honest unresolved outcome, and the replay must
@@ -747,8 +765,8 @@ def reevaluate_terminal(
     else:
         yes_src = str(rendered.get("yes_when") or "")
         unres_src = str(rendered.get("unresolved_when") or "False")
-        yes = bool(_eval_rendered(yes_src, fields, counts))
-        unres = bool(_eval_rendered(unres_src, fields, counts))
+        yes = bool(_eval_rendered(yes_src, fields, counts, records, events))
+        unres = bool(_eval_rendered(unres_src, fields, counts, records, events))
         how = "rendered terminal string (world_manifest.json) — no executable world persisted"
     if unres:
         return False, None, how
@@ -1012,10 +1030,17 @@ def counterfactual_outcome(
     simulation, no model call.
     """
 
-    replayed, counts = replay_fields(events, keep)
-    fields = {**dict(initial), **replayed}
+    state = replay(events, keep)
+    fields = {**dict(initial), **state.fields}
     try:
-        resolved, outcome, _ = reevaluate_terminal(terminal, rendered, fields, counts)
+        resolved, outcome, _ = reevaluate_terminal(
+            terminal,
+            rendered,
+            fields,
+            state.counts,
+            records=state.records,
+            events=state.events,
+        )
     except Unreconstructable:
         return "UNRECONSTRUCTABLE"
     return outcome if resolved else "UNRESOLVED"
@@ -1126,18 +1151,28 @@ def reconstruct_run(record: RunRecord) -> dict[str, Any]:
             keep: KeepPredicate,
             evs: list[EventLike] = evs,
             initial: dict[str, Any] = initial,
-        ) -> tuple[dict[str, Any], dict[str, int]]:
+        ) -> ReplayState:
             # Loop variables bound as defaults: a closure capturing `evs` by
             # reference evaluates against whichever branch the loop reached LAST if
             # ever called late. Called-in-iteration today, but a replay may not
             # depend on that.
-            f, c = replay_fields(evs, keep)
-            return {**initial, **f}, c
+            replayed = replay(evs, keep)
+            return ReplayState(
+                {**initial, **replayed.fields},
+                replayed.counts,
+                replayed.records,
+                replayed.events,
+            )
 
-        full_fields, full_counts = state(lambda e: True)
+        full = state(lambda e: True)
         try:
             resolved, outcome, how = reevaluate_terminal(
-                terminal_ast, rendered, full_fields, full_counts
+                terminal_ast,
+                rendered,
+                full.fields,
+                full.counts,
+                records=full.records,
+                events=full.events,
             )
         except Unreconstructable as exc:
             notes.append(f"{bid}: {exc}")
@@ -1156,8 +1191,12 @@ def reconstruct_run(record: RunRecord) -> dict[str, Any]:
             "actor_event_count": len(actor_events),
             "process_event_count": len(process_events),
             "actor_invocations": (schedule.get(bid, {}) or {}).get("actor_invocations", {}),
-            "final_fields": full_fields,
-            "final_event_type_counts": full_counts,
+            "final_fields": full.fields,
+            "final_event_type_counts": full.counts,
+            # What the collections actually CONTAIN, not merely how many entries
+            # they have. A terminal predicated on record values is decided by this,
+            # and a reviewer who cannot see it cannot check the answer (FD-42).
+            "final_records": full.records,
             "initial_fields": initial,
             "fields_carried_in_never_written_by_any_event": carried_in,
             "matches_published": (outcome == b.get("outcome")) if resolved else None,
