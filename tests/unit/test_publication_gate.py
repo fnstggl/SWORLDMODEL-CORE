@@ -619,19 +619,28 @@ def test_a_settled_record_citing_a_claim_that_does_not_exist_is_refused() -> Non
     assert "c_no_such_claim" in exists.finding
 
 
-def test_a_settled_record_about_something_else_is_refused() -> None:
-    """Subject and measurement scope must match: 'the record already answered this' is
-    not established by a record about a different subject."""
+def test_a_settled_record_about_something_else_entirely_is_refused() -> None:
+    """The one subject test that admits no paraphrase defense.
+
+    Asking "does the claim mention the subject" would refuse correct worlds — a world
+    about the EU-Mercosur agreement is legitimately settled by a claim about the European
+    Commission — so the check fires only when the cited record shares NOTHING with the
+    world: not its subject, title, entity names, resolution units, or terminal text.
+    """
 
     world = _settled_world()
-    # Same world, same citation, a subject the cited claim says nothing about.
-    world["world_spec"]["subject_entity"] = "the Kerguelen desalination tariff"
+    cited = world["world_spec"]["documents"][0]["evidence_claim_ids"][0]
+    for claim in world["claims"]:
+        if claim["id"] == cited:
+            claim["proposition"] = "Kerguelen desalination tariffs rose fourteen percent"
+            claim["supporting_excerpt"] = claim["proposition"]
+            claim["entities"] = ["Kerguelen Water Authority"]
     findings = _mechanical(world)
 
     match = findings["cited_resolution_subject_matches"]
     assert match.severity == "HIGH"
     assert match.is_blocking
-    assert "Kerguelen" in match.finding or "kerguelen" in match.finding.lower()
+    assert "nothing in common" in match.finding
 
 
 def test_a_settled_record_resting_on_inference_rather_than_record_is_refused() -> None:

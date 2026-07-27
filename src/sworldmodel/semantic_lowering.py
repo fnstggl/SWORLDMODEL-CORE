@@ -441,6 +441,12 @@ def _lower_change(
         stock = stocks.get(c.target)
         if stock is not None:
             return _lower_stock_move(c.op, delta, stock)
+        source = stocks.get(c.drawn_from) if c.drawn_from else None
+        if source is not None and c.op == "increase":
+            # The receiving side of one movement: it takes what the source could give,
+            # computed from the same pre-firing world the source's own clamp reads, so
+            # the two halves can never disagree about how much moved.
+            delta = {"op": "min", "args": [delta, _available(source)]}
         return [
             {
                 "op": "adjust_field",

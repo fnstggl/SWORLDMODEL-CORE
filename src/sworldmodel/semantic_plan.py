@@ -138,8 +138,8 @@ SEMANTIC_DEFECTS = (
     "DEGENERATE_FILLER_ALTERNATIVE",
     "TERMINAL_SENSITIVITY_MISDECLARED",
     "UNCONSERVED_PHYSICAL_STOCK",
+    "UNSOURCED_TRANSFER",
     "STOCK_DECLARATION_INCOMPLETE",
-    "STOCK_DRAINED_WITHOUT_INFLOW",
     "ACCUMULATING_QUANTITY_UNDECLARED",
     "ACCUMULATOR_WITHOUT_AN_ORIGIN",
     "FLOW_PERIOD_UNDECLARED",
@@ -1354,6 +1354,10 @@ def _lineage_states(plan: SemanticPlan, seeds: set[str]) -> set[str]:
                     grown |= c.value.states_read()
                 if c.amount is not None:
                     grown |= c.amount.states_read()
+                if c.drawn_from:
+                    # What a movement can carry is bounded by what its source holds, so
+                    # the source is upstream of everything the receiver feeds.
+                    grown.add(c.drawn_from)
         if grown == relevant:
             return relevant
         relevant = grown
@@ -1988,7 +1992,8 @@ def _dimension_errors(plan: SemanticPlan) -> list[str]:
                 f"DURATION_MISUSED: {where}: {why}. Correction boundary: the parts of this product"
             )
         for part in value.parts:
-            check_durations(part, where)
+            if part.kind != "duration":
+                check_durations(part, where)
 
     for a in plan.affordances:
         for i, c in enumerate(a.changes):
@@ -2026,6 +2031,22 @@ def _dimension_errors(plan: SemanticPlan) -> list[str]:
     return errors
 
 
+_RATE_UNIT = re.compile(r"(^|[\s(])per([\s)]|$)|/", re.IGNORECASE)
+
+
+def _reads_as_a_rate(unit: str) -> bool:
+    """Whether a unit string is written as a quantity per unit of something.
+
+    Not a vocabulary of domains — a vocabulary of units. "vehicles per week",
+    "acre-feet/day" and "tonnes per hour" are how every field writes a rate, and a state
+    measured that way is a rate whatever its declared kind says. Without this, declaring
+    a rate as a plain level walks straight past the dimensional gate, which would leave
+    the whole check opt-in.
+    """
+
+    return bool(_RATE_UNIT.search(unit or ""))
+
+
 def _state_kind_errors(plan: SemanticPlan) -> list[str]:
     """FD-24: a physical quantity must say it is one, and then it has a floor.
 
@@ -2058,6 +2079,14 @@ def _state_kind_errors(plan: SemanticPlan) -> list[str]:
                 "measured in is what makes it comparable with anything else, and a "
                 "number with no unit cannot be checked against a rate, a threshold or "
                 "another quantity at all. Correction boundary: unit on this state"
+            )
+        if s.kind != "flow" and s.state_type == "quantity" and _reads_as_a_rate(s.unit):
+            errors.append(
+                f"FLOW_PERIOD_UNDECLARED: {where} is measured in {s.unit!r} — a quantity "
+                f"per unit of time — but is declared a {s.kind}, so nothing can tell it "
+                "apart from a total and it can be added straight into one. Correction "
+                "boundary: kind=flow with the period it is quoted over, and multiply it "
+                "by a duration wherever it is applied"
             )
         if s.kind != "flow" and s.period:
             errors.append(
@@ -2139,22 +2168,6 @@ def _state_kind_errors(plan: SemanticPlan) -> list[str]:
                     "is no room between them for anything to be held. Correction "
                     "boundary: capacity or conserved_floor"
                 )
-            if s.name in decreased and s.name not in increased and s.name in terminal_read:
-                # Refusable before anything runs: a stock the world only ever draws on,
-                # standing between the cutoff and the answer, cannot be what the record
-                # says it is unless nothing replenishes it inside the window — and if
-                # nothing does, the plan should say what the world does when it empties.
-                errors.append(
-                    f"STOCK_DRAINED_WITHOUT_INFLOW: {where} is drawn down by this world "
-                    "and nothing anywhere puts anything back, while the terminal depends "
-                    "on it — so the answer is decided by how long the starting amount "
-                    "lasts, and the plan never says whether that is true of the real "
-                    "world. Correction boundary: model the inflow that replenishes it "
-                    "(with its own rate and cadence), or state in why_material that this "
-                    "quantity genuinely is not replenished inside the window so the "
-                    "drawdown is the mechanism"
-                )
-
         if s.kind == "level" and s.state_type == "quantity" and not s.not_a_stock_because.strip():
             if s.name in decreased:
                 errors.append(
@@ -2204,6 +2217,85 @@ def _state_kind_errors(plan: SemanticPlan) -> list[str]:
                 "— the amount recorded so far, cited (0 with the claim that nothing has "
                 "been recorded yet is a real and sufficient answer)"
             )
+    return errors
+
+
+def _transfer_errors(plan: SemanticPlan) -> list[str]:
+    """Both sides of one movement of quantity have to be the same movement.
+
+    A firing that takes grain out of an elevator and adds it to the season's tally is one
+    event, not two. Left as two independent changes the tally counts what was ASKED for
+    while the pile is clamped at what it HAD — so an empty elevator still reports a full
+    quarter of shipments and the conservation protects the stock while the answer stays
+    exactly as wrong as before. An increase that carries a stock's quantity therefore
+    names that stock in ``drawn_from``, and lowering gives both sides the one clamped
+    amount.
+    """
+
+    errors: list[str] = []
+    stocks = {s.name for s in plan.states if s.kind == "stock"}
+    state_names = {s.name for s in plan.states}
+    groups: list[tuple[str, tuple[SemanticChange, ...]]] = [
+        (f"affordance {a.name!r}", a.changes) for a in plan.affordances
+    ]
+    groups += [
+        (f"process {p.name!r} occurrence[{j}]", o.changes)
+        for p in plan.processes
+        for j, o in enumerate(p.occurrences)
+    ]
+    for where, changes in groups:
+        drains = {c.target: c.amount for c in changes if c.op == "decrease" and c.target in stocks}
+        for c in changes:
+            if c.op != "increase":
+                if c.drawn_from:
+                    errors.append(
+                        f"UNSOURCED_TRANSFER: {where}: drawn_from says where an increase's "
+                        f"quantity comes from, and this change is a {c.op}. Correction "
+                        "boundary: drop drawn_from from this change"
+                    )
+                continue
+            if c.drawn_from:
+                if c.drawn_from not in state_names:
+                    errors.append(
+                        f"{where}: increase {c.target!r} is drawn_from {c.drawn_from!r}, "
+                        "which is not a declared state"
+                    )
+                elif c.drawn_from not in stocks:
+                    errors.append(
+                        f"UNSOURCED_TRANSFER: {where}: increase {c.target!r} is drawn_from "
+                        f"{c.drawn_from!r}, which is not a stock — quantity can only come "
+                        "out of something that holds it. Correction boundary: declare "
+                        f"{c.drawn_from!r} kind=stock, or drop drawn_from"
+                    )
+                elif c.drawn_from not in drains:
+                    errors.append(
+                        f"UNSOURCED_TRANSFER: {where}: increase {c.target!r} is drawn_from "
+                        f"{c.drawn_from!r}, but nothing in this same firing decreases "
+                        f"{c.drawn_from!r} — the quantity would arrive without leaving. "
+                        f"Correction boundary: add the matching decrease of "
+                        f"{c.drawn_from!r} by the same amount"
+                    )
+                elif drains[c.drawn_from] != c.amount:
+                    errors.append(
+                        f"UNSOURCED_TRANSFER: {where}: increase {c.target!r} is drawn_from "
+                        f"{c.drawn_from!r} but the two sides move different amounts — one "
+                        "movement has one size. Correction boundary: the amounts on these "
+                        "two changes"
+                    )
+                continue
+            if c.target in stocks:
+                continue  # an inflow into a stock from outside the modelled boundary
+            matching = sorted(name for name, amount in drains.items() if amount == c.amount)
+            if matching:
+                errors.append(
+                    f"UNSOURCED_TRANSFER: {where}: increase {c.target!r} moves exactly the "
+                    f"amount this same firing takes out of {matching} without saying it "
+                    "came from there. If it did, the two are one movement and must be "
+                    "clamped together — a stock that runs dry would otherwise keep "
+                    f"feeding {c.target!r} with quantity it does not have. Correction "
+                    f'boundary: drawn_from: "{matching[0]}" on this change, or a '
+                    "different amount if the two really are independent"
+                )
     return errors
 
 
@@ -2789,6 +2881,7 @@ def validate_semantic_plan(
     # invent) when a name or a number is missing.
     errors += _state_kind_errors(plan)
     errors += _dimension_errors(plan)
+    errors += _transfer_errors(plan)
     errors += _cadence_errors(plan)
     errors += _representation_record_errors(plan)
     errors += _alternative_quality_errors(plan, cited)

@@ -393,25 +393,61 @@ class _ProbeWorld:
         return datetime.now(UTC)
 
 
+def _apply_probe_effect(eff: Any, fields: dict[str, Any]) -> None:
+    """One field write applied to a probe assignment, in place."""
+
+    params = eff.params_dict
+    name = params.get("field")
+    if not isinstance(name, str):
+        return
+    if eff.op == "set_field":
+        value = _probe_value(params.get("value"), fields)
+        if value is not None:
+            fields[name] = value
+    elif eff.op == "adjust_field":
+        delta = _probe_value(params.get("delta", params.get("amount")), fields)
+        current = fields.get(name)
+        if isinstance(delta, (int, float)) and isinstance(current, (int, float)):
+            fields[name] = current + delta
+
+
+def _forced_agent_effects(spec: Any) -> list[Any]:
+    """Writes the world cannot avoid, though an actor makes them (FD-33).
+
+    A field that exactly one action writes and that no mechanism writes at all is not a
+    decision: the actor's only alternative is to leave the field unset, so if the world
+    ever gets a value there, that is the value. Placing such an action on the terminal
+    quantity was a universal skeleton key — it hid the terminal behind an effect the
+    forward probe never ran, so ``_flipping_uncertainties`` reported nothing and the
+    review concluded no draw decided the answer.
+
+    A field two actions can write differently IS a decision and is deliberately excluded:
+    the probe must never assume which way an actor chose.
+    """
+
+    mechanism, agent = _field_writers(spec)
+    return [
+        writers[0][1]
+        for name, writers in sorted(agent.items())
+        if len(writers) == 1 and name not in mechanism
+    ]
+
+
 def _forward_fields(spec: Any, seed: dict[str, Any]) -> dict[str, Any]:
-    """The world's own mechanisms run forward from a seeded branch draw."""
+    """The world's own mechanisms run forward from a seeded branch draw.
+
+    Followed by the writes only one actor can make and nothing else can (see
+    :func:`_forced_agent_effects`), applied twice so a chain of them settles.
+    """
 
     fields: dict[str, Any] = {f.field_id: f.initial for f in spec.fields if f.initial is not None}
     fields.update(seed)
     for _label, _at, eff in _dated_effects(spec):
-        params = eff.params_dict
-        name = params.get("field")
-        if not isinstance(name, str):
-            continue
-        if eff.op == "set_field":
-            value = _probe_value(params.get("value"), fields)
-            if value is not None:
-                fields[name] = value
-        elif eff.op == "adjust_field":
-            delta = _probe_value(params.get("delta", params.get("amount")), fields)
-            current = fields.get(name)
-            if isinstance(delta, (int, float)) and isinstance(current, (int, float)):
-                fields[name] = current + delta
+        _apply_probe_effect(eff, fields)
+    forced = _forced_agent_effects(spec)
+    for _pass in range(2):
+        for eff in forced:
+            _apply_probe_effect(eff, fields)
     return fields
 
 
@@ -452,6 +488,273 @@ def _uncertainty_field_ids(compiled: CompiledWorld) -> set[str]:
         out.add(u.variable_id)
         out.update(name for o in u.outcomes for name, _v in o.field_effects)
     return out
+
+
+# ---------------------------------------------------------------------------
+# The terminal's lineage closure (FD-28)
+#
+# Every check below used to key on the terminal's DIRECT writers, which meant one alias
+# hop disarmed all of them: split `total := base x factor` into `projection := base x
+# factor` followed by `total := projection` and the deciding draw is no longer read by
+# anything that writes a terminal term, so the review's own `_flipping_uncertainties`
+# would correctly report that the draw flips the answer and the check beside it would
+# report PASS. The static side already had the right idea — `semantic_plan._lineage_states`
+# — and D3 used it, which is why D3 caught what the review could not.
+#
+# This is the compiled twin of that closure, computed from the executable so both
+# compiler modes are judged identically. It deliberately traverses ACTION effects too: a
+# lineage that runs through an actor's write is still a lineage, and pretending
+# otherwise is the other half of the same evasion (FD-33).
+# ---------------------------------------------------------------------------
+
+
+def _effect_write(eff: Any) -> tuple[str | None, set[str]]:
+    """The field one compiled effect writes, and the fields its amount reads.
+
+    ``delta`` and ``amount`` are both accepted for ``adjust_field`` because the two
+    compiler modes emit different keys for it, and a check that reads only one of them
+    sees an accumulation as reading nothing at all.
+    """
+
+    if eff.op not in ("set_field", "adjust_field"):
+        return None, set()
+    params = eff.params_dict
+    name = params.get("field")
+    if not isinstance(name, str):
+        return None, set()
+    value = (
+        params.get("value") if eff.op == "set_field" else params.get("delta", params.get("amount"))
+    )
+    return name, _reads_fields(value)
+
+
+def _field_writers(spec: Any) -> tuple[dict[str, list[tuple[str, Any]]], dict[str, list[tuple[str, Any]]]]:
+    """Every field write in the world, as (what mechanisms do, what actors do).
+
+    Each maps field id -> [(label, effect)]. Kept apart rather than merged because the
+    checks mean different things by them: an actor writing the terminal is a reason to
+    ask HOW it decides, not the same thing as the environment announcing a figure.
+    """
+
+    mechanism: dict[str, list[tuple[str, Any]]] = {}
+    agent: dict[str, list[tuple[str, Any]]] = {}
+    for label, _at, eff in _dated_effects(spec):
+        name, _reads = _effect_write(eff)
+        if name is not None:
+            mechanism.setdefault(name, []).append((label, eff))
+    for action in spec.actions:
+        for eff in action.effects:
+            name, _reads = _effect_write(eff)
+            if name is not None:
+                agent.setdefault(name, []).append((f"action:{action.action_id}", eff))
+    return mechanism, agent
+
+
+def _lineage_fields(spec: Any, seeds: set[str]) -> set[str]:
+    """Every field whose value can reach ``seeds`` through this world's own writes.
+
+    The compiled counterpart of :func:`sworldmodel.semantic_plan._lineage_states`, and
+    deliberately the same closure: "terminal-relevant" means a field that something the
+    terminal reads is computed from, however many hops away.
+    """
+
+    mechanism, agent = _field_writers(spec)
+    relevant = set(seeds)
+    while True:
+        grown = set(relevant)
+        for name in sorted(relevant):
+            for _label, eff in mechanism.get(name, []) + agent.get(name, []):
+                _n, reads = _effect_write(eff)
+                grown |= reads
+        if grown == relevant:
+            return relevant
+        relevant = grown
+
+
+def _is_relabelling(eff: Any) -> bool:
+    """True when a write copies one field and adds nothing: ``x := y``.
+
+    A rename is not a production stage. This is what tells the intermediate the recharge
+    world really produces — a diverted volume that is then ADDED to a cited log — from
+    the intermediate an evasion invents, which exists only to be copied into the terminal
+    so that the terminal's direct writer no longer reads the draw.
+    """
+
+    from .worldspec import Expr, parse_expr
+
+    if eff.op != "set_field":
+        return False
+    value: Any = eff.params_dict.get("value")
+    if isinstance(value, dict) and "op" in value:
+        try:
+            value = parse_expr(value)
+        except (ValueError, KeyError, TypeError):
+            return False
+    return isinstance(value, Expr) and value.op == "field" and len(_reads_fields(value)) == 1
+
+
+def _announced_chain(
+    name: str,
+    mechanism: dict[str, list[tuple[str, Any]]],
+    agent: dict[str, list[tuple[str, Any]]],
+    seen: frozenset[str] = frozenset(),
+) -> list[str] | None:
+    """The chain of set-once writes by which ``name`` is announced, or None if built.
+
+    The lineage generalisation of D4's one-step test, and it reduces to exactly the old
+    test at depth one: a field written by a single ``set_field`` whose inputs nothing in
+    the world produces is announced. When its inputs ARE produced, the same question is
+    asked of each of them, so a rename in the middle buys nothing.
+
+    An actor's write ends the chain unless it is a pure relabelling. A world in which
+    people genuinely produce the outcome owes no operational depth; a world in which one
+    actor's only affordance copies a figure the environment computed is the environment
+    announcing the answer with a signature on it.
+    """
+
+    if name in seen:
+        return None
+    writers = mechanism.get(name, []) + agent.get(name, [])
+    if len(writers) != 1:
+        return None
+    label, eff = writers[0]
+    if eff.op != "set_field":
+        return None
+    if agent.get(name) and not _is_relabelling(eff):
+        return None
+    _n, reads = _effect_write(eff)
+    chain = [f"{name} (set once by {label})"]
+    for source in sorted((reads & (set(mechanism) | set(agent))) - {name}):
+        rest = _announced_chain(source, mechanism, agent, seen | {name})
+        if rest is None:
+            return None
+        chain.extend(rest)
+    return chain
+
+
+def _production_stages(
+    lineage: set[str],
+    field_terms: set[str],
+    mechanism: dict[str, list[tuple[str, Any]]],
+    agent: dict[str, list[tuple[str, Any]]],
+) -> list[str]:
+    """Lineage fields the world genuinely builds, rather than merely relabels.
+
+    A field counts when the world does something to it — writes it more than once, or
+    accumulates into it — or when something does more than copy it: adds it to a stock,
+    or combines it with another field. An intermediate whose only consumer assigns it
+    straight into the terminal is a rename, and a rename is not a production stage.
+    """
+
+    stages: list[str] = []
+    writes = [
+        (target, eff)
+        for table in (mechanism, agent)
+        for target, items in table.items()
+        for _label, eff in items
+    ]
+    for name in sorted((lineage & set(mechanism)) - field_terms):
+        writers = mechanism[name]
+        if len(writers) > 1 or any(eff.op == "adjust_field" for _label, eff in writers):
+            stages.append(name)
+            continue
+        for target, eff in writes:
+            if target == name or target not in lineage:
+                continue
+            _t, reads = _effect_write(eff)
+            if name in reads and (eff.op == "adjust_field" or len(reads) > 1):
+                stages.append(name)
+                break
+    return stages
+
+
+# ---------------------------------------------------------------------------
+# Cadence (FD-25, FD-31)
+# ---------------------------------------------------------------------------
+
+_PERIOD_UNIT_SECONDS = {"W": 604800.0, "D": 86400.0, "H": 3600.0, "M": 60.0, "S": 1.0}
+
+
+def _declared_period_seconds(proc: Any) -> float | None:
+    """The recurrence period a compiled process declares, in seconds, or None.
+
+    The semantic layer is growing a first-class recurrence declaration (``every`` with
+    ``from``/``until``) and the ruling is that it must survive lowering onto the compiled
+    process rather than being expanded away into a flat occurrence list — an expansion is
+    what runs, the declaration is what can be audited. Until that attribute exists there
+    is nothing here to read, and the caller must SAY it could not verify the cadence
+    rather than passing quietly: a gate that cannot run must never read as a gate that
+    ran and approved.
+
+    Tolerant of the shapes the declaration might arrive in — a number of seconds, a
+    ``timedelta``, or an ISO-8601 duration of fixed-length units ("P1W", "PT12H").
+    Months and years are deliberately unsupported: they are not fixed lengths, so a
+    period expressed in them cannot be checked against timestamps without a calendar.
+    """
+
+    from datetime import timedelta
+
+    raw = next(
+        (
+            value
+            for attr in ("every", "period", "recurrence", "recurs_every")
+            if (value := getattr(proc, attr, None)) is not None
+        ),
+        None,
+    )
+    if raw is None:
+        return None
+    if isinstance(raw, timedelta):
+        return raw.total_seconds()
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+        return float(raw) or None
+    period = getattr(raw, "every", None) or getattr(raw, "period", None) or raw
+    text = str(period).strip().upper()
+    if not text.startswith("P"):
+        return None
+    total, number, in_time = 0.0, "", False
+    for char in text[1:]:
+        if char == "T":
+            in_time = True
+        elif char.isdigit() or char == ".":
+            number += char
+        elif char in _PERIOD_UNIT_SECONDS and number:
+            unit = "M" if (char == "M" and in_time) else char
+            if char == "M" and not in_time:
+                return None  # months are not a fixed length
+            total += float(number) * _PERIOD_UNIT_SECONDS[unit]
+            number = ""
+        else:
+            return None
+    return total or None
+
+
+def _repetition_groups(proc: Any, lineage: set[str]) -> list[tuple[str, list[Any]]]:
+    """Occurrences of one process that repeat the same write, grouped by that write.
+
+    "The same thing happening again" is what a cadence declares, and it is the only thing
+    a count can be wrong about. Two occurrences that write different fields are two
+    stages of a process, not two turns of a cycle, so they are never grouped — which is
+    why the recharge world's divert-then-infiltrate pair is not treated as a repetition
+    with an undeclared period.
+    """
+
+    groups: dict[tuple[tuple[str, str], ...], list[Any]] = {}
+    for occ in proc.occurrences:
+        signature = tuple(
+            sorted(
+                (eff.op, name)
+                for eff in occ.effects
+                if (name := _effect_write(eff)[0]) is not None and name in lineage
+            )
+        )
+        if signature:
+            groups.setdefault(signature, []).append(occ)
+    return [
+        (", ".join(f"{op} {name}" for op, name in signature), occurrences)
+        for signature, occurrences in sorted(groups.items())
+        if len(occurrences) > 1
+    ]
 
 
 def _cited_terminal_claim_ids(spec: Any) -> dict[str, tuple[str, ...]]:
@@ -590,37 +893,59 @@ def _preresolved_checks(compiled: CompiledWorld, evidence: Any) -> tuple[AuditFi
             )
         )
 
-    subject = str(getattr(compiled.spec, "subject_entity", "") or "")
-    wanted = _significant_tokens(subject)
+    # Subject match, in the ONE direction that cannot false-positive. Asking "does the
+    # claim mention the subject_entity" fails on ordinary paraphrase — a world about "the
+    # EU-Mercosur agreement" is legitimately resolved by a claim about the "European
+    # Commission" — and a gate that refuses correct worlds is worse than the hole it
+    # closes. What admits no paraphrase defense is a cited record that shares NOTHING
+    # with the world it supposedly settles: not the subject, not the title, not any
+    # entity's name, not the resolution units, not a word of the terminal's own
+    # description. That is evidence about something else, and it is checked against every
+    # string the world offers so the bar is as generous as it can be while still meaning
+    # something. Whether the cited act matches the question's instrument, degree and
+    # specificity is CWF-7 and is not decided here.
+    world_text = " ".join(
+        [
+            str(getattr(compiled.spec, "subject_entity", "") or ""),
+            str(getattr(compiled.spec, "resolution_units", "") or ""),
+            str(getattr(compiled.spec, "title", "") or ""),
+            str(getattr(compiled.spec.terminal, "description", "") or ""),
+            " ".join(str(getattr(e, "name", "")) for e in compiled.spec.entities),
+        ]
+    )
+    wanted = _significant_tokens(world_text)
     if wanted and resolved:
         haystack: set[str] = set()
         for c in resolved:
             haystack |= _significant_tokens(str(getattr(c, "proposition", "")))
+            haystack |= _significant_tokens(str(getattr(c, "supporting_excerpt", "")))
             haystack |= _significant_tokens(" ".join(getattr(c, "entities", ()) or ()))
         overlap = sorted(wanted & haystack)
         findings.append(
             _mech(
                 "cited_resolution_subject_matches",
                 "PASS" if overlap else "HIGH",
-                f"the cited record is about this world's subject ({overlap})"
+                f"the cited record and this world are about the same thing ({overlap[:8]})"
                 if overlap
-                else f"the cited record never mentions this world's subject "
-                f"({subject!r}): the claim that the question is already answered rests "
-                "on evidence about something else",
-                "computed from the compiled world: the spec's subject_entity against the "
-                "propositions and entities of every claim the terminal's producers cite",
+                else "the cited record has nothing in common with the world it settles — "
+                f"not its subject ({str(getattr(compiled.spec, 'subject_entity', ''))!r}), "
+                "its title, any entity's name, its resolution units or its terminal's own "
+                "description: the claim that the question is already answered rests on "
+                "evidence about something else",
+                "computed from the compiled world: every naming string the spec offers "
+                "against the propositions, excerpts and entities of every cited claim",
             )
         )
     else:
-        # No usable subject string, or nothing to compare it against. Absence of a
-        # subject is not evidence of a mismatch, so this never fails on it.
+        # Nothing to compare. Absence of a subject is not evidence of a mismatch, so this
+        # never fails on it.
         findings.append(
             _mech(
                 "cited_resolution_subject_matches",
                 "MEDIUM",
-                "the subject match could not be computed: this world declares no usable "
-                f"subject_entity ({subject!r}) or its terminal cites no claims",
-                "computed from the compiled world: subject_entity and the cited claims",
+                "the subject match could not be computed: this world offers no naming "
+                "string, or its terminal cites no claims",
+                "computed from the compiled world: the spec's naming strings and the cited claims",
             )
         )
     return tuple(findings)
@@ -661,49 +986,43 @@ def mechanical_world_checks(
     for action in spec.actions:
         for eff in action.effects:
             action_written |= _effect_produces(eff)
-    if not field_terms or (action_written & terms):
+    if not field_terms:
         return (
             _mech(
                 "terminal_set_in_one_step",
                 "PASS",
-                "the terminal is reached through what actors do, or reads no quantity, "
-                "so the operational-depth checks do not apply to this world",
-                "computed from the compiled world: terminal terms "
-                f"{sorted(terms)}, action-written terms {sorted(action_written & terms)}",
+                "the terminal reads no quantity, so the operational-depth checks have no "
+                "quantity to follow",
+                f"computed from the compiled world: terminal terms {sorted(terms)}",
             ),
         )
+    # FD-33. This used to return that same single PASS whenever ANY action wrote ANY
+    # terminal term, which made one actor affordance on the terminal quantity a skeleton
+    # key: it collapsed the review from five checks to one, and the four it surrendered
+    # were the ones that catch the shape underneath. An actor writing the terminal is a
+    # reason to scrutinise HOW it decides, not a reason to stop asking.
+    actor_terms = sorted(t.split(":", 1)[1] for t in (action_written & terms) if t.startswith("field:"))
 
     effects = _dated_effects(spec)
     findings: list[AuditFinding] = []
     uncertain_fields = _uncertainty_field_ids(compiled)
-    written_by_mechanism = {
-        str(eff.params_dict.get("field"))
-        for _label, _at, eff in effects
-        if eff.op in ("set_field", "adjust_field") and isinstance(eff.params_dict.get("field"), str)
-    }
+    mechanism, agent = _field_writers(spec)
+    lineage = _lineage_fields(spec, field_terms)
 
-    # 1 & 2 — the terminal quantity set in one step, and by one uncertain multiplier.
+    # 1 & 2 — the terminal quantity announced rather than built, and one uncertain
+    # multiplier deciding it. Both now read the whole lineage: a draw scaled into any
+    # field the terminal is computed from is a draw scaled into the terminal.
     one_step: list[str] = []
-    multiplier_writers: list[tuple[str, str]] = []
     for name in sorted(field_terms):
-        writers = [
-            (label, eff)
-            for label, _at, eff in effects
-            if eff.op in ("set_field", "adjust_field") and eff.params_dict.get("field") == name
-        ]
-        for label, eff in writers:
-            value = eff.params_dict.get("value", eff.params_dict.get("delta"))
-            reads = _reads_fields(value)
-            # A branch draw scaled straight into the terminal quantity, however many
-            # stages the world has: the count of writers decides whether it is also
-            # one-step, not whether the draw is doing the deciding.
+        chain = _announced_chain(name, mechanism, agent)
+        if chain is not None:
+            one_step.extend(chain)
+    multiplier_writers: list[tuple[str, str]] = []
+    for name in sorted(lineage):
+        for _label, eff in mechanism.get(name, []) + agent.get(name, []):
+            _n, reads = _effect_write(eff)
             multiplier_writers.extend((name, v) for v in sorted(reads & uncertain_fields))
-            if (
-                len(writers) == 1
-                and eff.op == "set_field"
-                and not (reads & (written_by_mechanism - {name}))
-            ):
-                one_step.append(f"{name} (set once by {label})")
+    multiplier_writers = list(dict.fromkeys(multiplier_writers))
     if one_step:
         findings.append(
             _mech(
@@ -712,8 +1031,9 @@ def mechanical_world_checks(
                 f"the terminal quantity is written once and never built: {one_step} — "
                 "nothing accumulates, nothing intermediate is produced, so the world "
                 "reports a figure rather than operating the process that makes it",
-                "computed from the compiled world: the only writer of each term is a "
-                "single set_field whose inputs no other effect produces",
+                "computed from the compiled world: following each terminal term back "
+                "through its writers, every step is a single set_field and the chain "
+                "bottoms out in inputs no effect produces",
             )
         )
     else:
@@ -722,8 +1042,10 @@ def mechanical_world_checks(
                 "terminal_set_in_one_step",
                 "PASS",
                 "the terminal quantity is produced by more than one step, or from "
-                "inputs the world itself produces",
-                "computed from the compiled world: terminal-term writers and their inputs",
+                "inputs the world itself produces"
+                + (f", or by what actors do ({actor_terms})" if actor_terms else ""),
+                "computed from the compiled world: the writer chain of each terminal "
+                f"term, over the lineage {sorted(lineage)}",
             )
         )
 
@@ -742,12 +1064,14 @@ def mechanical_world_checks(
             _mech(
                 "single_uncertain_multiplier_decides",
                 "HIGH" if uncited else "MEDIUM",
-                f"the result is decided by an uncertain factor read straight into the "
-                f"terminal quantity: {decisive} — running the world's own arithmetic "
+                f"the result is decided by an uncertain factor read into the terminal "
+                f"quantity's lineage: {decisive} — running the world's own arithmetic "
                 "under each alternative flips the answer, so the branch draw is the "
                 "forecast",
                 "computed from the compiled world: the terminal resolves both ways "
-                "across that variable's alternatives with nothing else changed",
+                "across that variable's alternatives with nothing else changed, and the "
+                "variable is read by a writer of the terminal's lineage "
+                f"{sorted(lineage)}",
             )
         )
         if uncited:

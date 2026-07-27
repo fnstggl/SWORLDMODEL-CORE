@@ -55,6 +55,24 @@ QUARTER_START = "2026-01-12T09:00:00+00:00"
 QUARTER_END = "2026-04-06T09:00:00+00:00"
 WEEKLY_FIRINGS = 13
 
+
+def WEEK_OF(rate: str) -> dict[str, Any]:
+    """One week's worth of a weekly rate — the amount a single firing moves.
+
+    A rate is not a quantity: this is the arithmetic that turns "four thousand tonnes a
+    week" into "four thousand tonnes", and the reason the quarter's total is the rate
+    times the time it ran rather than the rate times however many dates were typed.
+    """
+
+    return {
+        "kind": "product",
+        "parts": [
+            {"kind": "state", "state": rate},
+            {"kind": "duration", "value": "P1W"},
+        ],
+    }
+
+
 CLAIMS: dict[str, dict[str, Any]] = {
     "c-e1": {
         "proposition": "The Halvard Reach grain elevator held 10000 tonnes of grain at the "
@@ -81,8 +99,7 @@ CLAIMS: dict[str, dict[str, Any]] = {
         "entities": ["Kestrel Reach Ferry Berth"],
     },
     "c-b2": {
-        "proposition": "The Kestrel Reach berth's published timetable sails 400 vehicles a "
-        "week",
+        "proposition": "The Kestrel Reach berth's published timetable sails 400 vehicles a week",
         "value": "400 vehicles per week",
         "entities": ["Kestrel Reach Ferry Berth"],
     },
@@ -128,8 +145,7 @@ def _entity(name: str, role: str, claim: str) -> dict[str, Any]:
         "decides": False,
         "authority": f"operates {role}",
         "why_material": f"its own operation produces every unit the terminal counts ({role})",
-        "terminal_state_it_can_change": "its operating cycle moves the quantity the "
-        "terminal reads",
+        "terminal_state_it_can_change": "its operating cycle moves the quantity the terminal reads",
         "information_received": "its own operating records",
         "if_removed": "nothing operates and no quantity moves at all",
         "evidence_claim_ids": [claim],
@@ -229,12 +245,13 @@ def elevator_plan(*, held: int = 10000, threshold: int = 20000) -> dict[str, Any
                         {
                             "op": "decrease",
                             "target": "grain in the elevator",
-                            "amount": {"kind": "state", "state": "weekly loadout rate"},
+                            "amount": WEEK_OF("weekly loadout rate"),
                         },
                         {
                             "op": "increase",
                             "target": "grain shipped this season",
-                            "amount": {"kind": "state", "state": "weekly loadout rate"},
+                            "amount": WEEK_OF("weekly loadout rate"),
+                            "drawn_from": "grain in the elevator",
                         },
                     ],
                 },
@@ -279,12 +296,13 @@ def berth_plan(*, hand_written: list[str] | None = None, **recurrence: Any) -> d
             {
                 "op": "decrease",
                 "target": "vehicles waiting at the berth",
-                "amount": {"kind": "state", "state": "weekly sailing capacity"},
+                "amount": WEEK_OF("weekly sailing capacity"),
             },
             {
                 "op": "increase",
                 "target": "vehicles carried this quarter",
-                "amount": {"kind": "state", "state": "weekly sailing capacity"},
+                "amount": WEEK_OF("weekly sailing capacity"),
+                "drawn_from": "vehicles waiting at the berth",
             },
         ],
     }
@@ -306,8 +324,7 @@ def berth_plan(*, hand_written: list[str] | None = None, **recurrence: Any) -> d
         ]
     return {
         "resolution": {
-            "question": "Will the Kestrel Reach berth carry more than 4000 vehicles this "
-            "quarter?",
+            "question": "Will the Kestrel Reach berth carry more than 4000 vehicles this quarter?",
             "yes_condition": "Vehicles carried this quarter exceed 4000.",
             "subject_entity": "Kestrel Reach Ferry Berth",
             "resolution_units": "vehicles carried",
@@ -452,7 +469,7 @@ def reservoir_plan() -> dict[str, Any]:
                         {
                             "op": "increase",
                             "target": "water stored behind the dam",
-                            "amount": {"kind": "state", "state": "weekly gauged inflow"},
+                            "amount": WEEK_OF("weekly gauged inflow"),
                         },
                         {
                             "op": "decrease",
@@ -515,8 +532,7 @@ def _bundle(plan: dict[str, Any]) -> Any:
                 "horizon": HORIZON.isoformat(),
             },
             "claims": [
-                dict(CLAIMS[cid], id=cid, published_at="2026-01-02T00:00:00+00:00")
-                for cid in cited
+                dict(CLAIMS[cid], id=cid, published_at="2026-01-02T00:00:00+00:00") for cid in cited
             ],
         }
     )
@@ -559,55 +575,65 @@ def _final(result: Any) -> Any:
 
 
 # ---------------------------------------------------------------------------
-# FD-24 — a stock cannot be driven below zero
+# FD-24 — a stock cannot be driven below its floor
 # ---------------------------------------------------------------------------
 
 
 def test_a_stock_cannot_be_driven_negative_through_the_real_engine() -> None:
-    """Thirteen weekly loadouts are scheduled; the elevator only has grain for two.
+    """Thirteen weekly loadouts are scheduled; the elevator has grain for two and a half.
 
-    The refusal is the runtime's own: the loadout moves grain with the conserved
-    operations, and a firing that would take more than the holder has does not happen at
-    all — never in part, and never recorded as done. The season's tally can therefore
-    never exceed what the elevator held, which is the whole difference between a
-    simulated operating system and arithmetic that happens to be signed.
+    The bound is compiled into the write, because the write is the one place every issuer
+    passes through. That matters here rather than being a detail: this drawdown is issued
+    by an operational process, and an operational process reaches no feasibility check at
+    all — ``effects.can_apply`` is called only from the actor paths, and ``world.apply``
+    subtracts with no floor. A world that trusted the runtime to conserve this would end
+    the quarter forty-two thousand tonnes below empty, which is exactly what the live
+    failure did.
+
+    What the clamp does instead of refusing is keep the causal fact: the loadout that
+    could only half-load DID happen, and the half it could not load is recorded where a
+    condition, a terminal or the replay core can read it.
     """
 
     result = _run(elevator_plan())
     world = _final(result)
     fields = world.fields_dict()
-    resources = dict(world.resources)
 
-    assert fields["grain_in_the_elevator"] == 2000.0
-    assert fields["grain_shipped_this_season"] == 8000.0
-    assert resources["grain_in_the_elevator@halvard_reach_grain_elevator"] == 2000.0
+    assert fields["grain_in_the_elevator"] == 0.0, "empty, and never past empty"
+    assert fields["grain_shipped_this_season"] == 10000.0, "only what the pile held"
 
-    # No reading of the stock, at any point in the run, is below zero — the field the
-    # world reports and the resource the executor conserves move together or not at all.
-    assert all(
-        quantity >= 0.0 for key, quantity in resources.items() if key.startswith("grain_in_")
-    )
-    for event in world.event_history:
-        if event.kind == "adjust_field" and event.payload_dict.get("field") == (
-            "grain_in_the_elevator"
-        ):
-            assert event.payload_dict["delta"] == -4000.0
-    shipped = [e for e in world.event_history if e.kind == "consume_resource"]
-    assert len(shipped) == 2, "only the firings the pile could pay for happened"
+    # The shortfall is world state, not a swallowed log line: two and a half firings were
+    # paid for out of ten thousand tonnes, and the ten and a half that could not be is
+    # the backlog this world produced.
+    assert fields["unmet_draw_on_grain_in_the_elevator"] == 42000.0
+    assert 4000 * WEEKLY_FIRINGS == 52000
+    assert (
+        fields["grain_shipped_this_season"] + fields["unmet_draw_on_grain_in_the_elevator"]
+        == 52000.0
+    ), "what was asked for is what moved plus what could not"
 
-    # And the conservation is what decides the answer: unconserved, thirteen firings of
-    # 4000 tonnes would ship 52000 out of a 10000-tonne elevator and resolve YES.
-    outcomes = {(o.resolved, o.outcome) for o in result.branch_outcomes}
-    assert outcomes == {(True, "NO")}
+    # No reading of the stock at any point in the run is below its floor.
+    levels = [
+        diff
+        for diff in world.event_history
+        if diff.kind == "adjust_field" and diff.payload_dict.get("field") == "grain_in_the_elevator"
+    ]
+    assert len(levels) == WEEKLY_FIRINGS, "every firing happened; none was thrown away"
+    assert [d.payload_dict["delta"] for d in levels] == [-4000.0, -4000.0, -2000.0] + [-0.0] * 10
+
+    # And the clamp is what decides the answer: unclamped, thirteen firings of 4000
+    # tonnes ship 52000 out of a 10000-tonne elevator and resolve YES.
+    assert {(o.resolved, o.outcome) for o in result.branch_outcomes} == {(True, "NO")}
 
 
-def test_the_executor_itself_refuses_the_overdrawing_move() -> None:
-    """The same refusal on the actor path, from the executor's own dry run.
+def test_the_bound_travels_with_the_write_not_with_the_caller() -> None:
+    """The same clamp on the same effects, whoever issues them.
 
-    ``EffectExecutor.can_apply`` is what :class:`ActionExecutor` consults before an
-    action starts and again before it completes. Handed the compiled effects of a
-    loadout against an elevator that cannot pay for it, it refuses by name — no new
-    check was added anywhere for this to be true.
+    Lowering is the single choke point: an actor's affordance and an operational
+    occurrence lower through one function, so the floor is in the effect itself. Applied
+    against an almost-empty elevator through ``WorldState.apply`` — the state-transition
+    boundary, with no executor in the picture at all — the draw takes what is there and
+    records the rest.
     """
 
     plan = elevator_plan(held=1000)
@@ -620,37 +646,40 @@ def test_the_executor_itself_refuses_the_overdrawing_move() -> None:
     (process,) = spec.external_processes
     effects = process.occurrences[0].effects
 
-    ok, why = EffectExecutor().can_apply(world, effects, {"actor": None, "self": None})
-    assert ok is False
-    assert "lacks" in why and "grain_in_the_elevator" in why
+    executor = EffectExecutor()
+    binding: dict[str, Any] = {"actor": None, "self": None}
+    events, _deferred = executor.build_events(world, effects, binding)
+    after = world.apply(events)
+    fields = after.fields_dict()
 
-    # With grain in the pile the identical effects are feasible: the refusal is about the
-    # balance, not about the shape of the move.
-    plenty = _bundle(elevator_plan(held=99000))
-    stocked = build_base_world(
-        plenty.spec, _contract(plan, plenty), plenty.evidence_store.view(AS_OF), ()
-    )
-    assert EffectExecutor().can_apply(stocked, effects, {"actor": None, "self": None})[0] is True
+    assert fields["grain_in_the_elevator"] == 0.0
+    assert fields["grain_shipped_this_season"] == 1000.0, "the tally took what left"
+    assert fields["unmet_draw_on_grain_in_the_elevator"] == 3000.0
+
+    # The effects carry no resource op at all: the runtime's resource machinery holds its
+    # non-negativity check in `can_apply`, which an operational process never reaches, so
+    # relying on it here would have been decorative.
+    assert {e.op for e in effects} == {"adjust_field"}
+    assert compilation["world_spec"]["resources"] == []
 
 
-def test_a_declared_capacity_is_a_ceiling_by_the_same_conservation() -> None:
-    """A stock fills to its capacity and stops, because the room above it runs out.
+def test_a_declared_capacity_is_a_ceiling_the_same_way() -> None:
+    """A stock fills to its capacity and stops, and the spill is recorded.
 
     Nine thousand acre-feet in a twelve-thousand acre-foot pool leaves room for three
-    weeks of eight-hundred-acre-foot inflow and not a fourth: the fourth transfer would
-    draw 800 from a counterpart holder holding 600, and the executor's conservation is
-    the same refusal in the other direction.
+    full weeks of eight-hundred-acre-foot inflow and part of a fourth. What the pool
+    could not take is not discarded — it is the quantity the basin delivered and the dam
+    could not hold, which is a fact about this world.
     """
 
     world = _final(_run(reservoir_plan()))
     fields = world.fields_dict()
-    resources = dict(world.resources)
 
-    assert fields["water_stored_behind_the_dam"] == 11400.0
-    assert resources["water_stored_behind_the_dam@sorrel_gap_reservoir"] == 11400.0
-    assert resources["water_stored_behind_the_dam@beyond_water_stored_behind_the_dam"] == 600.0
-    total = sum(v for k, v in resources.items() if k.startswith("water_stored_"))
-    assert total == 12000.0, "the stock and the room above it always sum to the capacity"
+    assert fields["water_stored_behind_the_dam"] == 12000.0, "full, and never past full"
+    assert fields["overflow_above_water_stored_behind_the_dam"] == 800.0 * WEEKLY_FIRINGS - (
+        12000.0 - 9000.0
+    )
+    assert fields["overflow_above_water_stored_behind_the_dam"] == 7400.0
 
 
 def test_a_level_keeps_todays_unconstrained_behavior() -> None:
@@ -659,22 +688,24 @@ def test_a_level_keeps_todays_unconstrained_behavior() -> None:
     The reservoir's account against its downstream commitments is declared a level with
     its reason, and nothing in this change constrains it: it is written with the same
     bare ``adjust_field`` it has always used and ends the quarter below zero, in the same
-    run in which the stock beside it refused to.
+    run in which the stock beside it stopped at its ceiling.
+
+    This is also why the bound clamps instead of refusing. An earlier design refused the
+    whole firing when the stock could not take the inflow — and took this level's own
+    change down with it, so the account showed three firings of a thirteen-firing
+    quarter. A refusal that throws away every other effect in the firing invents a
+    different world; a clamp does not.
     """
 
     world = _final(_run(reservoir_plan()))
     balance = world.fields_dict()["basin_net_balance_against_downstream_commitments"]
-    assert balance == -1300.0, "thirteen weekly firings of -100, unconstrained"
+    assert balance == -100.0 * WEEKLY_FIRINGS == -1300.0
 
     compilation, _ = lower_plan(parse_semantic_plan(reservoir_plan()))
     (process,) = compilation["world_spec"]["external_processes"]
-    ops = {e["op"] for e in process["occurrences"][0]["effects"]}
-    assert ops == {"transfer_resource", "adjust_field"}
+    effects = process["occurrences"][0]["effects"]
     level_writes = [
-        e
-        for e in process["occurrences"][0]["effects"]
-        if e["op"] == "adjust_field"
-        and e["field"] == "basin_net_balance_against_downstream_commitments"
+        e for e in effects if e["field"] == "basin_net_balance_against_downstream_commitments"
     ]
     assert level_writes == [
         {
@@ -682,22 +713,21 @@ def test_a_level_keeps_todays_unconstrained_behavior() -> None:
             "field": "basin_net_balance_against_downstream_commitments",
             "delta": -100,
         }
-    ]
+    ], "a level's write is exactly the arithmetic it has always been"
 
 
 def test_a_decrease_on_an_unexplained_quantity_level_is_refused() -> None:
     """The FD-24 shape at the earliest stage: the plan that could not say so is refused.
 
-    A quantity something draws down is either a stock — in which case the runtime
-    conserves it — or a level whose plan says why it may go below zero. There is no
-    third option, because the third option is what shipped a quarter of negative
-    inventory.
+    A quantity something draws down is either a stock — in which case every draw on it is
+    clamped at its floor and the shortfall recorded — or a level whose plan says why it
+    may go below zero. There is no third option, because the third option is what shipped
+    a quarter of negative inventory.
     """
 
     plan = elevator_plan()
     stock = next(s for s in plan["states"] if s["name"] == "grain in the elevator")
     stock["kind"] = "level"
-    stock.pop("capacity", None)
     errors = _validate(plan)
     assert "UNCONSERVED_PHYSICAL_STOCK" in _defects(errors), errors
     message = next(e for e in errors if e.startswith("UNCONSERVED_PHYSICAL_STOCK"))
@@ -705,8 +735,10 @@ def test_a_decrease_on_an_unexplained_quantity_level_is_refused() -> None:
     assert "kind=stock" in message and "not_a_stock_because" in message
 
     # And the escape hatch is real, because some quantities genuinely do go negative.
-    stock["not_a_stock_because"] = "the elevator's book position can be short against "
-    "forward sales, which is a negative number the trade recognises"
+    stock["not_a_stock_because"] = (
+        "the elevator's book position runs short against forward sales, and being "
+        "oversold is a negative number the trade recognises"
+    )
     assert "UNCONSERVED_PHYSICAL_STOCK" not in _defects(_validate(plan))
 
 
@@ -721,19 +753,81 @@ def test_an_accumulating_terminal_quantity_has_to_say_what_kind_it_is() -> None:
     assert "vehicles carried this quarter" in errors[0]
 
 
+def test_an_accumulator_with_no_starting_point_is_refused() -> None:
+    """CW-F: UNKNOWN is not a cheaper answer than zero for something being counted.
+
+    A quantity with no initial value is invisible to every forward evaluator here and in
+    the reviewer — the sum cannot begin, so the straddling gate, the break-even search
+    and the pre-simulation probe all silently decline instead of firing. Since a precise
+    initial number needs a citation, UNKNOWN was the path of least resistance for exactly
+    the counters this vocabulary exists to encourage, which would have moved the fix for
+    FD-24 straight into the blind spot.
+    """
+
+    plan = berth_plan()
+    tally = next(s for s in plan["states"] if s["name"] == "vehicles carried this quarter")
+    tally["initial"] = "UNKNOWN"
+    tally["evidence_claim_ids"] = []
+    errors = _validate(plan)
+    assert "ACCUMULATOR_WITHOUT_AN_ORIGIN" in _defects(errors), errors
+    assert "vehicles carried this quarter" in next(
+        e for e in errors if e.startswith("ACCUMULATOR_WITHOUT_AN_ORIGIN")
+    )
+
+
+def test_both_halves_of_one_movement_move_together() -> None:
+    """A tally that counts what a stock gives up must be clamped with it.
+
+    Without this the conservation is cosmetic: the pile stops at empty and the season's
+    tally keeps rising by what the loadout ASKED for, so the elevator reports a full
+    quarter of shipments it never made and the answer is exactly as wrong as before. The
+    increase names the stock it comes out of, and lowering gives both sides the one
+    clamped amount.
+    """
+
+    plan = elevator_plan()
+    shipped = plan["processes"][0]["recurrence"]["changes"][1]
+    assert shipped["drawn_from"] == "grain in the elevator"
+    del shipped["drawn_from"]
+    errors = _validate(plan)
+    assert "UNSOURCED_TRANSFER" in _defects(errors), errors
+    message = next(e for e in errors if e.startswith("UNSOURCED_TRANSFER"))
+    assert "grain in the elevator" in message and "drawn_from" in message
+
+    # A source that holds nothing cannot be one.
+    plan = elevator_plan()
+    plan["processes"][0]["recurrence"]["changes"][1]["drawn_from"] = "weekly loadout rate"
+    assert "UNSOURCED_TRANSFER" in _defects(_validate(plan))
+
+    # And the quantity that leaves is the quantity that arrives.
+    plan = elevator_plan()
+    plan["processes"][0]["recurrence"]["changes"][1]["amount"] = {
+        "kind": "product",
+        "parts": [
+            {"kind": "state", "state": "weekly loadout rate"},
+            {"kind": "duration", "value": "P2W"},
+        ],
+    }
+    assert "UNSOURCED_TRANSFER" in _defects(_validate(plan))
+
+
 def test_a_stock_declaration_that_cannot_be_conserved_is_refused() -> None:
-    """A conserved quantity needs a known starting amount, a ceiling to grow into, and
-    moves rather than assignments — each refused by name with its own correction."""
+    """A held quantity needs a known starting amount, coherent bounds, and moves rather
+    than assignments — each refused by name with its own correction."""
 
     unknown = elevator_plan()
-    next(s for s in unknown["states"] if s["name"] == "grain in the elevator")["initial"] = "UNKNOWN"
+    next(s for s in unknown["states"] if s["name"] == "grain in the elevator")["initial"] = (
+        "UNKNOWN"
+    )
     assert "STOCK_DECLARATION_INCOMPLETE" in _defects(_validate(unknown))
 
-    grows = elevator_plan()
-    grows["processes"][0]["recurrence"]["changes"][0]["op"] = "increase"
-    errors = _validate(grows)
+    below = reservoir_plan()
+    next(s for s in below["states"] if s["name"] == "water stored behind the dam")["capacity"] = 100
+    errors = _validate(below)
     assert "STOCK_DECLARATION_INCOMPLETE" in _defects(errors), errors
-    assert "capacity" in next(e for e in errors if e.startswith("STOCK_DECLARATION"))
+    assert "over its own ceiling" in next(
+        e for e in errors if e.startswith("STOCK_DECLARATION_INCOMPLETE")
+    )
 
     assigned = elevator_plan()
     assigned["processes"][0]["recurrence"]["changes"][0] = {
@@ -742,6 +836,124 @@ def test_a_stock_declaration_that_cannot_be_conserved_is_refused() -> None:
         "value": {"kind": "literal", "value": 0},
     }
     assert "UNCONSERVED_PHYSICAL_STOCK" in _defects(_validate(assigned))
+
+
+# ---------------------------------------------------------------------------
+# Dimensional analysis — a rate is not a quantity
+# ---------------------------------------------------------------------------
+
+
+def test_a_rate_added_straight_into_a_total_is_refused() -> None:
+    """The structural form of FD-25, caught without counting anything.
+
+    ``unit`` was free text nothing read and the value language could not express
+    rate × duration at all, so "four hundred vehicles a week" added into a vehicle total
+    was structurally identical to adding one total to another. Once the two carry
+    different powers of time, the plan cannot say it: the only repair is to state how long
+    the rate ran, and then the total is the rate times the time rather than the rate times
+    the number of dates.
+    """
+
+    plan = berth_plan()
+    for change in plan["processes"][0]["recurrence"]["changes"]:
+        change["amount"] = {"kind": "state", "state": "weekly sailing capacity"}
+    errors = _validate(plan)
+    assert "DIMENSIONAL_MISMATCH" in _defects(errors), errors
+    message = next(e for e in errors if e.startswith("DIMENSIONAL_MISMATCH"))
+    assert "a quantity" in message and "a rate" in message
+    assert '"kind": "duration"' in message, "the refusal shows the repair"
+
+    # The two sides of the question must be the same sort of thing too.
+    threshold = berth_plan()
+    threshold["terminal"]["threshold"] = {"kind": "state", "state": "weekly sailing capacity"}
+    assert "DIMENSIONAL_MISMATCH" in _defects(_validate(threshold))
+
+    # A sum of a rate and a quantity is the same defect wearing arithmetic.
+    mixed = berth_plan()
+    mixed["processes"][0]["recurrence"]["changes"][1]["amount"] = {
+        "kind": "sum",
+        "parts": [
+            WEEK_OF("weekly sailing capacity"),
+            {"kind": "state", "state": "weekly sailing capacity"},
+        ],
+    }
+    assert "DIMENSIONAL_MISMATCH" in _defects(_validate(mixed))
+
+
+def test_a_rate_dressed_as_a_level_does_not_escape_the_check() -> None:
+    """Units are load-bearing, so declaring a rate a level is not a way out.
+
+    The dimensional check reads the declared kind, which would make it opt-in: anyone
+    could call a weekly rate a plain level and add it to a total. A unit written per
+    something IS the declaration that this is a rate, whatever the kind field says.
+    """
+
+    plan = berth_plan()
+    rate = next(s for s in plan["states"] if s["name"] == "weekly sailing capacity")
+    rate["kind"] = "level"
+    rate.pop("period")
+    rate["unit"] = "vehicles per week"
+    errors = _validate(plan)
+    assert "FLOW_PERIOD_UNDECLARED" in _defects(errors), errors
+    assert "vehicles per week" in next(e for e in errors if e.startswith("FLOW_PERIOD_UNDECLARED"))
+
+    # And a quantity with no unit at all cannot be checked against anything.
+    bare = berth_plan()
+    next(s for s in bare["states"] if s["name"] == "vehicles carried this quarter")["unit"] = ""
+    assert "UNIT_UNDECLARED" in _defects(_validate(bare))
+
+
+def test_a_duration_is_only_meaningful_against_one_rate() -> None:
+    """A length of time is a quantity of nothing until it says of what per unit time."""
+
+    alone = berth_plan()
+    alone["processes"][0]["recurrence"]["changes"][1]["amount"] = {
+        "kind": "duration",
+        "value": "P1W",
+    }
+    assert "DURATION_MISUSED" in _defects(_validate(alone))
+
+    two_rates = berth_plan()
+    two_rates["processes"][0]["recurrence"]["changes"][1]["amount"] = {
+        "kind": "product",
+        "parts": [
+            {"kind": "state", "state": "weekly sailing capacity"},
+            {"kind": "state", "state": "weekly sailing capacity"},
+            {"kind": "duration", "value": "P1W"},
+        ],
+    }
+    assert "DURATION_MISUSED" in _defects(_validate(two_rates))
+
+
+def test_code_owns_the_conversion_from_a_duration_to_a_number() -> None:
+    """The planner writes a length of time; code writes the factor.
+
+    Two weeks of a weekly rate is twice the rate and fourteen times a daily one, and the
+    planner never states either number — which is what makes the emitted arithmetic
+    checkable against the window instead of being taken on trust.
+    """
+
+    plan = elevator_plan()
+    plan["processes"][0]["recurrence"]["period"] = "P2W"
+    for change in plan["processes"][0]["recurrence"]["changes"]:
+        change["amount"] = {
+            "kind": "product",
+            "parts": [
+                {"kind": "state", "state": "weekly loadout rate"},
+                {"kind": "duration", "value": "P2W"},
+            ],
+        }
+    assert _validate(plan) == []
+
+    compilation, _ = lower_plan(parse_semantic_plan(plan))
+    (process,) = compilation["world_spec"]["external_processes"]
+    drawdown = process["occurrences"][0]["effects"][0]
+    # min(rate x 2, what is above the floor) — the 2 is the conversion, computed here.
+    demanded = drawdown["delta"]["args"][1]["args"][0]
+    assert demanded == {
+        "op": "multiply",
+        "args": [{"op": "field", "args": ["weekly_loadout_rate"]}, 2.0],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -797,10 +1009,10 @@ def test_an_under_enumerated_cadence_is_refused_and_names_the_shortfall() -> Non
     errors = _validate(plan)
     assert "UNDER_ENUMERATED_CADENCE" in _defects(errors), errors
     message = next(e for e in errors if e.startswith("UNDER_ENUMERATED_CADENCE"))
-    assert "weekly sailing capacity" in message and "P1W" in message
-    assert f"holds {WEEKLY_FIRINGS} firings" in message
-    assert "enumerates only 2" in message and "short by 11" in message
-    assert "declare recurrence" in message
+    assert "timetabled sailings" in message and "covering P1W" in message
+    assert "fires 2 times" in message and f"holds {WEEKLY_FIRINGS} of them" in message
+    assert "11 periods of the mechanism never happen" in message
+    assert "declare recurrence {period: P1W" in message
 
     # Enumerating the real calendar by hand is legal — the rule is about the cadence
     # being honoured, not about which of the two ways says so.
@@ -810,7 +1022,10 @@ def test_an_under_enumerated_cadence_is_refused_and_names_the_shortfall() -> Non
     ]
     del every_week
     start = datetime.fromisoformat(QUARTER_START)
-    weekly = [(start.replace() + (i * (datetime.fromisoformat(QUARTER_END) - start) / 12)) for i in range(13)]
+    weekly = [
+        (start.replace() + (i * (datetime.fromisoformat(QUARTER_END) - start) / 12))
+        for i in range(13)
+    ]
     assert _validate(berth_plan(hand_written=[w.isoformat() for w in weekly])) == []
 
 
@@ -858,15 +1073,18 @@ def test_recurrence_generation_is_deterministic_and_bounded() -> None:
     assert "RECURRENCE_DECLARATION_INVALID" in _defects(_validate(empty))
 
 
-def test_a_rate_and_the_cadence_that_applies_it_must_agree() -> None:
-    """A weekly rate fired daily would deliver seven weeks of work a week, and this
-    compiler will not silently rescale a number the record quoted."""
+def test_a_cadence_and_the_time_each_firing_covers_must_agree() -> None:
+    """Firing daily while each firing advances a week counts the same time seven times.
+
+    The calendar and the arithmetic are two statements about one mechanism, and when they
+    disagree the world moves at a speed neither of them claims — which is the FD-25 defect
+    with the sign flipped.
+    """
 
     errors = _validate(berth_plan(period="P1D"))
     assert "RECURRENCE_DECLARATION_INVALID" in _defects(errors), errors
-    assert "weekly sailing capacity" in next(
-        e for e in errors if "different period" in e
-    )
+    message = next(e for e in errors if "claims to cover" in e)
+    assert "fires every P1D" in message and "cover P1W" in message
 
 
 def test_a_flow_without_a_period_is_not_a_rate() -> None:

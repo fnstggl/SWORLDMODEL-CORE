@@ -980,7 +980,11 @@ def test_a_sensitivity_declaration_is_checked_against_the_plans_own_arithmetic()
 
 def test_the_reviewer_rejects_a_one_step_world_without_asking_anyone() -> None:
     """The same attacks, computed from the executable — so they hold for both compiler
-    modes and survive an unreachable reviewer."""
+    modes and need no provider to decide them.
+
+    That they also STOP a run when the reviewer is unreachable is the sibling test
+    below (FD-34); this one proves only that they are computed.
+    """
 
     findings = {f.key: f for f in mechanical_world_checks(_compile(ferry_plan()))}
     assert findings["terminal_set_in_one_step"].severity == "CRITICAL"
@@ -990,6 +994,32 @@ def test_the_reviewer_rejects_a_one_step_world_without_asking_anyone() -> None:
     assert findings["world_skips_the_causal_period"].severity == "HIGH"
     for finding in findings.values():
         assert finding.evidence_basis.startswith("computed from the compiled world")
+
+
+def test_a_one_step_world_is_refused_even_when_the_reviewer_is_unreachable() -> None:
+    """FD-34. These attacks survive an unreachable reviewer into the GATE, not merely
+    into the record.
+
+    A mechanical finding is a fact about the compiled world with no provider involved,
+    so a provider outage must not launder it into an advisory note and let the run
+    publish. The record built here is exactly what ``review_world`` returns when the
+    model call fails: the mechanical findings, and an error saying no opinion was had.
+    """
+
+    from sworldmodel.api import ReviewRound, WorldReviewRecord
+    from sworldmodel.world_review import _from_findings
+
+    mechanical = mechanical_world_checks(_compile(ferry_plan()))
+    review = _from_findings(mechanical).with_error("the review could not run: GatewayError")
+    record = WorldReviewRecord((ReviewRound(0, "ferry", review),))
+
+    assert record.model_opinion_obtained is False
+    assert {f.key for f in record.surviving_mechanical_blocking} >= {
+        "terminal_set_in_one_step",
+        "multiplier_lacks_evidence",
+    }
+    assert record.blocks_publication is True
+    assert record.causal_simulation_valid is False
 
 
 def test_the_reviewer_passes_a_world_that_actually_operates() -> None:

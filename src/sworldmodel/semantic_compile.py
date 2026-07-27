@@ -86,11 +86,13 @@ SEMANTIC_SCHEMA = f"""Return a SINGLE JSON object with exactly these keys:
    "state_type": "<one of {list(STATE_TYPES)}>",
    "kind": "<one of {list(STATE_KINDS)} — see WHAT KIND OF THING THIS IS; default level>",
    "capacity": <stock only: the physical ceiling it can be filled to, or null>,
+   "conserved_floor": <stock only: the level it cannot be drawn through; default 0>,
    "period": "<flow only: ISO-8601 duration the rate is quoted over, e.g. P1W>",
    "not_a_stock_because": "<level only, and ONLY when something draws this quantity down
      or the terminal reads it as an accumulating total: why this quantity is a reading or
      a record rather than something held somewhere>",
-   "unit": "<unit or ''>",
+   "unit": "<REQUIRED for a quantity — what it is measured in. A unit written 'per'
+     something (vehicles per week, acre-feet/day) IS a rate and must be kind=flow>",
    "initial": <verified value, or "UNKNOWN" when the evidence does not establish one>,
    "why_material": "...",
    "evidence_claim_ids": ["<required when initial is a precise number>"]
@@ -189,6 +191,14 @@ SEMANTIC_SCHEMA = f"""Return a SINGLE JSON object with exactly these keys:
  "world_facts": [{{"text": "...", "evidence_claim_ids": ["..."]}}]
 }}
 
+RATES AND QUANTITIES ARE DIFFERENT THINGS. A rate is a quantity per unit of time, and
+it produces nothing until you say how long it ran: writing {{"op":"increase","target":
+"<total>","amount":{{"kind":"state","state":"<a weekly rate>"}}}} adds a rate to a total
+and is refused. Multiply it by the time that firing covers —
+{{"kind":"product","parts":[{{"kind":"state","state":"<the rate>"}},
+{{"kind":"duration","value":"P1W"}}]}} — so the total is the rate times the time it ran
+rather than the rate times however many dates appear in the plan.
+
 WHAT KIND OF THING A STATE IS. Every state declares its kind, because conservation
 follows from it and nothing else can supply it:
   stock — a real quantity HELD somewhere: water behind a dam, grain in an elevator,
@@ -214,8 +224,11 @@ CHANGES — the only universal change operations (they apply to dynamically name
 real-world objects; there is no domain event list):
   {{"op": "set", "target": "<state name>", "value": <literal |
       {{"kind":"state","state":"<state name>"}} |
-      {{"kind":"product"|"sum","parts":[<values>]}}>}}
-  {{"op": "increase"|"decrease", "target": "<state name>", "amount": <same value forms>}}
+      {{"kind":"product"|"sum","parts":[<values>]}} |
+      {{"kind":"duration","value":"<ISO-8601 duration, e.g. P1W>"}}>}}
+  {{"op": "increase"|"decrease", "target": "<state name>", "amount": <same value forms>,
+      "drawn_from": "<for an increase that carries quantity OUT of a stock: that stock's
+        name. The same firing must decrease it by the same amount — one movement>"}}
   {{"op": "record_event", "target": "<event name>", "detail": "<what is recorded>"}}
   {{"op": "send", "target": "<information description>", "recipients": ["<entity names>"],
       "detail": "<the information>"}}

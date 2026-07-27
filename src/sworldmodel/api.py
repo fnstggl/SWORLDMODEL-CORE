@@ -1301,7 +1301,7 @@ def _review_limitations(record: WorldReviewRecord) -> tuple[str, ...]:
     provider outage read as a world that survived an attack.
     """
 
-    if record.model_opinion_obtained:
+    if record.model_opinion_obtained or record.blocks_publication:
         return ()
     return (
         "no adversarial review of the world that was simulated could be obtained "

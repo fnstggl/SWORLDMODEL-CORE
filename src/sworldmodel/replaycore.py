@@ -13,9 +13,12 @@ What lives here:
 * **branch-key joining** — branch ids appear with and without the structure namespace
   prefix across artifacts (``primary/sc_x`` in ``forecast.json`` vs ``sc_x`` in older
   ledgers); :func:`branch_key` is the one joined view every reader uses.
-* **event replay** — the exact, total mapping from recorded events to field state and
-  event-type counts (``release_data``, ``set_field``, ``adjust_field``,
-  ``create_event``, ``append_record``). Nothing else writes state.
+* **event replay** — the exact, total mapping from recorded events to field state,
+  event-type counts, record collections and event history (``release_data``,
+  ``set_field``, ``adjust_field``, ``create_event``, ``append_record``). Nothing else
+  writes state. Record CONTENT is reconstructed, not just cardinality: the terminals
+  these worlds actually use read a record's ``value``, and a replay that could only
+  count records answered every such question NO (FD-42).
 * **initial state** — per-branch complete field state after scenario conditions and
   before any simulated effect, from the executed compilation's field initials plus the
   branch's own scenario ``release_data`` conditions.
@@ -201,24 +204,120 @@ def _apply_count_op(counts: dict[str, int], e: EventLike) -> None:
             counts[str(collection)] += 1
 
 
-def replay_fields(
-    events: Sequence[EventLike], keep: KeepPredicate | None = None
-) -> tuple[dict[str, Any], dict[str, int]]:
-    """Replay the recorded ledger into (fields, event-type counts).
+def _apply_record_op(records: dict[str, list[dict[str, Any]]], e: EventLike) -> None:
+    """Apply one recorded event's collection effect. The ONLY event→record mapping.
+
+    Mirrors :class:`sworldmodel.world.Record` and its ``as_item()`` view exactly, so a
+    record the evaluator reads on replay carries the same attributes it carried live —
+    ``key``, ``value``, ``by``, ``time``, plus whatever the effect put in ``extra``.
+    Every attribute comes from the recorded payload or from the event's own envelope;
+    a payload that recorded no value yields ``value: None``, never a substitute.
+    """
+
+    if event_kind(e) != "append_record":
+        return
+    payload = event_payload(e)
+    collection = payload.get("collection")
+    if not collection:
+        return
+    actor = event_actor_id(e)
+    item: dict[str, Any] = {
+        "key": str(payload.get("key", actor or "")),
+        "value": payload.get("value"),
+        "by": str(actor or payload.get("by", "environment")),
+        "time": event_time(e),
+    }
+    extra = payload.get("extra")
+    if isinstance(extra, Mapping):
+        item.update({str(k): v for k, v in extra.items()})
+    records.setdefault(str(collection), []).append(item)
+
+
+def _apply_event_item_op(items: dict[str, list[dict[str, Any]]], e: EventLike) -> None:
+    """Apply one recorded event's event-history effect. The ONLY event→event-item mapping.
+
+    Mirrors :meth:`sworldmodel.world.WorldState.get_events`, which matches an event
+    either by its runtime kind or by the ``event_type`` its payload declares, and
+    presents it as ``{type, by, time}`` overlaid with the recorded payload. Indexing
+    under both names is what makes ``event_count('x', <where>)`` replay the way the
+    engine evaluated it.
+    """
+
+    payload = event_payload(e)
+    names = {event_kind(e)}
+    declared = payload.get("event_type")
+    if declared:
+        names.add(str(declared))
+    for name in names:
+        if not name:
+            continue
+        item: dict[str, Any] = {
+            "type": name,
+            "by": event_actor_id(e) or "environment",
+            "time": event_time(e),
+        }
+        item.update(payload)
+        items.setdefault(name, []).append(item)
+
+
+@dataclass(frozen=True)
+class ReplayState:
+    """Everything one replay of the recorded ledger produced.
+
+    ``fields`` and ``counts`` are the state and cardinality views the replay has always
+    had. ``records`` and ``events`` are the CONTENT views (FD-42): the terminals these
+    worlds actually compile — ``count('positions', equals(item('value'), 'hold')) >= 5``
+    — read a record's value, not how many records there are. A replay that could only
+    count them evaluated the predicate over blanks and answered NO to every such
+    question, confidently and wrongly.
+
+    A collection or event type absent from the mapping is one the replayed ledger never
+    wrote. It is empty, not unknown.
+    """
+
+    fields: dict[str, Any]
+    counts: dict[str, int]
+    records: dict[str, list[dict[str, Any]]]
+    events: dict[str, list[dict[str, Any]]]
+
+
+def replay(events: Sequence[EventLike], keep: KeepPredicate | None = None) -> ReplayState:
+    """Replay the recorded ledger into complete state. The one replay implementation.
 
     This is the whole counterfactual machine: ``keep`` selects which recorded events
     are allowed to have happened, and the terminal is then re-evaluated over the
-    result. Nothing is simulated and no model is called.
+    result. Nothing is simulated and no model is called. Every view is filtered by the
+    same ``keep``, so a deleted event takes its record and its event item with it —
+    a reconstruction that returned content regardless of ``keep`` would make every
+    deletion counterfactual answer YES and silently void the responsibility finding.
     """
 
     fields: dict[str, Any] = {}
     counts: dict[str, int] = defaultdict(int)
+    records: dict[str, list[dict[str, Any]]] = {}
+    items: dict[str, list[dict[str, Any]]] = {}
     for e in events:
         if keep is not None and not keep(e):
             continue
         _apply_field_op(fields, e)
         _apply_count_op(counts, e)
-    return fields, dict(counts)
+        _apply_record_op(records, e)
+        _apply_event_item_op(items, e)
+    return ReplayState(fields, dict(counts), records, items)
+
+
+def replay_fields(
+    events: Sequence[EventLike], keep: KeepPredicate | None = None
+) -> tuple[dict[str, Any], dict[str, int]]:
+    """The (fields, event-type counts) projection of :func:`replay`.
+
+    Kept for readers that genuinely only need field state and cardinality. A caller
+    that re-evaluates a terminal wants :func:`replay`: dropping the record and event
+    content is what made a content-predicated terminal replay as NO.
+    """
+
+    state = replay(events, keep)
+    return state.fields, state.counts
 
 
 def fields_written_by_events(events: Sequence[EventLike]) -> set[str]:
@@ -386,10 +485,17 @@ class ReplayWorld:
     with the engine's OWN evaluator rather than a reimplementation of it, the replayed
     state has to satisfy :class:`~sworldmodel.expressions.ExprContext`.
 
-    This is that adapter and nothing more. It holds replayed fields and event-type
-    counts and answers the evaluator's questions from them. It never invents a value: a
-    field the ledger never set reads as ``None``, which is exactly what the runtime's
-    unresolved guards test for.
+    This is that adapter and nothing more. It holds replayed fields, event-type counts,
+    record collections and event history, and answers the evaluator's questions from
+    them. It never invents a value: a field the ledger never set reads as ``None``,
+    which is exactly what the runtime's unresolved guards test for.
+
+    ``records`` / ``events`` come from :func:`replay`, which reconstructs each record's
+    ``key``/``value``/``by``/``time`` from the recorded ``append_record`` payload. Omit
+    them and this world knows only cardinality: a ``count('positions') >= 5`` terminal
+    still replays exactly, while ``count('positions', equals(item('value'), 'hold'))``
+    reads blank placeholders and counts zero. That is FD-42, and it is why every caller
+    in this package supplies them.
     """
 
     def __init__(
@@ -403,9 +509,13 @@ class ReplayWorld:
         documents: dict[str, dict[str, Any]] | None = None,
         resources: dict[tuple[str, str], float] | None = None,
         stage: str = "final",
+        records: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
+        events: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
     ) -> None:
         self._fields = dict(fields)
         self._counts = dict(counts)
+        self._records = _copy_content(records)
+        self._events = _copy_content(events)
         self._documents = documents or {}
         self._resources = resources or {}
         self._stage = stage
@@ -418,12 +528,17 @@ class ReplayWorld:
         return self._fields.get(name)
 
     def get_records(self, collection: str) -> list[dict[str, Any]]:
-        # Only the cardinality is reconstructable from the ledger's append_record
-        # payloads, and cardinality is what record_count terminals read. The
-        # placeholders carry no fabricated content.
+        if self._records is not None:
+            # Reconstructed content: exactly the records the ledger recorded, in the
+            # order it recorded them. A collection nothing appended to is empty.
+            return [dict(r) for r in self._records.get(collection, ())]
+        # No content was supplied, so cardinality is all this world knows. The
+        # placeholders carry no fabricated content — and no readable content either.
         return [{} for _ in range(self._counts.get(collection, 0))]
 
     def get_events(self, event_type: str) -> list[dict[str, Any]]:
+        if self._events is not None:
+            return [dict(r) for r in self._events.get(event_type, ())]
         return [{} for _ in range(self._counts.get(event_type, 0))]
 
     def get_resource(self, resource_id: str, holder: str) -> float:
