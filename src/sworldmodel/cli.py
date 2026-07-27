@@ -160,6 +160,11 @@ def _audit(config: ForecastConfig, ctx: TraceContext, wall_seconds: float) -> di
             "stop_reason": d.stop_reason,
             "unfired_in_horizon": d.unfired_in_horizon,
             "pending_beyond_horizon": len(d.pending_beyond_horizon),
+            "execution_status": d.execution_status,
+            "execution_limit": d.execution_limit,
+            "unresolved_class": d.unresolved_class,
+            "banked_terminal": d.banked_terminal.as_dict() if d.banked_terminal else None,
+            "bank_contradicted": d.bank_contradicted,
         }
         for bid, d in ctx.run_result.diagnostics.items()
     }

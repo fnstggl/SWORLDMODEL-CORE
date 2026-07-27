@@ -579,6 +579,14 @@ class BranchOutcome:
     # from the scenario's provenance; the permissive default exists only so hand-built
     # records (tests, replays) keep constructing.
     weight_grounded: bool = True
+    # W1/W2. ``banked_at``/``banked_by_event_ids`` are the instant a monotone terminal
+    # became true and the events that made it — a resolved outcome that survived
+    # truncation because nothing could un-happen its cause. ``unresolved_class`` is ""
+    # when resolved, EXECUTION_INCOMPLETE when the simulator stopped before the world
+    # did, WORLD_UNDETERMINED when the world genuinely did not decide.
+    unresolved_class: str = ""
+    banked_at: str | None = None
+    banked_by_event_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

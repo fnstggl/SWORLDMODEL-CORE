@@ -549,6 +549,7 @@ def run(
                     br.scenario,
                     pre_resolved=br.pre_resolved,
                     pre_outcome=br.pre_outcome,
+                    diag=br.diagnostics,
                 )
             )
             summaries.append(_summary(br.world, br.scenario))
@@ -1959,11 +1960,12 @@ def _bank_monotone_terminal(
     """Record a monotone terminal at the instant the world satisfied it.
 
     G1, in one branch of one real run: the agent chose the satisfying action on twenty
-    separate invocations, the actor-call budget ran out three scheduled events short of
-    the horizon, and the branch reported ``resolved=False``. The run published 0.0 from
-    the two branches that happened to finish. The system watched the answer happen
-    twenty times and published its opposite, because the terminal was read once, at the
-    end, on a trajectory that never got there.
+    separate invocations, nineteen of which landed before the actor-call budget ran out
+    three scheduled events short of the horizon, and the branch reported
+    ``resolved=False``. The run published 0.0 from the two branches that happened to
+    finish. The system watched the answer happen nineteen times and published its
+    opposite, because the terminal was read once, at the end, on a trajectory that never
+    got there.
 
     A banked YES is final. Nothing here overrides the conservative behaviour for
     anything else: the bank is only reachable through :func:`_bankable`, and it is only
@@ -2050,7 +2052,7 @@ def _finalize(
     # That reasoning is exactly right for `field('deliveries') > 400000`: more
     # simulation genuinely could move the number, so an evaluation taken where we
     # stopped is a claim about a process we did not watch. It is exactly WRONG for
-    # `event_count(X) > 0`. Truncation cannot un-happen twenty events that already
+    # `event_count(X) > 0`. Truncation cannot un-happen nineteen events that already
     # happened, and refusing the answer there does not withhold a claim — it publishes
     # the opposite one. The distinction is monotonicity, and it is computed from the
     # expression's own structure (:func:`_bankable`), never declared by whoever wrote
@@ -2378,6 +2380,7 @@ def _branch_outcome(
     *,
     pre_resolved: bool,
     pre_outcome: str | None,
+    diag: BranchDiagnostics,
 ) -> BranchOutcome:
     term = world.terminal_state
     resolved = bool(term and term.resolved)
@@ -2397,6 +2400,11 @@ def _branch_outcome(
         pre_outcome=pre_outcome,
         pre_resolved=pre_resolved,
         weight_grounded=weights_grounded(scenario),
+        unresolved_class=diag.unresolved_class,
+        banked_at=diag.banked_terminal.at if diag.banked_terminal else None,
+        banked_by_event_ids=(
+            diag.banked_terminal.caused_by_event_ids if diag.banked_terminal else ()
+        ),
     )
 
 

@@ -174,7 +174,13 @@ SEMANTIC_SCHEMA = f"""Return a SINGLE JSON object with exactly these keys:
    "preconditions": "<ordinary language or ''>",
    "visibility": "public|private",
    "duration_seconds": <int>,
-   "changes": [<see CHANGES>],
+   "changes": [<see CHANGES — an act that MOVES something uses set/increase/decrease, an
+     act that OCCURS uses record_event, and an act that TELLS somebody uses send. Most
+     acts in a many-sided situation do two of these at once: taking a position both
+     moves the actor's own declared state and tells the other parties about it, e.g.
+     [{{"op":"set","target":"<this party's stated position>","value":"<the position>"}},
+      {{"op":"send","target":"<what is communicated>","recipients":["<the other parties>"],
+        "detail":"<what they now know>"}}]>],
    "evidence_claim_ids": ["..."]
  }}],
  "processes": [{{
@@ -438,13 +444,22 @@ set the state the terminal reads IS the answer rather than a route to it: the wo
 contains one decision, however many names are standing around it.
 
 PARTICIPANTS MUST BE ABLE TO TELL EACH OTHER. A world whose occupants cannot communicate
-is not a model of a social situation. Where two or more entities decide, at least one of
-them must hold an affordance that carries information TO another — a
-{"op":"send","target":"<what is communicated>","recipients":["<other parties>"],
-"detail":"..."} change, or a declared event whose participants include them — so a
-position can propagate: one party signals, another sees it, and can decide differently
-because of it. Model the channels the record shows are really there (a meeting, a
-statement, a notified decision), not invented back-channels."""
+is not a model of a social situation. The "send" change is how one party's act reaches
+another, and it is almost always under-used: an act that in reality everybody hears
+about — a statement, a position taken at a meeting, a notified decision, a public
+reaffirmation — is written as a change to a state and nothing else, so in the simulation
+nobody learns it happened and nobody can respond. Where two or more entities decide, at
+least one of them must hold an affordance that carries information TO another:
+
+  {"op": "send", "target": "<what is communicated>",
+   "recipients": ["<the other parties, by entity name>"],
+   "detail": "<what they now know>"}
+
+or a declared event whose participants include them. That is what lets a position
+propagate: one party signals, another sees it, and can decide differently because of it.
+Model the channels the record shows are really there — the meetings they hold, the
+statements they issue, the decisions they notify each other of — never invented
+back-channels, and never a message to yourself: you already know what you just did."""
 
 
 def _plan_prompt(

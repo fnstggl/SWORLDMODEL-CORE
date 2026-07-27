@@ -123,6 +123,69 @@ class Observation:
 
 
 @dataclass(frozen=True)
+class ActedRecord:
+    """One thing this actor did, and how it turned out.
+
+    An actor's own acts do not reach it through the information lifecycle, and they must
+    not: visibility, delivery and notice describe how a person comes to know something
+    that happened *elsewhere*. You do not need to be told what you did.
+
+    That is precisely why the slot was empty. ``WorldState.view_for`` builds a view's
+    observations from ``deliveries`` where ``actor_id`` is this actor, and an actor is
+    never the recipient of its own delivery — ``observers_of`` skips it deliberately. So
+    an agent's own acts were structurally invisible to it, and the only trace of any of
+    them anywhere in its view was the single, overwritten ``current_action`` slot.
+
+    Measured, before this existed: ``member_0`` circulated a note **fifteen times**. At
+    its sixteenth invocation its view held eight observations, none of them mentioning
+    ``member_0``, and six retrieved memories, none of them mentioning ``member_0``. It
+    was not being stubborn and it was not looping on a stale view — the view changed
+    constantly, full of the other four members' notes. **It could not see that it had
+    already acted.** Fifteen identical acts and no record of one of them.
+
+    This is the record. It is derived from the ledger the actor's own attempts already
+    wrote — nothing new is invented, and nothing is remembered that did not happen.
+    """
+
+    at: datetime
+    action_id: str  # "" for a wait
+    outcome: str  # in_progress | completed | failed | refused | waited
+    params: tuple[tuple[str, Any], ...] = ()
+    target: str = ""
+    detail: str = ""  # the world's own stated reason, when it gave one
+    event_id: str = ""
+
+    def as_dict(self) -> dict[str, Any]:
+        out: dict[str, Any] = {
+            "at": self.at.isoformat(),
+            "you_did": self.action_id or "(waited)",
+            "outcome": self.outcome,
+        }
+        if self.params:
+            out["params"] = dict(self.params)
+        if self.target:
+            out["target"] = self.target
+        if self.detail:
+            out["detail"] = self.detail
+        return out
+
+
+def act_counts(acts: tuple[ActedRecord, ...]) -> dict[str, int]:
+    """How many times this actor has taken each action, by outcome.
+
+    Pure arithmetic over :class:`ActedRecord`, invented nowhere: it exists because
+    "you have already done this fourteen times" is the fact an agent needs at a glance,
+    and it must not have to count a long list to find it.
+    """
+
+    counts: dict[str, int] = {}
+    for a in acts:
+        key = f"{a.action_id or '(waited)'}:{a.outcome}"
+        counts[key] = counts.get(key, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+@dataclass(frozen=True)
 class PlanStep:
     """One concrete step of an actor's plan. ``at`` is when the actor intends to do it;
     a step with a time schedules a real future opportunity in the world."""
@@ -301,6 +364,11 @@ class LocalView:
     trigger_detail: str = ""
     trigger_obs_id: str | None = None
     world_version: int = 0
+    # What this actor has already done in this branch, oldest first, with the world's
+    # verdict on each attempt. NOT an observation and NOT delivered — see
+    # :class:`ActedRecord` for why the two must not be confused, and for the fifteen
+    # identical acts an agent took because it could not see any of them.
+    own_actions: tuple[ActedRecord, ...] = ()
 
     def observed_fields(self) -> dict[str, Any]:
         """Every field level this actor can currently read.
@@ -551,10 +619,28 @@ def situation_key(actor: ActorState, view: LocalView) -> str:
     it is waiting on, what it believes and wants). What is deliberately NOT in it is
     bookkeeping that turns over whether or not anything happened: event ids, the world's
     version counter (which the actor's own deliveries increment), and anything the actor
-    itself produced.
+    itself produced — including its own act history.
 
-    Two decisions with the same key were taken from a world that had not moved and from
-    an actor that had not changed its mind, with nothing having reached it in between.
+    **Excluding the act history is the point, not an oversight.** ``own_actions`` grows
+    by one every time the actor acts, so a key that included it could never match twice
+    and the detector could never fire — which is exactly what a whole-``LocalView``
+    comparison suffers from. The narrower question this key asks is: *has anything
+    happened in the world, or reached this actor from anyone else, that could make the
+    same act a new decision?* An agent that can see it has already circulated fourteen
+    notes and circulates a fifteenth has decided something; this key does not call that
+    a repeat, and nothing here suppresses it.
+
+    **The clock is in the key, which makes the detector deliberately conservative.**
+    Elapsed simulated time always counts as something having moved, so two identical acts
+    separated by any interval are two decisions — a governor signalling support in June
+    and again in September is never touched, because the world has aged around the second
+    one and that ageing is itself information. Only a re-ask at the very same instant can
+    match. This under-fires by construction, and that is the direction to err in: leaving
+    some spin is recoverable, deleting a real decision is not.
+
+    Two decisions with the same key were taken at the same instant, for the same stated
+    cause, from a world that had not moved, by an actor that had not changed its mind,
+    with nothing having reached it from anybody else in between.
     """
 
     plan = actor.plan
@@ -910,6 +996,12 @@ class ActorRuntime:
             "public_facts": list(view.public_facts),
             "active_plan": actor.plan.as_dict() if actor.plan else None,
             "current_action": (actor.current_action.as_dict() if actor.current_action else None),
+            # What this actor has already done, and how often. Without these two the
+            # agent is an amnesiac: its own acts reach it through no channel at all, and
+            # `current_action` is one overwritten cell that says nothing about the
+            # fourteen attempts before it.
+            "your_actions_so_far": [a.as_dict() for a in view.own_actions],
+            "your_action_counts": act_counts(view.own_actions),
             "your_commitments": [c.as_dict() for c in actor.open_commitments()],
             "pending_information_needs": [n.as_dict() for n in actor.open_needs()],
             "your_revisit_conditions": [r.as_dict() for r in actor.revisit_conditions],

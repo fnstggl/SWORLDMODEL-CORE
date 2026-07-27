@@ -12,7 +12,12 @@ from __future__ import annotations
 from .api import forecast, run_forecast
 from .config import ForecastConfig
 from .deepseek_gateway import DeepSeekGateway
-from .engine import RunBudget
+from .engine import (
+    EXECUTION_INCOMPLETE,
+    UNRESOLVED_WORLD_UNDETERMINED,
+    BankedTerminal,
+    RunBudget,
+)
 from .errors import (
     ContractMutationError,
     CutoffViolationError,
@@ -36,6 +41,9 @@ __all__ = [
     "ForecastResult",
     "ForecastStatus",
     "ResolutionContract",
+    "EXECUTION_INCOMPLETE",
+    "UNRESOLVED_WORLD_UNDETERMINED",
+    "BankedTerminal",
     "RunBudget",
     "ModelGateway",
     "GatewayRequest",

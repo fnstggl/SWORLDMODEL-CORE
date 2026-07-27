@@ -516,6 +516,11 @@ class TraceContext:
                 "actor_invocations": dict(d.actor_call_counts),
                 "unfired_in_horizon": d.unfired_in_horizon,
                 "pending_beyond_horizon": d.pending_beyond_horizon,
+                "execution_status": d.execution_status,
+                "execution_limit": d.execution_limit,
+                "unresolved_class": d.unresolved_class,
+                "banked_terminal": d.banked_terminal.as_dict() if d.banked_terminal else None,
+                "bank_contradicted": d.bank_contradicted,
             }
             for branch, d in sorted(self.run_result.diagnostics.items())
         }
@@ -624,6 +629,22 @@ class TraceContext:
                 f"stopped because *{diag.stop_reason}*; "
                 f"{diag.unfired_in_horizon} entries never fired in-horizon, "
                 f"{len(diag.pending_beyond_horizon)} scheduled beyond the horizon"
+                # W2. Whether we ran the world to its end is a fact about US, and a
+                # reader who is about to price unresolved mass as uncertainty needs it
+                # on the same line as the stop reason, not inferred from it.
+                + (
+                    f"; execution {diag.execution_status}"
+                    + (f" (limit: {diag.execution_limit})" if diag.execution_limit else "")
+                    if diag.execution_status
+                    else ""
+                )
+                + (
+                    f"; terminal banked at {diag.banked_terminal.at} by "
+                    f"{len(diag.banked_terminal.caused_by_event_ids)} event(s)"
+                    if diag.banked_terminal
+                    else ""
+                )
+                + ("; BANK CONTRADICTED AT HORIZON" if diag.bank_contradicted else "")
             )
         add("")
 

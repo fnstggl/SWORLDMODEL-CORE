@@ -24,7 +24,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any
 
-from .actors import ActorState, LocalView, Observation
+from .actors import ActedRecord, ActorState, LocalView, Observation
 from .evidence import EvidenceView
 from .ids import content_id
 from .models import (
@@ -52,6 +52,21 @@ _OBSERVABLE_KINDS = frozenset(
 
 # Payload keys that carry field-level information into an observation.
 _INFO_KEYS = ("fields", "info_fields", "data", "levels")
+
+# The ledger kinds that record what an actor DID, as opposed to what it was told. Each
+# is written about one actor by the environment as its intention passed through:
+# `actor_waited` and `action_rejected` end the attempt where it stands, `action_started`
+# opens one, and `action_completed`/`action_failed` close it. Together they are the
+# actor's own act history, and they are the only thing in an actor's view that does not
+# come through the information lifecycle — you do not need to be told what you did.
+_ATTEMPT_OPENED = "action_started"
+_ATTEMPT_KINDS = frozenset({_ATTEMPT_OPENED, "action_rejected", "actor_waited"})
+_ATTEMPT_RESOLVED = {"action_completed": "completed", "action_failed": "failed"}
+_ATTEMPT_OUTCOME = {
+    _ATTEMPT_OPENED: "in_progress",
+    "action_rejected": "refused",
+    "actor_waited": "waited",
+}
 
 
 @dataclass(frozen=True)
@@ -221,10 +236,22 @@ class WorldState:
     # -- projection -------------------------------------------------------------
 
     def view_for(self, actor_id: str, trigger: Event | None = None) -> LocalView:
-        """Derive the local view of an actor: strictly what it has **noticed**.
+        """Derive the local view of an actor: what it has **noticed**, and what it DID.
 
-        Not what happened, not what was visible, not what was delivered — what this
-        actor actually took in, by this branch time.
+        Two different things, from two different sources, and conflating them is what
+        produced a blind agent:
+
+        * **What it noticed** comes from ``deliveries``. Not what happened, not what was
+          visible, not what was delivered — what this actor actually took in, by this
+          branch time. That is the information lifecycle and it is correct.
+        * **What it did** comes from the event ledger directly, filtered to this actor's
+          own attempts. It has to, because an actor is never a recipient of its own
+          delivery (``observers_of`` skips it on purpose), so an act-history sourced from
+          deliveries is always empty. An actor does not learn what it did; it did it.
+
+        Before the second existed, an agent's own acts were invisible to it everywhere
+        except one overwritten ``current_action`` slot — and an agent that cannot see it
+        has already acted will act again. See :class:`~sworldmodel.actors.ActedRecord`.
         """
 
         actor = self.actors[actor_id]
@@ -258,7 +285,68 @@ class WorldState:
             subject=self.contract.subject_entity,
             trigger_obs_id=trigger.event_id if trigger else None,
             world_version=self.version,
+            own_actions=self.own_actions(actor_id),
         )
+
+    def own_actions(self, actor_id: str) -> tuple[ActedRecord, ...]:
+        """Every attempt this actor has made in this branch, oldest first, with its end.
+
+        One entry per *attempt*, not per ledger line, because an attempt and its verdict
+        are one thing that happened to the actor and reading them as two makes a short
+        history twice as long. An attempt opens with ``action_started`` and is closed by
+        the ``action_completed`` or ``action_failed`` the environment later wrote about
+        it; a refusal and a wait open and close in the same line.
+
+        The pairing is evidence-based, never a guess. ``action_completed`` carries the
+        ``started_at`` of the attempt it closes, so it is matched exactly. An
+        ``action_failed`` carries no such stamp, so it closes the oldest still-open
+        attempt with the same ``action_id`` — which is exact in the runtime as built,
+        because an actor holds one ``current_action`` at a time and cannot have two
+        attempts at the same action in flight. An attempt nothing has closed reads
+        ``in_progress``, which is the truth about it rather than an assumed success.
+        """
+
+        out: list[ActedRecord] = []
+        open_by_action: dict[str, list[int]] = {}
+        by_started_at: dict[tuple[str, str], int] = {}
+        for ev in self.event_history:
+            if ev.actor_id != actor_id or ev.status is not EventStatus.APPLIED:
+                continue
+            if ev.time > self.time:
+                continue
+            data = ev.payload_dict
+            if ev.kind in _ATTEMPT_KINDS:
+                action_id = str(data.get("action_id", ""))
+                out.append(
+                    ActedRecord(
+                        at=ev.time,
+                        action_id=action_id,
+                        outcome=_ATTEMPT_OUTCOME[ev.kind],
+                        params=tuple(sorted(dict(data.get("params") or {}).items())),
+                        target=str(data.get("target", "")),
+                        detail=str(data.get("reason", data.get("rationale", ""))),
+                        event_id=ev.event_id,
+                    )
+                )
+                if ev.kind == _ATTEMPT_OPENED:
+                    open_by_action.setdefault(action_id, []).append(len(out) - 1)
+                    by_started_at[(action_id, ev.time.isoformat())] = len(out) - 1
+                continue
+            outcome = _ATTEMPT_RESOLVED.get(ev.kind)
+            if outcome is None:
+                continue
+            action_id = str(data.get("action_id", ""))
+            idx = by_started_at.get((action_id, str(data.get("started_at", ""))))
+            if idx is None:
+                pending = open_by_action.get(action_id) or []
+                idx = pending[0] if pending else None
+            if idx is None:
+                continue
+            still_open = open_by_action.get(action_id) or []
+            if idx in still_open:
+                still_open.remove(idx)
+            out[idx] = replace(out[idx], outcome=outcome, detail=str(data.get("reason", "")))
+        return tuple(out)
 
     def observers_of(self, ev: Event) -> tuple[str, ...]:
         """Which actors *could* observe this event at all. Visibility only — becoming

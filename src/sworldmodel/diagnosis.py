@@ -318,6 +318,10 @@ class RunDiagnosis:
                     "batches": getattr(d, "batches", None),
                     "unfired_in_horizon": getattr(d, "unfired_in_horizon", None),
                     "pending_beyond_horizon": len(d.pending_beyond_horizon),
+                    "execution_status": getattr(d, "execution_status", None),
+                    "execution_limit": getattr(d, "execution_limit", None),
+                    "unresolved_class": getattr(d, "unresolved_class", None),
+                    "bank_contradicted": getattr(d, "bank_contradicted", None),
                 }
                 for bid, d in r.diagnostics.items()
             },
