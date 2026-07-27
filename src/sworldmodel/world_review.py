@@ -528,7 +528,9 @@ def _effect_write(eff: Any) -> tuple[str | None, set[str]]:
     return name, _reads_fields(value)
 
 
-def _field_writers(spec: Any) -> tuple[dict[str, list[tuple[str, Any]]], dict[str, list[tuple[str, Any]]]]:
+def _field_writers(
+    spec: Any,
+) -> tuple[dict[str, list[tuple[str, Any]]], dict[str, list[tuple[str, Any]]]]:
     """Every field write in the world, as (what mechanisms do, what actors do).
 
     Each maps field id -> [(label, effect)]. Kept apart rather than merged because the
@@ -1001,7 +1003,9 @@ def mechanical_world_checks(
     # key: it collapsed the review from five checks to one, and the four it surrendered
     # were the ones that catch the shape underneath. An actor writing the terminal is a
     # reason to scrutinise HOW it decides, not a reason to stop asking.
-    actor_terms = sorted(t.split(":", 1)[1] for t in (action_written & terms) if t.startswith("field:"))
+    actor_terms = sorted(
+        t.split(":", 1)[1] for t in (action_written & terms) if t.startswith("field:")
+    )
 
     effects = _dated_effects(spec)
     findings: list[AuditFinding] = []

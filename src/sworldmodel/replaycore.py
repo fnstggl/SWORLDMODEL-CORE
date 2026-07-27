@@ -669,10 +669,18 @@ def _eval_rendered(expr: str, fields: dict[str, Any], counts: dict[str, int]) ->
     raise Unreconstructable(f"unsupported terminal operator {op!r}")
 
 
-def _eval_ast(node: Any, fields: dict[str, Any], counts: dict[str, int]) -> Any:
+def _eval_ast(
+    node: Any,
+    fields: dict[str, Any],
+    counts: dict[str, int],
+    records: Mapping[str, Sequence[Mapping[str, Any]]] | None,
+    events: Mapping[str, Sequence[Mapping[str, Any]]] | None,
+) -> Any:
     """Evaluate the executable terminal AST with the engine's own evaluator."""
 
-    return evaluate(parse_expr(node), ReplayWorld(fields, counts))
+    return evaluate(
+        parse_expr(node), ReplayWorld(fields, counts, records=records, events=events)
+    )
 
 
 def reevaluate_terminal(
@@ -680,6 +688,9 @@ def reevaluate_terminal(
     rendered: Mapping[str, Any],
     fields: dict[str, Any],
     counts: dict[str, int],
+    *,
+    records: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
+    events: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
 ) -> tuple[bool, str | None, str]:
     """(resolved, outcome, how) for one REPLAYED branch state. Never guesses.
 

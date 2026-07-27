@@ -31,7 +31,7 @@ reservoir — and none of them is any acceptance question. What is proven is sha
 from __future__ import annotations
 
 import copy
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from _fakes import ProgrammableGateway, build_bundle
@@ -54,6 +54,7 @@ HORIZON = datetime.fromisoformat("2026-04-10T23:59:59+00:00")
 QUARTER_START = "2026-01-12T09:00:00+00:00"
 QUARTER_END = "2026-04-06T09:00:00+00:00"
 WEEKLY_FIRINGS = 13
+WEEK = timedelta(days=7)
 
 
 def WEEK_OF(rate: str) -> dict[str, Any]:
@@ -1015,18 +1016,66 @@ def test_an_under_enumerated_cadence_is_refused_and_names_the_shortfall() -> Non
     assert "declare recurrence {period: P1W" in message
 
     # Enumerating the real calendar by hand is legal — the rule is about the cadence
-    # being honoured, not about which of the two ways says so.
-    every_week = [
-        (datetime.fromisoformat(QUARTER_START).replace(day=12) if i == 0 else None)
-        for i in range(1)
-    ]
-    del every_week
+    # being honoured, not about which of the two ways of saying so was used.
     start = datetime.fromisoformat(QUARTER_START)
-    weekly = [
-        (start.replace() + (i * (datetime.fromisoformat(QUARTER_END) - start) / 12))
-        for i in range(13)
-    ]
-    assert _validate(berth_plan(hand_written=[w.isoformat() for w in weekly])) == []
+    weekly = [(start + i * WEEK).isoformat() for i in range(WEEKLY_FIRINGS)]
+    assert _validate(berth_plan(hand_written=weekly)) == []
+
+
+def test_an_over_enumerated_cadence_is_refused_the_same_way() -> None:
+    """The count is ungated in BOTH directions, and both directions decide answers.
+
+    The adversary's case, in a berth: one mechanism typed eight times and the same
+    mechanism typed ten times, everything else identical, with the threshold between the
+    two totals. Nothing but the number of dates changed and the terminal flipped. A
+    calendar that claims more weeks than its own window holds is refused with the same
+    arithmetic as one that claims fewer.
+    """
+
+    start = datetime.fromisoformat(QUARTER_START)
+    eight_weeks = [(start + i * WEEK).isoformat() for i in range(8)]
+
+    honest = _validate(berth_plan(hand_written=eight_weeks))
+    assert honest == [], honest
+
+    # Ten firings squeezed into the same eight-week window: two weeks of sailings that
+    # the calendar has no room for, and 800 vehicles this world never carried.
+    inflated = [(start + i * (WEEK * 7 / 9)).isoformat() for i in range(10)]
+    errors = _validate(berth_plan(hand_written=inflated))
+    assert "OVER_ENUMERATED_CADENCE" in _defects(errors), errors
+    message = next(e for e in errors if e.startswith("OVER_ENUMERATED_CADENCE"))
+    assert "fires 10 times" in message and "holds only 8" in message
+    assert "counted twice" in message
+
+
+def test_the_declared_cadence_survives_onto_the_compiled_process() -> None:
+    """The expansion is what runs; the declaration is what gets audited.
+
+    A reviewer handed a flat list of dated firings cannot tell a cadence declared over a
+    window from a calendar somebody typed — which is the FD-25 hole restated. So the
+    period and the window travel with the occurrences they produced, and a compiled
+    review can check the span against the stated cadence without the semantic plan.
+    """
+
+    compilation, _ = lower_plan(parse_semantic_plan(berth_plan()))
+    (process,) = compilation["world_spec"]["external_processes"]
+    assert process["recurrence_period"] == "P1W"
+    assert process["recurrence_start"] == QUARTER_START
+    assert process["recurrence_end"] == QUARTER_END
+    assert process["recurrence_firings"] == WEEKLY_FIRINGS == len(process["occurrences"])
+
+    # A hand-written calendar says so by carrying no declaration at all, which is exactly
+    # the distinction a reviewer needs.
+    start = datetime.fromisoformat(QUARTER_START)
+    typed, _ = lower_plan(
+        parse_semantic_plan(
+            berth_plan(hand_written=[(start + i * WEEK).isoformat() for i in range(8)])
+        )
+    )
+    (by_hand,) = typed["world_spec"]["external_processes"]
+    assert by_hand["recurrence_period"] == ""
+    assert by_hand["recurrence_firings"] == 0
+    assert len(by_hand["occurrences"]) == 8
 
 
 def test_a_process_may_not_carry_a_cadence_and_a_calendar_at_once() -> None:
