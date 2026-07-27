@@ -255,6 +255,21 @@ def council_plan() -> dict:
         },
         "terminal_producer_note": "Votes exist only as records the voters' own "
         "affordances append; the five-of-nine threshold is the real decision rule.",
+        # The delegation is the legal aggregate — seven representatives instructed to
+        # vote as a bloc — so it says which members it absorbs and what shows they hold
+        # no separate position. AGGREGATE_UNJUSTIFIED asks that of any deciding entity
+        # with represents_count >= 2, because the same integer is how a world with its
+        # parties deleted also satisfies its participant count.
+        "aggregate_justifications": [
+            {
+                "aggregate": "Delegation of seven basin towns",
+                "members": "the seven basin towns of the upper valley",
+                "members_hold_no_separate_position": "the towns instruct their "
+                "delegation to cast all seven votes as a bloc; the record shows no town "
+                "voting against the bloc position and no mechanism by which one could",
+                "evidence_claim_ids": ["c-c2"],
+            }
+        ],
         "world_facts": [],
     }
 

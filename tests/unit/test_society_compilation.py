@@ -315,14 +315,42 @@ def factor_plan() -> dict[str, Any]:
                 "evidence_claim_ids": ["c-g5"],
             }
         ],
+        # One entry per township, and each says what the record puts under that name
+        # before saying why it cannot matter here. This fixture was written the other
+        # way — one entry named "Ardgour, Beinn Dubh and Corran townships" carrying one
+        # argument — and EXCLUSION_UNARGUED caught it in the file whose subject is that
+        # exact defect. Corran's own entry has to survive contact with c-g3, which says
+        # Corran has pressed for a higher limit at successive meetings: it is immaterial
+        # to THIS question because the factor sets the limit whatever it hears, not
+        # because nothing is recorded under Corran's name.
         "excluded_candidates": [
             {
-                "name": "Ardgour, Beinn Dubh and Corran townships",
-                "why_immaterial": "the record shows the factor consults them as a "
-                "courtesy and sets the limit regardless of what they say, so removing "
-                "them cannot change whether the limit is raised",
-                "evidence_claim_ids": ["c-g5"],
-            }
+                "name": "Ardgour",
+                "record_attributes": "states its position on the stocking limit at the "
+                "Michaelmas meeting and controls the stock on its own apportionment",
+                "why_immaterial": "the record shows the factor sets the limit under the "
+                "estate's regulations and consults the townships as a courtesy, so a "
+                "position Ardgour states cannot change whether the limit is raised",
+                "evidence_claim_ids": ["c-g2", "c-g4", "c-g5"],
+            },
+            {
+                "name": "Beinn Dubh",
+                "record_attributes": "states its position on the stocking limit at the "
+                "Michaelmas meeting and controls the stock on its own apportionment",
+                "why_immaterial": "same record, same courtesy consultation: nothing "
+                "Beinn Dubh states reaches the factor's own decision on the limit",
+                "evidence_claim_ids": ["c-g2", "c-g4", "c-g5"],
+            },
+            {
+                "name": "Corran",
+                "record_attributes": "has pressed for a higher stocking limit at "
+                "successive grazings meetings, and controls the stock on its own "
+                "apportionment",
+                "why_immaterial": "Corran's pressing is recorded and the record equally "
+                "shows the factor sets the limit regardless of what the townships say, "
+                "so the pressing cannot change whether the limit is raised",
+                "evidence_claim_ids": ["c-g3", "c-g4", "c-g5"],
+            },
         ],
         "states": [
             {
@@ -696,7 +724,12 @@ def test_the_defect_and_its_fix_differ_only_in_what_the_parties_can_do() -> None
     assert [e["name"] for e in scenery["entities"]] == [e["name"] for e in society["entities"]]
     assert len(scenery["affordances"]) == 1
     assert len(society["affordances"]) == 7  # one per township position, plus the announcement
-    assert _defects(_validate(scenery)) == {"INERT_PARTICIPANT"}
+    # Two defects, one world: the committee cannot act for three townships that are
+    # standing beside it holding nothing (INERT_PARTICIPANT), and it has not said what
+    # licenses it to act for them at all (AGGREGATE_UNJUSTIFIED). The second is the one
+    # the recorded OPEC+ bench trips instead of the first, because a plan that deletes
+    # the members rather than displaying them leaves INERT_PARTICIPANT nobody to name.
+    assert _defects(_validate(scenery)) == {"INERT_PARTICIPANT", "AGGREGATE_UNJUSTIFIED"}
     assert _validate(society) == []
 
     # And the admitted world really is executable: every party reaches the floor with
@@ -833,3 +866,220 @@ def test_a_position_stated_by_one_party_reaches_the_others_in_a_real_run() -> No
     assert noticed_by & {by_name["Ardgour"], by_name["Beinn Dubh"]}, (
         "the other townships must be able to hear a position, not only the committee"
     )
+
+
+# ---------------------------------------------------------------------------
+# The compression the earlier gates could not see: parties that are never listed
+#
+# W4's rules read the parties that are IN the world, and they work — the world above
+# is refused by name. What they cannot see is the plan that never lists the parties at
+# all, and that is the plan the measured compiler actually writes. The recorded N=10
+# OPEC+ bench (`docs/SOCIETY_BENCH.md`) produced seven worlds; every one of them put
+# the member countries in `excluded_candidates` or nowhere, so `INERT_PARTICIPANT` had
+# nobody to name and every society gate passed a world with one actor. One plan
+# declared twenty-three decision-relevant participants, built one entity carrying
+# represents_count 23, argued a single exclusion, left six named countries out of the
+# plan entirely — and compiled.
+#
+# The asymmetry those plans were answering is priced, not stylistic. In the measured
+# plans an included party costs ~1,430 characters (an entity record answering five
+# representation questions, plus an affordance with its changes and citations); an
+# excluded one cost 139, could be shared across six names in a single entry, and could
+# be argued with the string "Same as Saudi Arabia." The rules below make an omission
+# cost what an inclusion costs, and make an aggregate say what it absorbed. None of
+# them can be satisfied by inventing a participant, and each is satisfiable by any
+# world that is right.
+# ---------------------------------------------------------------------------
+
+
+def _validate_with_record(plan: dict[str, Any]) -> list[str]:
+    """Validate with the store's own entity lists in front of the validator."""
+
+    return validate_semantic_plan(
+        parse_semantic_plan(plan),
+        as_of=AS_OF,
+        horizon=HORIZON,
+        known_claim_ids=KNOWN,
+        claim_entities={cid: tuple(c["entities"]) for cid, c in CLAIMS.items()},
+    )
+
+
+def test_an_aggregate_deciding_for_its_members_must_say_what_it_absorbed() -> None:
+    """``represents_count: 3`` is the cheapest sentence in the schema.
+
+    It satisfies the participant count, it satisfies the reviewer's "represents_count
+    faithful?" question, and it turns three parties into one integer without the plan
+    ever saying who they were. The compression stays legal — a delegation voting as
+    instructed is a real thing — but it is now claimed, in the same shape a world with
+    no actors at all has to claim itself.
+    """
+
+    plan = grazing_plan(equipped=False)
+    # Strip the townships so nothing else fires: one aggregate, standing for three
+    # parties the plan never mentions again. This is the measured shape.
+    plan["entities"] = [e for e in plan["entities"] if e["name"] == "Ard Fell Grazings Committee"]
+    plan["processes"][0]["participants"] = ["Ard Fell Grazings Committee"]
+    assert _defects(_validate(plan)) == {"AGGREGATE_UNJUSTIFIED"}, _validate(plan)
+
+    plan["aggregate_justifications"] = [
+        {
+            "aggregate": "Ard Fell Grazings Committee",
+            "members": "Ardgour, Beinn Dubh and Corran",
+            "members_hold_no_separate_position": "the townships state positions at the "
+            "meeting and the committee announces the limit; nothing in the record shows "
+            "a township able to withhold or act on the limit itself",
+            "evidence_claim_ids": ["c-g2"],
+        }
+    ]
+    assert _validate(plan) == [], "a stated, cited aggregate claim is admitted"
+
+
+def test_an_aggregate_claim_without_evidence_is_not_a_claim() -> None:
+    """The three fields are all load-bearing: who, what shows it, and the citation.
+
+    Without the citation this is the planner asserting its own compression, which is
+    the failure `zero_actor_justification` and `single_multiplier_exemption` are both
+    shaped to prevent.
+    """
+
+    plan = grazing_plan(equipped=False)
+    plan["entities"] = [e for e in plan["entities"] if e["name"] == "Ard Fell Grazings Committee"]
+    plan["processes"][0]["participants"] = ["Ard Fell Grazings Committee"]
+    for broken in (
+        {"aggregate": "Ard Fell Grazings Committee", "members": "", "evidence_claim_ids": ["c-g2"]},
+        {
+            "aggregate": "Ard Fell Grazings Committee",
+            "members": "Ardgour, Beinn Dubh and Corran",
+            "members_hold_no_separate_position": "they act as one",
+            "evidence_claim_ids": [],
+        },
+        {
+            "aggregate": "some other body",
+            "members": "Ardgour, Beinn Dubh and Corran",
+            "members_hold_no_separate_position": "they act as one",
+            "evidence_claim_ids": ["c-g2"],
+        },
+    ):
+        plan["aggregate_justifications"] = [broken]
+        assert "AGGREGATE_UNJUSTIFIED" in _defects(_validate(plan)), broken
+
+
+def test_one_exclusion_entry_removes_one_party() -> None:
+    """Six parties left the measured world inside one entry's ``name``.
+
+    ``"Saudi Arabia, Russia, Kuwait, Algeria, Kazakhstan, Oman"`` is one judgement about
+    a class, and whether each of those countries holds a position of its own is six
+    questions. The rule reads only the unambiguous separators, so a real single name
+    like "Trinidad and Tobago" is untouched.
+    """
+
+    plan = factor_plan()
+    plan["excluded_candidates"] = [
+        {
+            "name": "Ardgour, Beinn Dubh and Corran",
+            "record_attributes": "state their positions at the Michaelmas meeting",
+            "why_immaterial": "the factor sets the limit whatever they say",
+            "evidence_claim_ids": ["c-g2", "c-g5"],
+        }
+    ]
+    errors = _validate(plan)
+    assert _defects(errors) == {"EXCLUSION_UNARGUED"}, errors
+    assert "one entry per party" in errors[0]
+
+    plan["excluded_candidates"][0]["name"] = "Trinidad and Tobago"
+    assert "EXCLUSION_UNARGUED" not in _defects(_validate(plan)), (
+        "a country whose real name contains 'and' is one party, not a list"
+    )
+
+
+def test_an_exclusion_may_not_borrow_another_exclusions_reasoning() -> None:
+    """One measured plan excluded six countries with "Same as Saudi Arabia."
+
+    The record attributes different things to different names. An exclusion that points
+    at another exclusion has not read what it attributes to this one — and an argument
+    that opens with the same word while actually arguing about this party is untouched,
+    which is the boundary the factor world's own Beinn Dubh entry sits on.
+    """
+
+    plan = factor_plan()
+    plan["excluded_candidates"][1]["why_immaterial"] = "Same as Ardgour."
+    errors = _validate(plan)
+    assert _defects(errors) == {"EXCLUSION_UNARGUED"}, errors
+    assert "Beinn Dubh" in errors[0]
+
+    assert _validate(factor_plan()) == [], (
+        "the unmodified world argues each exclusion for its own party and is admitted"
+    )
+
+
+def test_a_party_the_grounding_claim_names_cannot_simply_be_absent() -> None:
+    """The hole `INERT_PARTICIPANT` cannot reach: the party is never listed.
+
+    The committee's authority to act here is grounded in the claim that says the three
+    townships state their positions at the meeting. Reading that sentence as authority
+    for one party and as silence about the other three is the compression, and until
+    now nothing looked at it — `ExcludedCandidate`'s own docstring says an omission
+    nobody had to justify is indistinguishable from an omission nobody noticed.
+    """
+
+    plan = factor_plan()
+    plan["excluded_candidates"] = []
+    # The factor's act now rests on the meeting claim, which names all three townships.
+    plan["affordances"][0]["evidence_claim_ids"] = ["c-g2", "c-g5"]
+
+    # Without the record in front of it the validator guesses at nothing.
+    assert _validate(plan) == []
+
+    errors = _validate_with_record(plan)
+    assert _defects(errors) == {"PARTY_UNACCOUNTED"}, errors
+    for township in ("Ardgour", "Beinn Dubh", "Corran"):
+        assert any(township in e for e in errors), township
+    assert "world_facts" in errors[0], "the message says how a non-party is answered for"
+
+
+def test_accounting_for_a_named_party_needs_what_the_record_puts_under_its_name() -> None:
+    """An exclusion is an argument about something, so it has to name the something.
+
+    ``why_immaterial`` alone can be written without ever reading the claim: the plan
+    below excludes all three townships on the very claim it cites as the factor's
+    authority, and says nothing about what that claim attributes to them. The
+    correction is one sentence, and it is the sentence the exclusion is an argument
+    against.
+    """
+
+    plan = factor_plan()
+    plan["affordances"][0]["evidence_claim_ids"] = ["c-g2", "c-g5"]
+    # c-g2 names the committee as well, so it too is accounted for — argued, and with
+    # what the record puts under its name — leaving only the three blanks under test.
+    plan["excluded_candidates"].append(
+        {
+            "name": "Ard Fell Grazings Committee",
+            "record_attributes": "hears the townships' positions at the Michaelmas "
+            "meeting; the record gives it no part in the estate limit",
+            "why_immaterial": "the limit under this question is the estate factor's, "
+            "set under the estate's own regulations, so the grazings committee has "
+            "nothing to move",
+            "evidence_claim_ids": ["c-g2", "c-g5"],
+        }
+    )
+    for entry in plan["excluded_candidates"][:3]:
+        entry["record_attributes"] = ""
+    errors = _validate_with_record(plan)
+    assert _defects(errors) == {"EXCLUSION_UNARGUED"}, errors
+    assert len(errors) == 3, "one finding per party, never one for the class"
+
+    assert _validate_with_record(factor_plan()) == [], (
+        "the single-decider world argues each of its three exclusions and is admitted "
+        "with the whole record in front of the validator"
+    )
+
+
+def test_the_equipped_world_is_admitted_with_the_record_in_front_of_it() -> None:
+    """The ordering rule: no new gate ships without the mechanism that passes it.
+
+    Every party the grounding claims name is in the world holding the act the record
+    attributes to it, so nothing here has anything to report — which is what makes the
+    rules above a check on compression rather than a tax on breadth.
+    """
+
+    assert _validate_with_record(grazing_plan(equipped=True)) == []

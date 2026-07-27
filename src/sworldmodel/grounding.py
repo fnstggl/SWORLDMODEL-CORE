@@ -40,9 +40,12 @@ head of state, an organization's representative, or a constructed population str
 
 from __future__ import annotations
 
+import math
 import re
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from enum import StrEnum
+from typing import Any
 
 from .epistemics import (
     EpistemicClass,
@@ -990,3 +993,362 @@ def profile_from_member(
             "were withheld from this briefing"
         )
     return replace(profile, missing_information=tuple(missing))
+
+
+# ---------------------------------------------------------------------------
+# Citation support: does the cited record support what it is attached to?
+#
+# :func:`attest_profiles` above settled the actor half of this question — a claim
+# grounds an actor only when it actually names that actor, never merely by being in the
+# store. Everything below is the same move applied to the other things a plan cites:
+# the VALUE of an uncertainty alternative, and the prose claims (a zero-actor
+# justification, a single-multiplier exemption) a plan asks to be believed on evidence.
+#
+# The defect being closed is one predicate, repeated: a check that reads the PRESENCE
+# of a citation as proof of SUPPORT. `semantic_plan.cited()` returned True for any id in
+# the store, so `c-f1` — "The Kestrel Bay ferry terminal recorded 320000 crossings" —
+# grounded an aquifer world's 0.9 runoff fraction, and with it D3's straddling gate,
+# D4's exemption, D5's zero-actor justification and FD-11's filler gate at once.
+#
+# Two rules shape what follows, both learned the hard way in this repo:
+#
+# * **A gate that refuses correct worlds is worse than the hole it closes.** So support
+#   is decided by the most generous reading of the record that still means something: a
+#   number is supported by any stated value or any stated range that contains it (read
+#   through percentages, because "a 3% rise" legitimately supports a 1.03 multiplier),
+#   and a categorical value is supported by any significant word it shares with the
+#   record. What is refused is a citation with *nothing* to do with the value it is
+#   attached to.
+# * **A check that could not run must never read as a check that passed.** Support is
+#   tri-state. :attr:`Support.UNDECIDABLE` is returned whenever the claim texts were not
+#   supplied or the value is of a kind no textual test can read, and callers are expected
+#   to fall back to the weaker existence check *and say so* — never to treat it as a pass.
+# ---------------------------------------------------------------------------
+
+
+class Support(StrEnum):
+    """Whether a citation supports the thing it is attached to.
+
+    The tri-state is load-bearing. ``UNDECIDABLE`` is not a soft ``SUPPORTED``: it says
+    the comparison never happened, either because no claim text was available or because
+    the value is of a kind this module cannot read. A caller that maps it to "fine"
+    reintroduces exactly the defect this module exists to close, one layer up.
+    """
+
+    SUPPORTED = "supported"
+    UNSUPPORTED = "unsupported"
+    UNDECIDABLE = "undecidable"
+
+
+@dataclass(frozen=True)
+class CitedRecord:
+    """One stored claim, reduced to the text a support test reads.
+
+    Built from an :class:`~sworldmodel.evidence.EvidenceClaim`, from a plain mapping, or
+    from anything carrying the same attribute names — the support tests run in the
+    validator, which is handed whatever the caller has, and a claim it cannot read is
+    reported as unreadable rather than assumed good.
+    """
+
+    claim_id: str
+    proposition: str = ""
+    normalized_value: str = ""
+    supporting_excerpt: str = ""
+    entities: tuple[str, ...] = ()
+
+    @property
+    def text(self) -> str:
+        return f"{self.proposition} {self.normalized_value} {self.supporting_excerpt}"
+
+
+def _as_str(value: Any) -> str:
+    return "" if value is None else str(value)
+
+
+def cited_record(claim_id: str, claim: Any) -> CitedRecord:
+    """Read one stored claim into the shape the support tests use.
+
+    Accepts the evidence store's own claim objects (``proposition`` /
+    ``normalized_value`` / ``supporting_excerpt`` / ``entities``) and the plain
+    dictionaries the compilers and tests carry, where the normalized value is written
+    ``value``. Fields that are absent are empty, never invented.
+    """
+
+    def field(*names: str) -> Any:
+        for name in names:
+            if isinstance(claim, Mapping):
+                if name in claim:
+                    return claim[name]
+            elif hasattr(claim, name):
+                return getattr(claim, name)
+        return None
+
+    raw_entities = field("entities") or ()
+    entities = (
+        tuple(str(e) for e in raw_entities) if isinstance(raw_entities, (list, tuple)) else ()
+    )
+    return CitedRecord(
+        claim_id=claim_id,
+        proposition=_as_str(field("proposition")),
+        normalized_value=_as_str(field("normalized_value", "value")),
+        supporting_excerpt=_as_str(field("supporting_excerpt", "excerpt")),
+        entities=entities,
+    )
+
+
+# A number as a record writes one: optional sign, digits with optional thousands
+# separators, optional decimals. Guarded on both sides so an identifier like "c-a3" or a
+# version "v2.1.4" is not read as a quantity the record states.
+_NUMBER = re.compile(r"(?<![\w.])[-+]?\d[\d,]*(?:\.\d+)?(?![\w.])")
+
+# Connectors that make two adjacent numbers the ends of one stated range. "and" is only
+# a range connector after the word "between", because "240 acre-feet and 800 acre-feet"
+# states two quantities and no interval between them.
+_RANGE_CONNECTORS = frozenset({"to", "-", "–", "—", "through", "..", "..."})
+_PERCENT = re.compile(r"\s*(?:%|percent|per cent|percentage)", re.IGNORECASE)
+
+
+def _is_percent_at(text: str, position: int) -> bool:
+    return _PERCENT.match(text, position) is not None
+
+
+def _readings(number: float, *, percent: bool) -> tuple[float, ...]:
+    """Every quantity one written number can legitimately stand for.
+
+    A bare number stands for itself. A percentage additionally stands for its fraction
+    and for the multipliers either side of it, because a record that says "3%" is the
+    normal way a real source supports a 1.03 or 0.97 factor — refusing that would refuse
+    correct worlds for a formatting difference, which is the failure mode this module is
+    under standing instruction to avoid.
+    """
+
+    if not percent:
+        return (number,)
+    return (number, number / 100.0, 1.0 + number / 100.0, 1.0 - number / 100.0)
+
+
+def _interval_readings(
+    low: float, high: float, *, percent: bool
+) -> tuple[tuple[float, float], ...]:
+    if not percent:
+        return ((low, high),)
+    return (
+        (low, high),
+        (low / 100.0, high / 100.0),
+        (1.0 + low / 100.0, 1.0 + high / 100.0),
+        (1.0 - high / 100.0, 1.0 - low / 100.0),
+    )
+
+
+def stated_quantities(text: str) -> tuple[tuple[float, ...], tuple[tuple[float, float], ...]]:
+    """The values and the ranges a record states, with percentages read both ways.
+
+    Returns ``(points, intervals)``. Nothing here interprets units: a support test asks
+    whether the record contains this quantity at all, not whether it is denominated the
+    same way, because the plan's own dimension gates already judge units and duplicating
+    that here would refuse a correct world over a rendering.
+    """
+
+    points: list[float] = []
+    intervals: list[tuple[float, float]] = []
+    matches = list(_NUMBER.finditer(text))
+    values: list[tuple[float, bool]] = []
+    for match in matches:
+        try:
+            number = float(match.group().replace(",", ""))
+        except ValueError:  # pragma: no cover - the pattern only matches numerals
+            continue
+        percent = _is_percent_at(text, match.end())
+        values.append((number, percent))
+        points.extend(_readings(number, percent=percent))
+    for index, (left, right) in enumerate(zip(matches, matches[1:], strict=False)):
+        connector = text[left.end() : right.start()].strip().lower()
+        joined = connector in _RANGE_CONNECTORS or (
+            connector == "and"
+            and text[max(0, left.start() - 12) : left.start()].lower().find("between") >= 0
+        )
+        if not joined:
+            continue
+        low_value, low_percent = values[index]
+        high_value, high_percent = values[index + 1]
+        if low_value > high_value:
+            low_value, high_value = high_value, low_value
+        intervals.extend(
+            _interval_readings(low_value, high_value, percent=low_percent or high_percent)
+        )
+    return tuple(points), tuple(intervals)
+
+
+def _quantity_stated(text: str, value: float) -> bool:
+    points, intervals = stated_quantities(text)
+    if any(math.isclose(value, p, rel_tol=1e-6, abs_tol=1e-12) for p in points):
+        return True
+    scale = max(abs(value), 1.0)
+    slack = 1e-9 * scale
+    return any(low - slack <= value <= high + slack for low, high in intervals)
+
+
+def _significant_words(text: str) -> frozenset[str]:
+    """The words in a phrase long enough to identify what it is about.
+
+    Deliberately crude, and deliberately the same crudeness the world review already
+    uses for the settled-record subject check: short words carry no subject, so they
+    cannot decide that a record is about a value.
+    """
+
+    cleaned = "".join(c.lower() if c.isalnum() else " " for c in text)
+    return frozenset(w for w in cleaned.split() if len(w) >= 4)
+
+
+def _numeric(value: Any) -> float | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value.strip().replace(",", ""))
+        except ValueError:
+            return None
+    return None
+
+
+@dataclass(frozen=True)
+class ClaimSupport:
+    """The evidence store, as the gates that read a citation as support see it.
+
+    ``records`` is ``None`` when the caller had only claim *ids* — the store's texts
+    were never handed over. In that state every support question answers
+    :attr:`Support.UNDECIDABLE`, which is why :attr:`can_read_claims` exists: a gate must
+    be able to say "this was not checked" rather than quietly returning to the existence
+    check that was the defect.
+    """
+
+    known: frozenset[str] | None = None
+    records: Mapping[str, CitedRecord] | None = None
+
+    @classmethod
+    def from_claims(
+        cls, claims: Mapping[str, Any] | None, *, known: frozenset[str] | None = None
+    ) -> ClaimSupport:
+        """Build from ``{claim_id: claim}`` — store objects or plain mappings alike."""
+
+        if claims is None:
+            return cls(known=known, records=None)
+        records = {cid: cited_record(cid, claim) for cid, claim in claims.items()}
+        return cls(known=frozenset(records) if known is None else known, records=records)
+
+    @classmethod
+    def from_view(cls, view: Any) -> ClaimSupport:
+        """Build from an :class:`~sworldmodel.evidence.EvidenceView`, at its own cutoff.
+
+        Only claims the view itself admits are read, so a post-cutoff claim can never
+        support anything — the same rule :func:`_claim_names` follows for actors.
+        """
+
+        claims = {c.id: c for c in view.available()}
+        return cls.from_claims(claims)
+
+    @property
+    def can_read_claims(self) -> bool:
+        return self.records is not None
+
+    def exists(self, ids: Iterable[str]) -> bool:
+        """The old predicate, kept under its real name: these ids are in the store.
+
+        Existence is a precondition for support and is never support by itself. It stays
+        because a citation to a claim that is not there grounds nothing at all, which is
+        a different (and worse) finding than a claim that is there and says something
+        else.
+        """
+
+        wanted = tuple(ids)
+        if not wanted:
+            return False
+        return True if self.known is None else all(i in self.known for i in wanted)
+
+    def _readable(self, ids: Iterable[str]) -> list[CitedRecord]:
+        if self.records is None:
+            return []
+        return [self.records[i] for i in ids if i in self.records]
+
+    def supports_quantity(self, ids: Iterable[str], value: float) -> Support:
+        """Does any cited record state this quantity, or a range that contains it?
+
+        This is the whole of D3's own correction boundary made mechanical — "anchor each
+        in cited evidence (a published range, a recorded distribution, a stated
+        forecast)" — and it is what separates legitimate indirect support from arbitrary
+        citation. A claim recording a range 0.6-0.9 supports a 0.9 alternative although
+        it never mentions that alternative; a claim recording 320000 ferry crossings
+        supports neither 0.9 nor 0.6, whatever else it is in the store for.
+        """
+
+        wanted = tuple(ids)
+        if not wanted or not self.can_read_claims:
+            return Support.UNDECIDABLE
+        readable = self._readable(wanted)
+        if not readable:
+            return Support.UNDECIDABLE
+        if any(_quantity_stated(r.text, value) for r in readable):
+            return Support.SUPPORTED
+        return Support.UNSUPPORTED
+
+    def supports_value(self, ids: Iterable[str], value: Any) -> Support:
+        """Support for an alternative's declared value, numeric or categorical.
+
+        A categorical value is judged far more loosely than a number — one significant
+        word shared with the record is enough — because a plan legitimately paraphrases
+        what a source says, and there is no way to tell a paraphrase from an invention
+        without reading for meaning. What that loose test still refuses is the shape FD-11
+        was: a filler alternative ("some other regime", "other") hung on a claim that
+        shares not one word with it.
+        """
+
+        number = _numeric(value)
+        if number is not None:
+            return self.supports_quantity(ids, number)
+        text = _as_str(value).strip()
+        wanted = tuple(ids)
+        if not text or not wanted or not self.can_read_claims:
+            return Support.UNDECIDABLE
+        readable = self._readable(wanted)
+        if not readable:
+            return Support.UNDECIDABLE
+        words = _significant_words(text)
+        if not words:
+            return Support.UNDECIDABLE
+        for record in readable:
+            if words & _significant_words(record.text):
+                return Support.SUPPORTED
+        return Support.UNSUPPORTED
+
+    def names_any_of(self, ids: Iterable[str], names: Iterable[str]) -> Support:
+        """Is any cited record about something this world has actually considered?
+
+        The test is :func:`attest_profiles`' test, moved from an actor to a world: a
+        record speaks about a name when it declares it among its entities, or writes it
+        out as a whole word or phrase. Whole names only, never parts — an invented
+        "Terminal operations manager" shares the token "terminal" with any claim about a
+        ferry terminal, and part-matching would let it attest itself.
+
+        Used for the prose claims a plan asks to be believed on evidence, where there is
+        no value to check. It is the widest possible reading of "relevant": every entity
+        the world includes, every candidate it deliberately excluded, and its subject all
+        count, so the only thing it refuses is a citation with no connection to the world
+        at all.
+        """
+
+        wanted = tuple(ids)
+        keys = frozenset(n.strip().lower() for n in names if n and len(n.strip()) > 1)
+        if not wanted or not keys or not self.can_read_claims:
+            return Support.UNDECIDABLE
+        readable = self._readable(wanted)
+        if not readable:
+            return Support.UNDECIDABLE
+        for record in readable:
+            if any(e.strip().lower() in keys for e in record.entities):
+                return Support.SUPPORTED
+            low = record.text.lower()
+            if any(_names(k, low) for k in keys):
+                return Support.SUPPORTED
+        return Support.UNSUPPORTED

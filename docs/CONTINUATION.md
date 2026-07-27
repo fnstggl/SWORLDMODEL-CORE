@@ -158,3 +158,37 @@ suppressed run is legible to a reader or merely declines.
    ownership, not on priority. FD-30 is the widest single hole in the static gates.
 3. CWF-7 per the adjudicated design now in REQUIREMENTS_TRACEABILITY.md.
 4. Re-run the adversary against the integrated tree. Phase 3 does not close on regressions.
+
+## HELD PATCH — grounding-predicate's `semantic_plan.py` half (apply after society-mechanism lands)
+
+`ClaimSupport` (in `grounding.py`) and the FD-51 review finding (in `world_review.py`) are in
+HEAD. **The static-gate half is NOT** — `semantic_plan.py` is being written by
+`society-mechanism` concurrently, so applying it now is the collision that cost ~19 lines
+earlier in this programme.
+
+- Diff: `scratchpad/grounding-predicate/PATCHES.diff` (`git apply --check` verified:
+  `semantic_plan.py` 354 lines, `semantic_compile.py` 11, `models.py` 11,
+  `world_compiler.py` 7, `semantic_lowering.py` 4)
+- If the diff conflicts after the peer's edits, use the **idempotent anchor scripts** instead —
+  they fail loudly if an anchor moved rather than applying to the wrong place:
+  `apply_sp_patch.py`, `apply_sc_patch.py`, `apply_outcome_citations.py` in the same directory.
+- **11 tests in `tests/unit/test_grounding_predicate.py` are `skipif`-gated on this patch and
+  turn themselves on when it lands.** Patched tree measured at 650 passed, gates clean.
+- Unify on landing: the peer added `claim_entities` to `validate_semantic_plan`;
+  `claim_records` subsumes it. Two parameters for one idea will drift.
+
+### Two findings from that work that are NOT patches
+
+1. **The suite that the attack scripts drive cannot see the new gates at all.**
+   `tests/unit/test_causal_world_fidelity.py::_validate` passes **no claim texts**, so every
+   support gate is inert there. One line by that file's owner (`claim_records=CLAIMS`); the
+   three good fixtures were verified to stay clean under it.
+2. **The recharge fixture harness is wrong, not the gate.** A store-scanning FD-38 gate would
+   refuse `recharge_plan()` — the suite's own *good* fixture — because `_validate` hands the
+   full `CLAIMS` dict to **both** variants, and that store contains `c-a4`: *"the water
+   engineer MAY RELEASE a 200 acre-foot emergency storage allocation"*. The dry branch reaches
+   720 against a 900 threshold; +200 is 920. **The release decides the answer, the store names
+   it, and the zero-actor justification claims the record names nobody able to add or withhold
+   recharge** — which is false against that store. The fixture's own comment says the two
+   variants "can honestly differ in what the record contains"; the harness does not implement
+   that. The actor-free variant needs its own store.

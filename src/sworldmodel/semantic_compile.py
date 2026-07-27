@@ -165,9 +165,15 @@ SEMANTIC_SCHEMA = f"""Return a SINGLE JSON object with exactly these keys:
    "evidence_claim_ids": ["..."]
  }}],
  "excluded_candidates": [{{
-   "name": "<a person, organization, population or process the evidence names that you
-     deliberately did NOT put in the world>",
-   "why_immaterial": "<why its removal cannot materially change the answer>",
+   "name": "<ONE person, organization, population or process the evidence names that you
+     deliberately did NOT put in the world. One entry per name — an entry naming several
+     parties argues one case and applies it to everybody>",
+   "record_attributes": "<what the record attributes to THIS name: the act, position,
+     demand or statement it records for it — including an act it takes jointly with
+     others — or that it appears only inside another party's sentence>",
+   "why_immaterial": "<given exactly that, why removing it cannot materially change the
+     answer. Written for this party: an exclusion that says 'same as the one above' has
+     not read what the record puts under this name>",
    "evidence_claim_ids": ["..."]
  }}],
  "states": [{{
@@ -278,6 +284,15 @@ SEMANTIC_SCHEMA = f"""Return a SINGLE JSON object with exactly these keys:
    "process_sufficiency": "<why the non-agent process alone is causally sufficient>",
    "evidence_claim_ids": ["<the claims that establish both>"]
  }},
+ "aggregate_justifications": [{{
+   "aggregate": "<REQUIRED ONLY for a deciding entity carrying represents_count >= 2:
+     that entity's name>",
+   "members": "<the real parties it decides for, by name>",
+   "members_hold_no_separate_position": "<what in the record shows not one of them can
+     hold out, dissent, defect or press a different level in a way that changes this
+     answer — a delegation voting as instructed, a bloc with one mandate>",
+   "evidence_claim_ids": ["<the claims that establish it>"]
+ }}],
  "single_multiplier_exemption": {{
    "empirical_model": "<REQUIRED ONLY when one multiplier genuinely stands for a whole
      operating system: the documented empirical model that licenses it>",
@@ -366,8 +381,17 @@ CONSISTENCY REQUIREMENTS (checked mechanically; a violation costs a revision rou
   entry, never a simulated occurrence — the simulation cannot re-perform history;
 - every entity answers all five representation questions (why_material,
   terminal_state_it_can_change, information_received, authority, if_removed), and every
-  candidate you deliberately left out is listed in excluded_candidates with why its
-  removal cannot matter;
+  candidate you deliberately left out is listed in excluded_candidates — one entry per
+  name, each stating what the record attributes to that name and why exactly that
+  cannot change the answer;
+- a party named in a claim you cite as grounding for what a deciding party may do is
+  accounted for somewhere: as an entity, as its own excluded_candidates entry, as a
+  participant of an event or moment, as a state, or as a world_facts entry. The same
+  sentence cannot be authority for one party and silence about another standing in it;
+- a deciding entity with represents_count >= 2 carries an aggregate_justifications
+  entry naming the members it absorbs and the cited record that shows they hold no
+  separate position — an aggregate that decides for its members is a claim about those
+  members, not a way of not writing them down;
 - every uncertainty alternative states meaning, why_unresolved, changes and
   terminal_sensitivity — an alternative that cannot say what it means is filler, and an
   alternative that decides the terminal while citing nothing is refused;
@@ -484,6 +508,17 @@ absorbing it into the aggregate deletes evidence you were given. Note what the s
 test costs you if you ignore it: a member with a named standing position, dropped into
 excluded_candidates as immaterial, is a verified claim the world silently lost — the
 coverage gate reads that as evidence destroyed and refuses the run.
+
+AN OMISSION COSTS WHAT AN INCLUSION COSTS. Putting a party in the world takes an entity
+record answering five questions, an affordance with its changes and its citations, and a
+seat at a dated occasion. Leaving one out takes one sentence, and it is the same sentence
+whether the record says nothing about that party or says it met, reviewed the conditions
+and agreed the adjustment. That difference in price is not a difference in the world, so
+do not let it decide the world: each name you leave out gets its own entry, stating first
+what the record attributes to it and only then why that cannot change the answer. If you
+find yourself writing the same reason under six names, you have made one judgement about
+a class and applied it to six parties the record describes separately — go back and read
+what it says under each.
 
 POSITIONS BEFORE OUTCOMES. Where several parties bear on one decision, the world needs
 the state that sits BETWEEN them: what each party has said, conceded, committed to or
@@ -738,6 +773,12 @@ def semantic_compile_live(
     checklist = evidence_checklist(view, as_of=as_of, horizon=horizon)
     brief = participant_brief(view)
     known = frozenset(c.id for c in view.available())
+    # The store's own entity lists, keyed by claim id. Handing these to the
+    # validator is what lets it read a cited claim against the world built from it
+    # — a claim naming eight parties, cited as authority for one, with the other
+    # seven nowhere in the plan. It reads names only; nothing here judges evidence
+    # text, and the validator does nothing at all if this map is empty.
+    claim_entities = {c.id: tuple(c.entities) for c in view.available()}
     responses: list[Any] = []
 
     def build(
@@ -808,7 +849,13 @@ def semantic_compile_live(
         )
     else:
         plan, raw = build(None, None, 0)
-    errors = validate_semantic_plan(plan, as_of=as_of, horizon=horizon, known_claim_ids=known)
+    errors = validate_semantic_plan(
+        plan,
+        as_of=as_of,
+        horizon=horizon,
+        known_claim_ids=known,
+        claim_entities=claim_entities,
+    )
     validator_rounds = 0
     while errors and validator_rounds < 2:
         # Mechanical inconsistencies first, so the reviewer always judges a coherent
@@ -817,7 +864,13 @@ def semantic_compile_live(
         # precise rounds has a real coherence problem.
         validator_rounds += 1
         plan, raw = build(raw, [f"validator: {e}" for e in errors[:16]], validator_rounds)
-        errors = validate_semantic_plan(plan, as_of=as_of, horizon=horizon, known_claim_ids=known)
+        errors = validate_semantic_plan(
+            plan,
+            as_of=as_of,
+            horizon=horizon,
+            known_claim_ids=known,
+            claim_entities=claim_entities,
+        )
     if errors:
         raise WorldIntegrityError(
             "the semantic plan is invalid after validator rounds: " + "; ".join(errors[:6]),
@@ -852,11 +905,21 @@ def semantic_compile_live(
         # One targeted revision on the reviewer's exact corrections, then one
         # validator-only round if the revision broke a mechanical rule.
         plan, raw = build(raw, [f"reviewer: {c}" for c in corrections[:16]], 2)
-        errors = validate_semantic_plan(plan, as_of=as_of, horizon=horizon, known_claim_ids=known)
+        errors = validate_semantic_plan(
+            plan,
+            as_of=as_of,
+            horizon=horizon,
+            known_claim_ids=known,
+            claim_entities=claim_entities,
+        )
         if errors:
             plan, raw = build(raw, [f"validator: {e}" for e in errors[:16]], 3)
             errors = validate_semantic_plan(
-                plan, as_of=as_of, horizon=horizon, known_claim_ids=known
+                plan,
+                as_of=as_of,
+                horizon=horizon,
+                known_claim_ids=known,
+                claim_entities=claim_entities,
             )
         if errors:
             raise WorldIntegrityError(
@@ -906,7 +969,13 @@ def semantic_compile_live(
             ],
             3,
         )
-        errors = validate_semantic_plan(plan, as_of=as_of, horizon=horizon, known_claim_ids=known)
+        errors = validate_semantic_plan(
+            plan,
+            as_of=as_of,
+            horizon=horizon,
+            known_claim_ids=known,
+            claim_entities=claim_entities,
+        )
         if errors:
             raise WorldIntegrityError(
                 "the revised semantic plan is invalid: " + "; ".join(errors[:6]),

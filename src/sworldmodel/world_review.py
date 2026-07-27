@@ -996,6 +996,102 @@ def _preresolved_checks(compiled: CompiledWorld, evidence: Any) -> tuple[AuditFi
     return tuple(findings)
 
 
+def _variable_citations(variable: Any) -> tuple[str, ...]:
+    """Every claim id an uncertainty carries, per-variable and per-outcome alike.
+
+    ``UncertaintySpec.constraining_evidence_ids`` is the union the semantic lowerer
+    already computes across a variable's alternatives, and until the schema carries them
+    it is the only citation record a compiled outcome has (FD-51). ``getattr`` rather
+    than a field access because the per-outcome half is a schema change landing
+    separately: when it arrives this reads it, and until then it reads what is there,
+    without either version silently changing what the check below concludes.
+    """
+
+    ids = list(getattr(variable, "constraining_evidence_ids", ()) or ())
+    for outcome in getattr(variable, "outcomes", ()) or ():
+        ids.extend(getattr(outcome, "evidence_claim_ids", ()) or ())
+    return tuple(dict.fromkeys(str(i) for i in ids))
+
+
+def _unsupported_multiplier_finding(variables: list[Any], evidence: Any) -> AuditFinding:
+    """Do the deciding factor's citations support the ALTERNATIVES they are attached to?
+
+    FD-51. This check used to read ``constraining_evidence_ids``, which is a per-VARIABLE
+    union: one citation anywhere on an uncertainty made it non-empty, so a straddle with
+    one cited leg and one invented leg reported PASS — FD-29's shape surviving into the
+    review, with no backstop if the static gate is ever evaded (and FD-35 was a known way
+    to evade it).
+
+    The fix is not to demand that each outcome carry its OWN id. That would refuse
+    correct worlds: when the record states a range and both alternatives sit inside it,
+    which leg the planner stapled the id to is bookkeeping, and the world is sound either
+    way. What matters is whether the record actually establishes each value the branch
+    can take — so every outcome is checked against every claim the variable cites, with
+    :class:`sworldmodel.grounding.ClaimSupport` deciding support the same way the static
+    straddling gate now does. One predicate, two places, so the review cannot disagree
+    with the validator about what a citation is worth.
+
+    Without an evidence view there are no claim texts and support cannot be decided. The
+    severity is then left where it was — this check has never been able to see more than
+    presence in that state — and the basis says exactly what was and was not compared, so
+    the limit is visible rather than implied.
+    """
+
+    from .grounding import ClaimSupport, Support
+
+    cited = {v.variable_id: _variable_citations(v) for v in variables}
+    if evidence is None:
+        return _mech(
+            "multiplier_lacks_evidence",
+            "PASS",
+            "the deciding factor carries constraining evidence — presence only: no "
+            "evidence view was supplied here, so whether those claims SUPPORT the "
+            "alternatives they are attached to was not checked",
+            "computed from the compiled world: constraining_evidence_ids present on "
+            f"{sorted(cited)}, with no store available to read them",
+        )
+
+    try:
+        support = ClaimSupport.from_view(evidence)
+    except Exception:  # noqa: BLE001 — an unreadable store decides nothing about a world
+        return _check_could_not_run(
+            "multiplier_lacks_evidence",
+            "the evidence store could not be read, so the deciding factor's citations "
+            "were never compared with the values they are attached to",
+            "computed from the compiled world: the supplied evidence view raised while being read",
+            severity="MEDIUM",
+        )
+
+    unsupported: list[str] = []
+    for variable in variables:
+        ids = cited[variable.variable_id]
+        for outcome in variable.outcomes:
+            if support.supports_value(ids, outcome.value) is Support.UNSUPPORTED:
+                unsupported.append(f"{variable.variable_id}={outcome.value}")
+    if unsupported:
+        return _mech(
+            "multiplier_lacks_evidence",
+            "CRITICAL",
+            "the factor that decides the result cites evidence that does not establish "
+            f"the values it takes: {sorted(unsupported)} — no cited claim states those "
+            "values, or a range or distribution containing them, so the branch the "
+            "answer turns on is a number somebody chose while the citation points "
+            "somewhere else",
+            "computed from the compiled world: every alternative of each deciding "
+            "uncertainty checked against the propositions, values and excerpts of every "
+            f"claim it cites ({sorted({i for v in cited.values() for i in v})})",
+        )
+    return _mech(
+        "multiplier_lacks_evidence",
+        "PASS",
+        "the deciding factor carries constraining evidence, and the record it cites "
+        "states every value its alternatives take",
+        "computed from the compiled world: every alternative of each deciding "
+        "uncertainty checked against the propositions, values and excerpts of every "
+        f"claim it cites ({sorted({i for v in cited.values() for i in v})})",
+    )
+
+
 def mechanical_world_checks(
     compiled: CompiledWorld, evidence: Any = None
 ) -> tuple[AuditFinding, ...]:
@@ -1101,11 +1197,7 @@ def mechanical_world_checks(
     decisive = [(term, variable) for term, variable in multiplier_writers if variable in flipping]
     if decisive:
         uncited = sorted(
-            {
-                variable
-                for _t, variable in decisive
-                if not flipping[variable].constraining_evidence_ids
-            }
+            {variable for _t, variable in decisive if not _variable_citations(flipping[variable])}
         )
         findings.append(
             _mech(
@@ -1133,13 +1225,9 @@ def mechanical_world_checks(
                 )
             )
         else:
+            deciding_variables = list(dict.fromkeys(variable for _t, variable in decisive))
             findings.append(
-                _mech(
-                    "multiplier_lacks_evidence",
-                    "PASS",
-                    "the deciding factor carries constraining evidence",
-                    "computed from the compiled world: constraining_evidence_ids present",
-                )
+                _unsupported_multiplier_finding([flipping[v] for v in deciding_variables], evidence)
             )
     else:
         findings.append(

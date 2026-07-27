@@ -16,6 +16,7 @@ support for a further cut" is an event *meaning*, never a hardcoded mechanism.
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -141,6 +142,9 @@ SEMANTIC_DEFECTS = (
     "DECORATIVE_ACTOR",
     "INERT_PARTICIPANT",
     "NO_PARTICIPANT_CHANNEL",
+    "AGGREGATE_UNJUSTIFIED",
+    "EXCLUSION_UNARGUED",
+    "PARTY_UNACCOUNTED",
     "REPRESENTATION_RECORD_INCOMPLETE",
     "UNCERTAINTY_ALTERNATIVE_UNDESCRIBED",
     "DEGENERATE_FILLER_ALTERNATIVE",
@@ -415,10 +419,38 @@ class ExcludedCandidate:
 
     The exclusion half of the representation-scale record: an omission nobody had to
     justify is indistinguishable from an omission nobody noticed.
+
+    ``record_attributes`` is what the record says this name DOES — the act, position or
+    statement it attributes to it, or that it appears only inside someone else's
+    sentence. It is separate from ``why_immaterial`` because the two are different
+    claims and the second is only checkable against the first: "immaterial" is an
+    argument about something, and an exclusion that never says what that something is
+    has not made one.
     """
 
     name: str
     why_immaterial: str  # why removing it cannot materially change the answer
+    evidence_claim_ids: tuple[str, ...] = ()
+    record_attributes: str = ""  # what the record attributes to THIS name
+
+
+@dataclass(frozen=True)
+class AggregateClaim:
+    """The claim a plan must make before one object may decide for many real parties.
+
+    ``represents_count`` on a deciding entity is a compression: it says N real parties
+    settle this as one unit, and it is the cheapest way in the schema to write "seven
+    parties" while building one. It is legitimate — a delegation voting as instructed, a
+    bloc with one mandate — and it is exactly what a world that has quietly deleted its
+    parties also looks like. So the compression is declared and cited, the same shape
+    :class:`ZeroActorClaim` gives an actor-free world and
+    :class:`SingleDriverExemption` gives a one-multiplier world: state which members are
+    absorbed and what in the record shows they hold no separate position.
+    """
+
+    aggregate: str  # the deciding entity that stands for them
+    members: str  # who it absorbs, by name
+    members_hold_no_separate_position: str  # what in the record shows they do not
     evidence_claim_ids: tuple[str, ...] = ()
 
 
@@ -674,6 +706,7 @@ class SemanticPlan:
     excluded_candidates: tuple[ExcludedCandidate, ...] = ()
     zero_actor_claim: ZeroActorClaim | None = None
     single_driver_exemption: SingleDriverExemption | None = None
+    aggregate_justifications: tuple[AggregateClaim, ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -1082,6 +1115,24 @@ def parse_semantic_plan(data: dict[str, Any]) -> SemanticPlan:
                 name=_s(x, "name", w, errors),
                 why_immaterial=_s(x, "why_immaterial", w, errors),
                 evidence_claim_ids=_ids(x),
+                record_attributes=_s(x, "record_attributes", w, errors),
+            )
+        )
+
+    aggregates: list[AggregateClaim] = []
+    for i, g in enumerate(data.get("aggregate_justifications") or []):
+        w = f"aggregate_justifications[{i}]"
+        if not isinstance(g, dict):
+            errors.append(f"{w}: must be an object")
+            continue
+        aggregates.append(
+            AggregateClaim(
+                aggregate=_s(g, "aggregate", w, errors),
+                members=_s(g, "members", w, errors),
+                members_hold_no_separate_position=_s(
+                    g, "members_hold_no_separate_position", w, errors
+                ),
+                evidence_claim_ids=_ids(g),
             )
         )
 
@@ -1134,6 +1185,7 @@ def parse_semantic_plan(data: dict[str, Any]) -> SemanticPlan:
         excluded_candidates=tuple(excluded),
         zero_actor_claim=zero_actor,
         single_driver_exemption=exemption,
+        aggregate_justifications=tuple(aggregates),
     )
     if errors:
         raise SemanticPlanError(errors)
@@ -1476,6 +1528,88 @@ def _representation_record_errors(plan: SemanticPlan) -> list[str]:
                 f"{x.name!r} without saying why its removal cannot materially change "
                 "the answer. Correction boundary: why_immaterial on that entry"
             )
+    errors += _exclusion_quality_errors(plan)
+    return errors
+
+
+# A name that carries a list separator is not one party. Deliberately only the
+# unambiguous separators: `Trinidad and Tobago` and `Bosnia and Herzegovina` are single
+# countries, so " and " is NOT a separator here, while a comma, a semicolon, a slash
+# between names, an ampersand or a trailing "etc." never occurs inside one party's
+# canonical name.
+_NAME_IS_A_LIST = re.compile(r"[,;]|\betc\b|\s&\s|\s/\s", re.IGNORECASE)
+
+# An exclusion argued by pointing at another exclusion. Anchored at the start and
+# deliberately narrow: it matches "Same as Saudi Arabia.", "Same as above.", "Similar.",
+# "Similar to Saudi Arabia." — the exact strings the recorded bench excluded ten parties
+# with — and NOT "same record, same courtesy consultation: nothing Beinn Dubh states
+# reaches the factor", which is an argument that happens to open with the word. The test
+# for the difference is whether a noun follows: "same X" is about X, "same as X" is
+# about not writing anything.
+_BACK_REFERENCE = re.compile(
+    r"^\s*(?:the\s+)?(?:(?:same|similar)\b(?:\s*[.,;:]|\s*$|\s+(?:as|to)\b)|"
+    r"as\s+above|as\s+for\b|see\s+above|ditto\b|idem\b|likewise\b)",
+    re.IGNORECASE,
+)
+
+# Names in a claim's entity list that are not parties: dates, years, quantities,
+# percentages, numbered instances of a meeting. Mirrors ``semantic_compile._NOT_A_NAME``
+# and is deliberately just as narrow — anything it is unsure of stays in, because the
+# only consequence of staying in is being asked where in the world it lives.
+_NOT_A_PARTY_NAME = re.compile(
+    r"^\s*(?:\d|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)",
+    re.IGNORECASE,
+)
+
+
+def _exclusion_quality_errors(plan: SemanticPlan) -> list[str]:
+    """EXCLUSION_UNARGUED: one omission, one name, one argument.
+
+    Measured, not supposed. Across the seven worlds of the recorded N=10 OPEC+ bench,
+    every plan that produced a world excluded the member countries, and the arguments it
+    excluded them with were these: ``"Same as Saudi Arabia."`` six times in one plan,
+    ``"Similar."`` four times in another, and one entry whose *name* was
+    ``"Saudi Arabia, Russia, Kuwait, Algeria, Kazakhstan, Oman"`` — six parties removed
+    from a world by one sentence. Those plans do not contain seven judgements about
+    seven parties. They contain one judgement about a class, typed once, and the schema
+    let it be typed once.
+
+    That is the asymmetry this rule is keyed to and the only thing it is keyed to.
+    Putting a party IN the world costs an entity record answering five representation
+    questions, an affordance with its changes and citations, a seat at a dated
+    occasion, and a path to the terminal — about 1,400 characters per party in the
+    measured plans. Leaving one OUT cost 139 characters, and could be shared. A planner
+    choosing between them under length pressure is not choosing between two accounts of
+    the world; it is choosing the cheap one.
+
+    So an exclusion now costs what an inclusion costs: an argument per name. It cannot
+    refuse a world that is right — every correct exclusion can be written out in full,
+    and writing it out is all this asks.
+    """
+
+    errors: list[str] = []
+    for x in plan.excluded_candidates:
+        name = x.name.strip()
+        if name and _NAME_IS_A_LIST.search(name):
+            errors.append(
+                f"EXCLUSION_UNARGUED: the excluded_candidates entry named {name!r} "
+                "removes several parties from the world with one argument. Each of them "
+                "is a separate party the record names separately, and whether each one "
+                "holds a position of its own is a separate question — a single entry "
+                "answers it once and applies the answer to everybody. Correction "
+                "boundary: one entry per party, each naming what the record attributes "
+                "to that party and why that cannot change the answer"
+            )
+        why = x.why_immaterial.strip()
+        if why and _BACK_REFERENCE.match(why):
+            errors.append(
+                f"EXCLUSION_UNARGUED: {name!r} is excluded by pointing at another "
+                f"exclusion ({why[:60]!r}), which is not an argument about this party. "
+                "The record attributes different things to different names, and an "
+                "exclusion that borrows its reasoning has not read what it attributes "
+                "to this one. Correction boundary: why_immaterial written for this "
+                "party, about what the record says this party does"
+            )
     return errors
 
 
@@ -1571,8 +1705,9 @@ def _actor_admissibility_errors(plan: SemanticPlan, cited: Any) -> list[str]:
                 "evidence names, and then represents none of them as a deciding entity "
                 "— a world cannot both need those decisions and have none. Correction "
                 "boundary: model those participants as deciding entities with their "
-                "affordances and dated occasions, or lower expected_participants to "
-                "what the evidence actually requires"
+                "affordances and dated occasions; lower expected_participants only if "
+                "the record does not in fact name that many parties who bear on this "
+                "decision, and then name the ones it does"
             )
         return errors
 
@@ -1776,9 +1911,10 @@ def _society_errors(plan: SemanticPlan) -> list[str]:
             "record says about that party by name — and the intermediate state that act "
             "moves; or, where the record shows a party takes no act bearing on this "
             "outcome, remove it from the world and record it under excluded_candidates "
-            "with why its removal cannot change the answer; or, if these parties really do "
-            "decide as one unit, keep the aggregate alone and drop them from the world "
-            "rather than listing them beside it. Do NOT invent an affordance to fill a "
+            "with why its removal cannot change the answer, for that party by name; or, "
+            "if these parties really do decide as one unit, keep the aggregate alone and "
+            "say so in aggregate_justifications, with the cited record that shows they "
+            "hold no separate position. Do NOT invent an affordance to fill a "
             "slot: a capability the evidence does not support is a fabricated actor, "
             "which is worse than a missing one"
         )
@@ -1798,6 +1934,164 @@ def _society_errors(plan: SemanticPlan) -> list[str]:
                 "them as recipients, or a declared event whose participants include them "
                 "— modelling the channel the record shows is really there"
             )
+    return errors
+
+
+def _aggregate_errors(plan: SemanticPlan, cited: Any) -> list[str]:
+    """AGGREGATE_UNJUSTIFIED: one object may decide for many parties, having said so.
+
+    ``represents_count: 7`` on one deciding entity is the cheapest sentence in this
+    schema. It satisfies the participant-count check, it satisfies the reviewer's
+    "represents_count faithful?" question, and it turns seven parties into one integer
+    without the plan ever having to say who they were or what the record attributes to
+    them. In the recorded N=10 OPEC+ bench it was the compression instrument in three of
+    the five worlds that had any party at all — including the one that declared
+    twenty-three decision-relevant participants, built one entity, and compiled.
+
+    The compression is legitimate and stays legitimate: a delegation voting as
+    instructed, a bloc with one mandate, a population stratum that has no members with
+    positions. What changes is that it is now *claimed*, in the same shape
+    ``zero_actor_justification`` gives an actor-free world — name the members, say what
+    in the record shows they hold no separate position, cite it. A world that is right
+    can always answer; a world that absorbed its parties to avoid writing them down
+    cannot answer without writing down what it absorbed.
+    """
+
+    errors: list[str] = []
+    claims = {g.aggregate.strip(): g for g in plan.aggregate_justifications}
+    for e in plan.entities:
+        if not e.decides or (e.represents_count or 0) < 2:
+            continue
+        g = claims.get(e.name.strip())
+        if (
+            g is None
+            or not g.members.strip()
+            or not g.members_hold_no_separate_position.strip()
+            or not cited(g.evidence_claim_ids)
+        ):
+            errors.append(
+                f"AGGREGATE_UNJUSTIFIED: {e.name!r} decides for {e.represents_count} "
+                "real parties as one unit, and the plan does not say who they are or "
+                "what shows they have no position of their own. An aggregate that "
+                "decides for its members is a claim about those members — that not one "
+                "of them can hold out, dissent, defect or press a different level in a "
+                "way that changes this answer — and it is the one claim that makes the "
+                "difference between a coalition and a world with its parties deleted. "
+                "Correction boundary: an aggregate_justifications entry for this "
+                "entity naming the members it absorbs, what in the cited record shows "
+                "they hold no separate position, and the claim ids; or model the "
+                "members that do hold one as their own entities with the acts the "
+                "record attributes to them"
+            )
+    return errors
+
+
+def _absorbed_party_errors(
+    plan: SemanticPlan, claim_entities: Mapping[str, tuple[str, ...]] | None
+) -> list[str]:
+    """PARTY_UNACCOUNTED / EXCLUSION_UNARGUED: the parties inside the cited claim.
+
+    The gates that force a society all read parties that are IN the world — a plan that
+    lists nine entities and lets one act is refused by name. None of them can see the
+    other compression, which is the one the planner actually does: the members never
+    appear at all. In the recorded bench, one plan declared twenty-three participants,
+    put one entity in the world, argued a single exclusion, left six named countries out
+    of the plan entirely — and compiled. `ExcludedCandidate`'s own docstring says an
+    omission nobody had to justify is indistinguishable from an omission nobody noticed;
+    nothing checked it.
+
+    This reads only the plan's OWN citations against the store's own entity lists, and
+    asks nothing that a correct world cannot answer:
+
+    * a party named in a claim the plan cites as grounding for a decider's act, and
+      absent from the plan altogether, must be accounted for — as an entity, an argued
+      exclusion, an event participant, or a world fact;
+    * a party excluded on a claim it is co-named in must say what that claim attributes
+      to it, because that is the thing the exclusion is an argument against.
+
+    Both are satisfiable by writing a sentence, never by inventing a participant, and
+    the check does nothing at all when the caller supplies no claim entity lists — the
+    validator never guesses at evidence it was not handed.
+    """
+
+    if not claim_entities:
+        return []
+    errors: list[str] = []
+    deciders = {e.name for e in plan.entities if e.decides}
+    if not deciders:
+        return []
+    grounding: set[str] = set()
+    for e in plan.entities:
+        if e.decides:
+            grounding.update(e.evidence_claim_ids)
+    for a in plan.affordances:
+        if a.actor in deciders:
+            grounding.update(a.evidence_claim_ids)
+
+    def key(name: str) -> str:
+        return " ".join(name.strip().lower().split())
+
+    in_world = {key(e.name) for e in plan.entities}
+    excluded = {key(x.name): x for x in plan.excluded_candidates}
+    # The structural slots where a name can be answered for without being an occupant:
+    # it plays a role in an event, gains an opportunity at a moment, holds or is a
+    # quantity, or the plan states it as verified context. Deliberately NOT prose —
+    # a live plan named all seven member countries inside a process `meaning` and gave
+    # `participants: ["OPEC+"]`, which is the defect rather than an answer to it.
+    elsewhere = {key(who) for ev in plan.events for _role, who in ev.participants}
+    elsewhere |= {key(p) for pr in plan.processes for p in pr.participants}
+    elsewhere |= {key(s.owner) for s in plan.states if s.owner}
+    elsewhere |= {key(s.name) for s in plan.states}
+    elsewhere |= {key(ev.name) for ev in plan.events}
+    elsewhere |= {key(pr.name) for pr in plan.processes}
+    elsewhere |= {key(u.name) for u in plan.uncertainties}
+    elsewhere |= {
+        key(alt.value)
+        for u in plan.uncertainties
+        for alt in u.alternatives
+        if isinstance(alt.value, str)
+    }
+    facts = " ".join(text.lower() for text, _ids in plan.world_facts)
+
+    seen: set[str] = set()
+    for cid in sorted(grounding):
+        names = claim_entities.get(cid) or ()
+        if len(names) < 2:
+            continue
+        for raw in names:
+            k = key(raw)
+            if not k or k in seen or k in in_world or k in elsewhere or k in facts:
+                continue
+            if _NOT_A_PARTY_NAME.match(k):
+                continue
+            seen.add(k)
+            x = excluded.get(k)
+            if x is None:
+                errors.append(
+                    f"PARTY_UNACCOUNTED: claim {cid} is cited as grounding for what a "
+                    f"deciding party may do, and it also names {raw!r}, which appears "
+                    "nowhere in this plan — not as an entity, not as an excluded "
+                    "candidate, not as a participant of any event or moment, not as a "
+                    "state and not as a world fact. The same sentence is being read as "
+                    "authority for one party and as silence about another. An omission "
+                    "nobody had to argue for is indistinguishable from one nobody "
+                    f"noticed. Correction boundary: give {raw!r} the act the record "
+                    "attributes to it; or record it under excluded_candidates saying "
+                    "what that claim attributes to it and why that cannot change the "
+                    "answer; or, if it is not a party at all, put it where it belongs "
+                    "— a state, an event participant, or a world_facts entry citing "
+                    f"{cid}"
+                )
+            elif not x.record_attributes.strip():
+                errors.append(
+                    f"EXCLUSION_UNARGUED: {raw!r} is excluded, and claim {cid} — which "
+                    "names it — is cited as grounding for what a deciding party may do. "
+                    "The exclusion does not say what that claim attributes to this "
+                    "party, so there is nothing for 'immaterial' to be an argument "
+                    "about. Correction boundary: record_attributes on that entry, "
+                    "stating the act, position or statement the record puts under this "
+                    "name — then why exactly that cannot change the answer"
+                )
     return errors
 
 
@@ -2712,11 +3006,17 @@ def validate_semantic_plan(
     as_of: datetime | None = None,
     horizon: datetime | None = None,
     known_claim_ids: frozenset[str] | None = None,
+    claim_entities: Mapping[str, tuple[str, ...]] | None = None,
 ) -> list[str]:
     """Every reference resolves; every producer chain holds; nothing writes the answer.
 
     Returns precise semantic errors (empty when valid). Mechanical only — the reality
     review is a separate, independent judgement.
+
+    ``claim_entities`` maps a claim id to the names that claim is about, as the store
+    records them. It is optional and defaults to off: without it the validator has no
+    evidence in front of it and does not guess at any, so the checks that read a cited
+    claim's own names simply do not run.
     """
 
     errors: list[str] = []
@@ -3129,13 +3429,27 @@ def validate_semantic_plan(
     if plan.expected_participants is not None:
         represented = sum(max(1, e.represents_count or 1) for e in plan.entities if e.decides)
         if represented < plan.expected_participants:
+            # This message used to offer three remedies and two of them were one-token
+            # edits that delete parties: put represents_count on the aggregate, or lower
+            # the declaration. A refusal is training signal, and a refusal whose cheapest
+            # remedy is compression teaches compression — in the recorded bench the
+            # represents_count remedy is visibly taken (an aggregate for 23 built as one
+            # entity, and an invented "OPEC+ Seven" that no claim mentions). The count is
+            # a reading of the record taken before the world is built, so correcting it
+            # now means naming who the record actually names.
             errors.append(
                 f"the plan declares {plan.expected_participants} decision-relevant "
-                f"participants but its deciding entities represent only {represented} — "
-                "either add the missing participants, or put represents_count on the "
-                "aggregate that stands for them (a coalition of seven deciding as one "
-                "unit is one entity with represents_count 7), or lower "
-                "expected_participants to what the evidence actually names"
+                f"participants but its deciding entities represent only {represented}. "
+                "expected_participants is a reading of the record — how many parties it "
+                "names as taking this decision — not a summary of the world you wrote, "
+                "so the world is what moves first: model the missing parties as deciding "
+                "entities holding the acts the record attributes to them by name. If "
+                "they genuinely settle it as one unit, one entity may carry "
+                "represents_count for them, and then aggregate_justifications must say "
+                "who is absorbed and what in the cited record shows they hold no "
+                "separate position. Lower expected_participants only if the record does "
+                "not in fact name that many parties who take this decision — and then "
+                "say in structure/rationale which parties it does name"
             )
 
     # The causal-world fidelity gates. They run last because they read the plan as a
@@ -3150,6 +3464,8 @@ def validate_semantic_plan(
     errors += _alternative_quality_errors(plan, cited)
     errors += _actor_admissibility_errors(plan, cited)
     errors += _society_errors(plan)
+    errors += _aggregate_errors(plan, cited)
+    errors += _absorbed_party_errors(plan, claim_entities)
     errors += _one_step_operational_errors(plan, cited)
     errors += _straddling_errors(plan, cited)
     return errors
