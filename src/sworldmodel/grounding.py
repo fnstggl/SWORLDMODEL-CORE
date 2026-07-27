@@ -51,7 +51,7 @@ from .epistemics import (
     is_first_person,
     private_state_class,
 )
-from .errors import WorldIntegrityError
+from .errors import CutoffViolationError, EvidenceError, WorldIntegrityError
 from .evidence import DispositionAxis, EvidenceView, ParticipantDisposition
 
 _WORD = re.compile(r"[a-z0-9]+")
@@ -753,10 +753,17 @@ def attest_profiles(
 ) -> tuple[ActorGroundingProfile, ...]:
     """Check each actor's assigned claims against the actor's own name.
 
-    A claim attests an actor when the actor is one of its declared entities, or when a
-    form of the actor's name occurs in the claim's proposition or supporting excerpt.
-    Nothing else counts: the compiler assigning a claim id to an actor is the compiler's
-    opinion, and it is precisely the opinion this check exists to test.
+    A claim attests an actor when the actor is one of its declared entities, or when the
+    actor's full name or one of its declared aliases occurs in the claim's proposition or
+    supporting excerpt. Nothing else counts: the compiler assigning a claim id to an actor
+    is the compiler's opinion, and it is precisely the opinion this check exists to test.
+
+    **Whole names only, never parts.** A source that writes "Bailey" after introducing
+    "Andrew Bailey" is matched through ``aliases``, which is what that field is for — so
+    a compiler that knows an actor is referred to by a short form must record the short
+    form. Matching on parts instead would defeat the check outright: an invented "Terminal
+    operations manager" shares the token "terminal" with any claim about a ferry terminal,
+    and would attest itself out of a claim that is not about a person at all.
 
     Returns the profiles with :attr:`ActorGroundingProfile.claim_attestation` set. It
     refuses nothing itself — the assessment and the report say what was found, and
@@ -787,7 +794,7 @@ def _claim_names(view: EvidenceView, claim_id: str, profile: ActorGroundingProfi
 
     try:
         claim = view.get(claim_id)
-    except Exception:
+    except (EvidenceError, CutoffViolationError):
         # A claim id that is not in the store, or not available at the cutoff, attests
         # nothing. It is not evidence that the actor is absent either — the other ids
         # decide that — so this is a "no" for this id and nothing more.

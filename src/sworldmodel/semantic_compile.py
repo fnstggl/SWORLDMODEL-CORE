@@ -74,6 +74,14 @@ def participant_brief(
     says more than the proposition. What it changes is that a party with nothing under
     its own heading is *visible* as a party with nothing to do — which is exactly the
     judgement the planner has to make about whether it belongs in the world at all.
+
+    The headings are alphabetical, deliberately. They were ordered by how many claims
+    named each one, which put OPEC+ and its sixteen claims at the top of the brief and
+    every member country below it — a ranking by prominence, read before the planner had
+    considered anybody, in a decision that is precisely about whether the group or its
+    members are the parties. Claim count still decides who *survives* truncation, because
+    that is about not dropping the best-attested names; it no longer decides who is read
+    first, because the brief has no business having an opinion about that.
     """
 
     claims = view.available()
@@ -86,7 +94,8 @@ def participant_brief(
             by_name.setdefault(n, []).append(c)
     if not by_name:
         return ""
-    ordered = sorted(by_name, key=lambda n: (-len(by_name[n]), n))[:max_names]
+    kept = sorted(by_name, key=lambda n: (-len(by_name[n]), n))[:max_names]
+    ordered = sorted(kept)
     lines = [
         "WHAT THE RECORD SAYS ABOUT EACH NAME IT ATTESTS. These are the same claims as "
         "above, grouped by the names each one names — no new evidence, and no claim "
@@ -99,8 +108,8 @@ def participant_brief(
     # Bounded overall as well as per name: a live store with a hundred claims across
     # thirty names would otherwise put more than a hundred kilobytes of duplicated
     # evidence in front of the planner, and a brief that crowds out the plan is not a
-    # help. Names are already ordered by how much the record says about them, so the
-    # truncation drops the thinnest headings first.
+    # help. `kept` above already dropped the thinnest headings, so what remains here is
+    # a second bound on the total, applied in reading order.
     used = len(lines[0])
     for name in ordered:
         block = [f"- {name}"]
