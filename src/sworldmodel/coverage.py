@@ -53,7 +53,7 @@ from datetime import datetime
 from enum import StrEnum
 
 from .errors import WorldIntegrityError
-from .evidence import EvidenceClaim, EvidenceView
+from .evidence import ConflictScreen, ConflictScreening, EvidenceClaim, EvidenceView
 from .ids import content_id
 from .models import ResolutionContract
 
@@ -218,10 +218,28 @@ class CompilationCoverageReport:
     candidates: tuple[EvidenceCandidate, ...] = ()
     dispositions: tuple[CandidateDisposition, ...] = ()
     notes: tuple[str, ...] = ()
+    # How far conflict screening got on the store this inventory came from. The default
+    # is deliberately the *unknown* value, so a report that was never handed a screen can
+    # never be read as one that was handed a clean one.
+    conflict_screening: ConflictScreening = ConflictScreening.NOT_SCREENED
+    conflict_screen_summary: str = ""
 
     @property
     def is_complete(self) -> bool:
         return self.coverage_verdict is CoverageVerdict.COMPLETE
+
+    @property
+    def conflicts_certified(self) -> bool:
+        """Whether this report is entitled to say the evidence holds no unresolved conflict.
+
+        A coverage report has always been read as a certificate over the evidence that
+        entered the world. It is only that for a store whose candidate conflicts were
+        enumerated *and* ruled on; over an unscreened store it certifies coverage and
+        nothing about agreement, and saying so is the difference between a check that
+        looked and a check that declined to.
+        """
+
+        return self.conflict_screening is ConflictScreening.FULLY_ADJUDICATED
 
     def disposition_for(self, candidate_id: str) -> CandidateDisposition | None:
         for d in self.dispositions:
@@ -237,6 +255,9 @@ class CompilationCoverageReport:
         disp = {d.candidate_id: d for d in self.dispositions}
         return {
             "coverage_verdict": self.coverage_verdict.value,
+            "conflict_screening": self.conflict_screening.value,
+            "conflicts_certified": self.conflicts_certified,
+            "conflict_screen_summary": self.conflict_screen_summary,
             "totals": {
                 "total": self.total_candidates,
                 "material": self.material_candidates,
@@ -968,6 +989,87 @@ def evidence_named_participants(
     )
 
 
+@dataclass(frozen=True)
+class ParticipantSupport:
+    """The evidence that stands behind one participant the compiled world names.
+
+    ``claim_ids`` are the available claims that are actually *about* this participant —
+    it is one of their declared entities, or its name occurs in the claim's own text.
+    Claim ids the compiler merely *attached* to an actor do not appear here unless the
+    claims themselves mention it, which is the whole point: a live Bank of England world
+    gave the Monetary Policy Committee six claim ids, and not one of the thirteen claims
+    in that store mentions the Monetary Policy Committee anywhere.
+    """
+
+    identity: str
+    claim_ids: tuple[str, ...]
+    lineage_ids: tuple[str, ...]
+    disposition_axes: tuple[str, ...] = ()
+    missing_disposition_axes: tuple[str, ...] = ()
+
+    @property
+    def is_supported(self) -> bool:
+        """Whether any verified claim speaks about this participant at all.
+
+        False means the world contains a participant the evidence never mentions. That
+        is a fabricated participant, whatever claim ids were stapled to it.
+        """
+
+        return bool(self.claim_ids)
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "identity": self.identity,
+            "supported": self.is_supported,
+            "claim_ids": list(self.claim_ids),
+            "lineage_ids": list(self.lineage_ids),
+            "disposition_axes": list(self.disposition_axes),
+            "missing_disposition_axes": list(self.missing_disposition_axes),
+        }
+
+
+def participant_evidence_support(
+    view: EvidenceView, identities: tuple[str, ...]
+) -> tuple[ParticipantSupport, ...]:
+    """Trace every compiled participant back to the evidence that speaks about it.
+
+    This is a *fact*, deliberately not a gate: it reports, per named participant, which
+    available claims mention it, and what retrieval established about its disposition.
+    The compiler reads it to know which of its participants it has nothing to go on for;
+    a reviewer reads it to see an actor with an empty list and know the world invented
+    somebody. Whether an unsupported participant is fatal is a decision for whoever owns
+    the refusal, not for the function that establishes the fact.
+    """
+
+    out: list[ParticipantSupport] = []
+    for identity in identities:
+        claims = view.about(identity)
+        disposition = view.disposition(identity)
+        out.append(
+            ParticipantSupport(
+                identity=identity,
+                claim_ids=tuple(sorted(c.id for c in claims)),
+                lineage_ids=tuple(sorted({c.lineage_event_id for c in claims})),
+                disposition_axes=tuple(a.axis.value for a in disposition.axes),
+                missing_disposition_axes=tuple(a.value for a in disposition.missing_axes),
+            )
+        )
+    return tuple(out)
+
+
+def unsupported_participants(view: EvidenceView, identities: tuple[str, ...]) -> tuple[str, ...]:
+    """Those named participants that no available claim speaks about.
+
+    An empty result is meaningful here — ``identities`` is what was checked, so "nothing
+    unsupported" is a statement about a list that was actually examined. Pass no
+    identities and you get no answer, not a pass.
+    """
+
+    return tuple(
+        s.identity for s in participant_evidence_support(view, identities) if not s.is_supported
+    )
+
+
 def _speaks_of_a_role(candidate: EvidenceCandidate) -> bool:
     """Whether the evidence describes this name in role or authority terms.
 
@@ -1059,6 +1161,7 @@ def assess_coverage(
     spec: WorldSpecView,
     *,
     exclusion_reviewer: ExclusionReviewer | None = None,
+    conflict_screen: ConflictScreen | None = None,
 ) -> CompilationCoverageReport:
     """Compare the candidate inventory against the compiled world and assign one
     disposition to every candidate. A material candidate that is not represented, or
@@ -1071,6 +1174,13 @@ def assess_coverage(
     outcome. If it says yes, the exclusion is invalid — the candidate becomes
     UNCERTAIN and blocks, per the exclusion-challenge rule. Disagreement never
     silently resolves in favor of dropping the item.
+
+    ``conflict_screen`` is the store's own record of which candidate conflicts were
+    enumerated and ruled on. Supplied and inconclusive, the unexamined pairs are recorded
+    as missing and the report is INCOMPLETE: a world compiled out of evidence whose
+    disagreements nobody looked at has not been shown to be compiled out of anything
+    coherent. Not supplied, the report says so in ``conflict_screening`` and in a note,
+    and certifies coverage only — it never reports agreement it was not shown.
     """
 
     a = _Assessment()
@@ -1142,7 +1252,29 @@ def assess_coverage(
         else:
             _record_exclusion(a, cand, exclusion_reviewer)
 
-    return _report(candidates, a)
+    _record_conflict_screening(a, conflict_screen)
+    return _report(candidates, a, conflict_screen)
+
+
+def _record_conflict_screening(a: _Assessment, screen: ConflictScreen | None) -> None:
+    """Say what is known about the evidence's own disagreements — including "nothing"."""
+
+    if screen is None:
+        a.notes.append(
+            "conflict screening state was not supplied to this coverage assessment: this "
+            "report certifies that compiled objects cover the evidence, and says nothing "
+            "about whether that evidence agrees with itself"
+        )
+        return
+    a.notes.append(f"conflict screening: {screen.summary()}")
+    if screen.is_conclusive:
+        return
+    pairs = ", ".join(f"{c.a_id}<>{c.b_id}" for c in screen.unexamined[:12])
+    a.missing.append(
+        f"[evidence] {len(screen.unexamined)} candidate conflict(s) were never adjudicated "
+        "— the evidence this world was compiled from has not been shown to agree with "
+        f"itself ({pairs})"
+    )
 
 
 def _record_exclusion(
@@ -1298,7 +1430,11 @@ def _is_source_provenance(cand: EvidenceCandidate) -> bool:
     return bool(_SELF_REFERENCE.search(body) and _PROVENANCE_PREDICATE.search(body))
 
 
-def _report(candidates: tuple[EvidenceCandidate, ...], a: _Assessment) -> CompilationCoverageReport:
+def _report(
+    candidates: tuple[EvidenceCandidate, ...],
+    a: _Assessment,
+    screen: ConflictScreen | None = None,
+) -> CompilationCoverageReport:
     def count(d: Disposition) -> int:
         return sum(1 for x in a.dispositions if x.disposition is d)
 
@@ -1317,6 +1453,10 @@ def _report(candidates: tuple[EvidenceCandidate, ...], a: _Assessment) -> Compil
         candidates=candidates,
         dispositions=tuple(a.dispositions),
         notes=tuple(a.notes),
+        conflict_screening=(
+            screen.status if screen is not None else ConflictScreening.NOT_SCREENED
+        ),
+        conflict_screen_summary=(screen.summary() if screen is not None else ""),
     )
 
 
@@ -1334,5 +1474,7 @@ def enforce_coverage(report: CompilationCoverageReport) -> None:
             "included": report.included_candidates,
             "unresolved": report.unresolved_candidates,
             "uncertain": report.uncertain_candidates,
+            "conflict_screening": report.conflict_screening.value,
+            "conflicts_certified": report.conflicts_certified,
         },
     )

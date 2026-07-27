@@ -52,8 +52,27 @@ from .epistemics import (
     private_state_class,
 )
 from .errors import WorldIntegrityError
+from .evidence import DispositionAxis, EvidenceView, ParticipantDisposition
 
 _WORD = re.compile(r"[a-z0-9]+")
+
+
+class ClaimAttestation(StrEnum):
+    """Whether this actor's cited claims actually mention this actor.
+
+    An actor's ``claim_ids`` are *assigned* by the compiler. Nothing about that assignment
+    establishes that the claims say anything about the actor, and a live Bank of England
+    world put the Monetary Policy Committee into the simulation at grounding level
+    OFFICIAL_ROLE carrying six claim ids, none of which mentions a committee anywhere.
+
+    The tri-state is the point. ``NOT_CHECKED`` is the default and must never read as a
+    pass: it says nobody compared the claims against the name. Only :func:`attest_profiles`
+    can move a profile off it, and only ``UNATTESTED`` withdraws the office.
+    """
+
+    NOT_CHECKED = "not_checked"
+    ATTESTED = "attested"
+    UNATTESTED = "unattested"
 
 
 class Provenance(StrEnum):
@@ -163,14 +182,31 @@ class ActorGroundingProfile:
 
     current_evidence_grounded_inclination: GroundedItem | None = None
     conditional_reaction_model: tuple[GroundedItem, ...] = ()
+    # Where the retrieved record does not agree about this actor. Never resolved here:
+    # an actor the sources disagree about is exactly the actor a simulation exists to
+    # play forward, and silently picking the newest or the most authoritative reading
+    # would decide the question before anybody acts.
+    contested_dispositions: tuple[GroundedItem, ...] = ()
 
     claim_ids: tuple[str, ...] = ()
     lineage_ids: tuple[str, ...] = ()
     missing_information: tuple[str, ...] = ()
     unsupported_records: tuple[GroundedItem, ...] = ()
 
+    claim_attestation: ClaimAttestation = ClaimAttestation.NOT_CHECKED
+    name_attested_claim_ids: tuple[str, ...] = ()
+
     is_constructed_representative: bool = False
     population_weight: float | None = None
+
+    def with_attestation(
+        self, attestation: ClaimAttestation, claim_ids: tuple[str, ...]
+    ) -> ActorGroundingProfile:
+        """Return this profile carrying the result of a claim-attestation pass."""
+
+        return replace(
+            self, claim_attestation=attestation, name_attested_claim_ids=tuple(sorted(claim_ids))
+        )
 
     # ---- derived views -----------------------------------------------------
 
@@ -297,13 +333,37 @@ class ActorGroundingProfile:
         # An office is a structural fact. It is verifiable, it is what puts the actor
         # inside the causal boundary, and it is the level at which most real
         # decision-makers are knowable before the fact.
-        if self.role.strip() and self.authority and self.claim_ids:
+        #
+        # "Verified office" means the *evidence* records the office, so the claims cited
+        # for it have to mention the actor. Without that test, a role string, one
+        # authority and any claim ids at all admitted an actor nothing in the evidence
+        # refers to — the exact hole the comment at ROLE_LEVEL_BEHAVIOR below describes,
+        # one rung higher and therefore reached first. A live Bank of England world put
+        # the Monetary Policy Committee here on six claims that never mention it.
+        #
+        # UNATTESTED withdraws the office; NOT_CHECKED does not grant one it verified —
+        # it leaves the level as it was and says so in the reason, because a check that
+        # never ran must not read as a check that passed.
+        if (
+            self.role.strip()
+            and self.authority
+            and self.claim_ids
+            and self.claim_attestation is not ClaimAttestation.UNATTESTED
+        ):
+            checked = self.claim_attestation is ClaimAttestation.ATTESTED
+            office_claims = self.name_attested_claim_ids if checked else self.claim_ids
             return self._assess(
                 GroundingLevel.OFFICIAL_ROLE,
                 f"holds the verified office {self.role!r} with cited authority "
-                f"({', '.join(self.authority)})",
+                f"({', '.join(self.authority)})"
+                + (
+                    ""
+                    if checked
+                    else " — NOT CHECKED: no pass has confirmed that these claims mention "
+                    "this actor"
+                ),
                 (),
-                extra_claims=self.claim_ids,
+                extra_claims=office_claims,
             )
 
         if own:
@@ -334,7 +394,12 @@ class ActorGroundingProfile:
         # non-empty role string, was enough to admit an actor nothing in the evidence
         # refers to.
         role_level = tuple(i for i in self.all_items() if i.is_supported)
-        if role_level and self.role.strip() and self.claim_ids:
+        if (
+            role_level
+            and self.role.strip()
+            and self.claim_ids
+            and self.claim_attestation is not ClaimAttestation.UNATTESTED
+        ):
             return self._assess(
                 GroundingLevel.ROLE_LEVEL_BEHAVIOR,
                 f"grounded only at the level of the role {self.role!r}, not the individual",
@@ -348,6 +413,12 @@ class ActorGroundingProfile:
                 "no surviving citation attaches this actor to the world: neither a "
                 "record of its own, nor a cited office and authority, nor any cited "
                 "source that names it"
+            )
+            + (
+                " — every claim assigned to this actor was checked and none of them "
+                "mentions it, so it is a participant the evidence does not contain"
+                if self.claim_attestation is ClaimAttestation.UNATTESTED
+                else ""
             ),
             disposition_class=EpistemicClass.UNSUPPORTED,
             missing=self.missing_information,
@@ -429,6 +500,13 @@ class ActorGroundingProfile:
             )
             lines.append(f"  - {incl.render()}")
         block("WHAT WOULD CHANGE YOUR POSITION", self.conditional_reaction_model)
+        contested = [i for i in self.contested_dispositions if i.is_supported]
+        if contested:
+            lines.append(
+                "\nWHERE THE RECORD DISAGREES ABOUT YOU (both readings are cited; neither "
+                "has been settled, and it is not settled by you assuming one):"
+            )
+            lines.extend(f"  - {i.render()}" for i in contested)
         if self.missing_information:
             lines.append("\nNOT KNOWN ABOUT YOU (do not invent these):")
             lines.extend(f"  - {m}" for m in self.missing_information)
@@ -471,6 +549,9 @@ class ActorGroundingProfile:
                 {"content": incl.content, "provenance": incl.provenance.value} if incl else None
             ),
             "conditional_reaction_model": ser(self.conditional_reaction_model),
+            "contested_dispositions": ser(self.contested_dispositions),
+            "claim_attestation": self.claim_attestation.value,
+            "name_attested_claim_ids": list(self.name_attested_claim_ids),
             "own_cited_records": ser(self.own_cited_records),
             "unsupported_records": ser(self.unsupported_records),
             "claim_ids": list(self.evidence_claim_ids),
@@ -524,6 +605,11 @@ class ActorGroundingReport:
     dropped_uncited: tuple[str, ...] = ()
     dispositions: tuple[tuple[str, str, str], ...] = ()  # (claim_id, actor_id, disposition)
     assessments: tuple[GroundingAssessment, ...] = ()
+    # Actors whose assigned claims were checked and found not to mention them. Reported
+    # separately from ``ungrounded_actors`` because it is a different finding: not
+    # "weakly evidenced" but "the evidence does not contain this participant".
+    unattested_actors: tuple[str, ...] = ()
+    unchecked_actors: tuple[str, ...] = ()
     notes: tuple[str, ...] = ()
 
     @property
@@ -544,6 +630,8 @@ class ActorGroundingReport:
             "misattributed": list(self.misattributed),
             "missing_previous_actions": list(self.missing_previous_actions),
             "dropped_uncited": list(self.dropped_uncited),
+            "unattested_actors": list(self.unattested_actors),
+            "actors_whose_claims_were_never_checked": list(self.unchecked_actors),
             "profiles": [p.as_dict() for p in self.profiles],
             "grounding_assessments": [a.as_dict() for a in self.assessments],
             "grounding_levels": dict(self.level_histogram),
@@ -600,7 +688,13 @@ def assess_actor_grounding(
                     f"{p.actor_id} carries a personal record naming {hit!r}: {item.content!r}"
                 )
 
+    unattested: list[str] = []
+    unchecked: list[str] = []
     for p in profiles:
+        if p.claim_attestation is ClaimAttestation.UNATTESTED:
+            unattested.append(p.actor_id)
+        elif p.claim_attestation is ClaimAttestation.NOT_CHECKED:
+            unchecked.append(p.actor_id)
         for item in p.unsupported_records:
             dropped.append(f"{p.actor_id}: {item.content!r} had no surviving evidence citation")
         if p.is_constructed_representative:
@@ -621,6 +715,20 @@ def assess_actor_grounding(
         for cid in p.evidence_claim_ids:
             dispositions.append((cid, p.actor_id, _INCLUDED_IN_ACTOR_PROFILE))
 
+    notes: list[str] = []
+    if unchecked:
+        notes.append(
+            "claim attestation NOT CHECKED for "
+            + ", ".join(sorted(unchecked))
+            + ": nothing has compared the claims assigned to these actors against their "
+            "names, so their citations are assignments, not attestations"
+        )
+    if unattested:
+        notes.append(
+            "claims checked and found not to mention: "
+            + ", ".join(sorted(unattested))
+            + " — these are participants the evidence does not contain"
+        )
     return ActorGroundingReport(
         profiles=profiles,
         ungrounded_actors=tuple(ungrounded),
@@ -629,6 +737,132 @@ def assess_actor_grounding(
         dropped_uncited=tuple(dropped),
         dispositions=tuple(dispositions),
         assessments=tuple(assessments),
+        unattested_actors=tuple(sorted(unattested)),
+        unchecked_actors=tuple(sorted(unchecked)),
+        notes=tuple(notes),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Attestation: do this actor's claims mention this actor?
+# ---------------------------------------------------------------------------
+
+
+def attest_profiles(
+    profiles: tuple[ActorGroundingProfile, ...], view: EvidenceView
+) -> tuple[ActorGroundingProfile, ...]:
+    """Check each actor's assigned claims against the actor's own name.
+
+    A claim attests an actor when the actor is one of its declared entities, or when a
+    form of the actor's name occurs in the claim's proposition or supporting excerpt.
+    Nothing else counts: the compiler assigning a claim id to an actor is the compiler's
+    opinion, and it is precisely the opinion this check exists to test.
+
+    Returns the profiles with :attr:`ActorGroundingProfile.claim_attestation` set. It
+    refuses nothing itself — the assessment and the report say what was found, and
+    :func:`enforce_actor_grounding` is where an unattested actor stops being admissible.
+    """
+
+    out: list[ActorGroundingProfile] = []
+    for profile in profiles:
+        if profile.is_constructed_representative:
+            # A stratum stands for a population, not for a name in a source; requiring a
+            # claim to mention it by name would refuse every legitimate one.
+            out.append(profile)
+            continue
+        attesting = tuple(
+            cid for cid in profile.evidence_claim_ids if _claim_names(view, cid, profile)
+        )
+        out.append(
+            profile.with_attestation(
+                ClaimAttestation.ATTESTED if attesting else ClaimAttestation.UNATTESTED,
+                attesting,
+            )
+        )
+    return tuple(out)
+
+
+def _claim_names(view: EvidenceView, claim_id: str, profile: ActorGroundingProfile) -> bool:
+    """Whether the stored claim ``claim_id`` actually speaks about this actor."""
+
+    try:
+        claim = view.get(claim_id)
+    except Exception:
+        # A claim id that is not in the store, or not available at the cutoff, attests
+        # nothing. It is not evidence that the actor is absent either — the other ids
+        # decide that — so this is a "no" for this id and nothing more.
+        return False
+    keys = profile.identity_keys()
+    if any(e.strip().lower() in keys for e in claim.entities):
+        return True
+    text = f"{claim.proposition} {claim.supporting_excerpt}".lower()
+    return any(_names(k, text) for k in keys)
+
+
+# ---------------------------------------------------------------------------
+# Disposition: what this actor wants, has done, is bound by, and how it reacted
+# ---------------------------------------------------------------------------
+
+
+# Each retrieval axis lands in the profile field that already existed for it:
+# WANTS -> stated_preferences, HAS_DONE -> previous_observed_actions,
+# CONSTRAINED_BY -> constraints, REACTS_TO -> conditional_reaction_model. Those fields
+# were never filled from evidence — a compiled actor carried its claim ids and not one
+# word of what they said, so every actor's prompt described a role rather than a person.
+
+
+def ground_disposition(
+    profile: ActorGroundingProfile, disposition: ParticipantDisposition
+) -> ActorGroundingProfile:
+    """Fold retrieved disposition evidence into an actor's profile, with its marks.
+
+    Every item lands as a VERIFIED_OBSERVATION carrying the claim ids it came from —
+    these are quotations of the record, not readings of it — except the contested block,
+    where the item is the *fact that the record disagrees*, which is itself observed.
+
+    An axis retrieval did not establish is added to ``missing_information`` naming the
+    axis, and no field is filled for it. That is the rule the whole module turns on: an
+    invented disposition is a fabricated value wearing a citation, and a missing one is
+    merely a thing the actor must reason about without.
+    """
+
+    by_axis: dict[DispositionAxis, tuple[GroundedItem, ...]] = {}
+    contested: list[GroundedItem] = []
+    for evidence in disposition.axes:
+        by_axis[evidence.axis] = tuple(
+            observation(text, (claim_id,))
+            for claim_id, text in zip(evidence.claim_ids, evidence.renderings, strict=True)
+        )
+        for a_id, b_id in evidence.conflicting_pairs:
+            contested.append(
+                observation(
+                    f"the record disagrees about {evidence.axis.question}: "
+                    f"{a_id} and {b_id} give different answers",
+                    (a_id, b_id),
+                )
+            )
+
+    def added(axis: DispositionAxis) -> tuple[GroundedItem, ...]:
+        return by_axis.get(axis, ())
+
+    missing = list(profile.missing_information)
+    for axis in disposition.missing_axes:
+        missing.append(
+            f"{axis.value.replace('_', ' ')}: no retrieved source establishes "
+            f"{axis.question} — this is not established and must not be assumed"
+        )
+    return replace(
+        profile,
+        stated_preferences=profile.stated_preferences + added(DispositionAxis.WANTS),
+        previous_observed_actions=(
+            profile.previous_observed_actions + added(DispositionAxis.HAS_DONE)
+        ),
+        constraints=profile.constraints + added(DispositionAxis.CONSTRAINED_BY),
+        conditional_reaction_model=(
+            profile.conditional_reaction_model + added(DispositionAxis.REACTS_TO)
+        ),
+        contested_dispositions=profile.contested_dispositions + tuple(contested),
+        missing_information=tuple(dict.fromkeys(missing)),
     )
 
 

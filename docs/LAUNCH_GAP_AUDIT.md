@@ -313,3 +313,58 @@ honest reading of this repository is a suppressed headline on every run.
 
 This phase inverts that: build the generator up to the gates. No new gate ships in this
 phase without the mechanism that lets a correct world pass it.
+
+---
+
+## STATUS — W1..W5 landed (551 passing)
+
+| item | state | evidence |
+| --- | --- | --- |
+| **W1** monotone banking | **DONE** | G1's reproducer: `FAILED — cut short with 20 due` → `resolved=True outcome=YES`, same unfired entries, same stop |
+| **W2** truncation is ours | **DONE** | `execution_incomplete_mass` split from `execution_incomplete_unresolved_mass`; execution status on the report line beside the stop reason |
+| **W3** convergence | **DONE** | same world by AST: `81 calls / budget exhausted / 2 unfired / history [0,0,…0]` → `4 calls / schedule exhausted / 0 unfired / history [0,1] / YES`. Adversary's collapse case re-verified independently: `80 / exhausted / unresolved` → `25 / schedule exhausted / YES` |
+| **W4** affordance gate | **GATE DONE, GENERATOR NOT** | `INERT_PARTICIPANT` fires on `geopolitical2` (naming all 8 inert countries) and `geopolitical3`; silent on the three legitimately single-decider worlds |
+| **W5** communication | **DONE** | a party's `deliver_information` is delivered **and noticed** by other parties and not by its author — **the first inter-actor communication in the artifact tree's history** |
+
+### The two honest negatives
+
+**The OPEC+ recompile did not produce a society.** Six live runs on the recorded store. The
+baseline reproduces the defect exactly and **all gates pass it** — 5 entities, 1 action,
+admitted. After the change it is refused instead of published, but **no post-change run
+reached the simulator**, and the new gate never fired live: the planner stopped producing
+scenery and produced *over-compression* instead, which two pre-existing gates (coverage,
+actor-grounding) independently reject —
+
+```
+v3  planner put all seven countries at the meeting  -> refused on the `decides` flag
+v4  1 coalition, Iraq excluded                       -> coverage_incomplete:
+      "Iraq is urging a reassessment — exclusion rejected by independent review"
+v5  1 coalition                                      -> actors_ungrounded:
+      "constructed representative without a weight"
+```
+
+The generator is closer and is not there. Untested hypothesis worth trying first:
+`participant_brief` orders names by claim count, which puts **OPEC+ (16 claims) at the top**
+and each member below — that ordering may itself bias toward the aggregate. Invert it. The
+other untried path is the full `run_forecast` repair loop, which feeds gate refusals back;
+the slice harness stops at the first refusal.
+
+**`allow_novel` must stay closed, and the reason is a real hole.** Checked before opening, as
+required. A novel action **can write a terminal term directly** whenever the terminal's only
+producer is a process node: `_blocked_by_world_authority` finds `gatekeepers` empty, returns
+`""`, and the sole remaining gate is the interpreter model's self-declared
+`required_authority`, which can be `[]`. Opening the flag today re-opens every gate built
+this month. Fix: treat `spec.process.nodes[].effects` and external-process occurrences as
+gatekeepers, since an effect only the environment produces is not something an actor has
+standing to perform. Derivable rule for *where* to open it once safe: `allow_novel=True`
+exactly at `actor_moment` nodes, `False` at `operational`/`scheduled_release` — read off
+`SemanticProcess.kind`, never a free parameter.
+
+### Residual, deliberately not guessed
+
+A plan with `expected_participants` of 1/None **and** no `represents_count` can still carry
+inert parties (`phase2/geopolitical` has this shape). There is no evidence-side signal
+separating it from a legitimately non-acting institution — the recharge district and the Bank
+of England are the same shape — and the stricter first rule produced real false positives on
+both. Left to the prompt rather than guessed, on the standing rule that a gate refusing
+correct worlds is worse than the hole it closes.

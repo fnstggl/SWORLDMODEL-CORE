@@ -37,7 +37,7 @@ from datetime import datetime
 from typing import Any
 
 from .errors import GatewayError, WorldIntegrityError
-from .evidence import EvidenceClaim, EvidenceStore, EvidenceView
+from .evidence import EvidenceClaim, EvidenceStore, EvidenceView, disposition_queries
 from .gateway import GatewayRequest, ModelGateway
 from .gnews_decode import GoogleNewsDecoder
 from .gnews_decode import article_id_of as article_id_of_link
@@ -145,6 +145,11 @@ class ResearchTrace:
     admissible_claim_count: int = 0
     contradictions: list[str] = field(default_factory=list)
     contradiction_checks: int = 0
+    # Candidate conflicts this session enumerated and never ruled on. Non-empty means
+    # the run's evidence has NOT been shown to agree with itself, whatever
+    # ``contradictions`` says.
+    unexamined_conflicts: list[str] = field(default_factory=list)
+    disposition_queries: list[str] = field(default_factory=list)
     stop_reason: str = ""
     extract_calls: int = 0
     rounds: int = 0
@@ -180,6 +185,12 @@ class ResearchTrace:
             "admissible_claim_count": self.admissible_claim_count,
             "contradictions": self.contradictions,
             "contradiction_checks": self.contradiction_checks,
+            # The honest conflict record: what was enumerated, what was ruled on, and
+            # what nobody looked at. A reader must consult ``conclusive`` before
+            # concluding anything from an empty ``contradictions`` list.
+            "unexamined_conflicts": self.unexamined_conflicts,
+            "conflict_screen": store.conflict_certificate(),
+            "disposition_queries": self.disposition_queries,
             "extract_calls": self.extract_calls,
             "rounds": self.rounds,
             "provider_requests": self.provider_requests,
@@ -217,6 +228,8 @@ class ResearchTrace:
             admissible_claim_count=int(prior.get("admissible_claim_count", 0)),
             contradictions=list(prior.get("contradictions", [])),
             contradiction_checks=int(prior.get("contradiction_checks", 0)),
+            unexamined_conflicts=list(prior.get("unexamined_conflicts", [])),
+            disposition_queries=list(prior.get("disposition_queries", [])),
             extract_calls=int(prior.get("extract_calls", 0)),
             rounds=int(prior.get("rounds", 0)),
             provider_requests=dict(prior.get("provider_requests") or {}),
@@ -438,6 +451,9 @@ class LiveResearchBackend:
             seen_urls=set(trace.attempted_urls),
             seen_hashes=set(trace.seen_content_hashes),
         )
+        trace.disposition_queries = sorted(
+            {q for maker in plan.decision_makers for q in disposition_queries(maker)}
+        )
 
         low_info = 0
         rounds = 0
@@ -532,6 +548,14 @@ class LiveResearchBackend:
             push(queues.general, q)
         for maker in plan.decision_makers:
             push(queues.general, f"{maker} {terms}")
+        # The disposition axis. Existence queries return who is in the room; these return
+        # what each of them wants, has done before, is bound by, and how it reacted last
+        # time — which is the difference between an agent that can be named and one that
+        # can be played. Queued last so they extend discovery rather than displace it: a
+        # participant nobody found has no disposition to look for.
+        for maker in plan.decision_makers:
+            for q in disposition_queries(maker):
+                push(queues.general, q)
         return queues
 
     def _next_queries(self, session: _Session) -> list[tuple[str, str]]:
@@ -1044,48 +1068,64 @@ class LiveResearchBackend:
         question: str = "",
         plan: ResearchPlan | None = None,
     ) -> None:
-        """Find claims that disagree about the same fact and record the decisive ones.
+        """Screen the store for candidate conflicts and adjudicate as many as the budget allows.
 
-        Candidates are claims available at the cutoff that describe the same subject
-        (same proposition topic and same entities) but carry different canonical values.
-        Sharing a subject is not yet a contradiction — "is Chair" and "is a member" are
-        compatible — so each candidate pair is adjudicated by the model's
-        ``contradiction`` task, and only an explicitly decisive verdict is recorded.
+        Candidate enumeration is :func:`~sworldmodel.evidence.screen_claim_conflicts`:
+        claims available at the cutoff that share a subject entity, share content beyond
+        that entity's own name, and give different answers. It used to be a bucket key
+        built from the extractor's namespace prefix plus the *exact* entity tuple, which
+        is why a store asserting both "a rate cut is on the way" and "rate cuts are off
+        the table" produced zero checks — the two claims never landed in the same bucket,
+        so nothing ever compared them, and the store then certified itself conflict-free.
+
+        Every candidate ends in one of three states, all of them recorded on the store:
+        adjudicated decisive, adjudicated reconcilable, or **not examined**. The third is
+        the one that matters. A pass that runs out of budget leaves pairs unexamined, and
+        the screen says so, so no downstream reader can mistake a truncated pass for a
+        clean store.
 
         Restricting candidates to the cutoff view keeps a post-cutoff claim from
         manufacturing a conflict that blocks a pastcast.
         """
 
-        already = {tuple(sorted(p)) for p in store.contradictions()}
-        groups: dict[str, list[EvidenceClaim]] = {}
-        for claim in store.view(as_of).available():
-            key = _subject_key(claim)
-            if key:
-                groups.setdefault(key, []).append(claim)
-        for _key, claims in sorted(groups.items()):
-            by_value: dict[str, EvidenceClaim] = {}
-            for c in sorted(claims, key=lambda c: c.id):
-                by_value.setdefault(c.normalized_value.strip().lower(), c)
-            values = sorted(by_value)
-            for i in range(len(values)):
-                for j in range(i + 1, len(values)):
-                    if trace.contradiction_checks >= self.budget.max_contradiction_checks:
-                        return
-                    a, b = by_value[values[i]], by_value[values[j]]
-                    if tuple(sorted((a.id, b.id))) in already:
-                        continue
-                    if not (_is_observation(a) and _is_observation(b)):
-                        # A contradiction of *fact* needs two claims of fact. A live
-                        # Banxico run was refused because "Banxico is prioritizing
-                        # credibility over speed, implying gradual easing" was set
-                        # against "Banxico signaled an end to rate cuts": two readings of
-                        # the same posture, neither of them an observation, adjudicated
-                        # as something the world cannot have both ways.
-                        continue
-                    trace.contradiction_checks += 1
-                    if self._is_decisive_conflict(a, b, question=question, plan=plan):
-                        store.record_contradiction(a.id, b.id)
-                        already.add(tuple(sorted((a.id, b.id))))
+        screen = store.screen_conflicts(as_of)
+        for candidate in screen.unexamined:
+            a, b = store.get(candidate.a_id), store.get(candidate.b_id)
+            if not (_is_observation(a) and _is_observation(b)):
+                # A contradiction of *fact* needs two claims of fact. A live Banxico run
+                # was refused because "Banxico is prioritizing credibility over speed,
+                # implying gradual easing" was set against "Banxico signaled an end to
+                # rate cuts": two readings of the same posture, neither of them an
+                # observation, adjudicated as something the world cannot have both ways.
+                #
+                # This is a verdict, not a skip. The pair WAS examined — by a rule rather
+                # than by the model — and recording that is what keeps the pair out of
+                # "nobody looked at this" without spending a call on it.
+                store.record_adjudication(
+                    candidate.a_id,
+                    candidate.b_id,
+                    decisive=False,
+                    adjudicator="epistemic_type_rule",
+                    reason=(
+                        "not two statements of fact; a disagreement between readings is "
+                        "the uncertainty the simulation resolves, not a blocking conflict"
+                    ),
+                )
+                continue
+            if trace.contradiction_checks >= self.budget.max_contradiction_checks:
+                # Out of budget. Everything from here stays UNADJUDICATED and the screen
+                # reports it; the store does not become clean because we stopped asking.
+                break
+            trace.contradiction_checks += 1
+            store.record_adjudication(
+                candidate.a_id,
+                candidate.b_id,
+                decisive=self._is_decisive_conflict(a, b, question=question, plan=plan),
+                adjudicator="model_contradiction_task",
+            )
+        final = store.conflict_screen
+        if final is not None and not final.is_conclusive:
+            trace.unexamined_conflicts = [f"{c.a_id}<>{c.b_id}" for c in final.unexamined]
 
     def _is_decisive_conflict(
         self,
@@ -1350,20 +1390,6 @@ def _is_observation(claim: EvidenceClaim) -> bool:
     """
 
     return claim.epistemic_type is EpistemicType.OBSERVATION
-
-
-def _subject_key(claim: EvidenceClaim) -> str:
-    """A claim's subject: its proposition topic plus the entities it is about.
-
-    Two claims sharing a subject are talking about the same thing, which is the
-    precondition for their values being able to disagree. A claim naming no entity has
-    no identifiable subject and is not paired with anything.
-    """
-
-    if not claim.entities:
-        return ""
-    entities = ",".join(sorted(e.strip().lower() for e in claim.entities))
-    return f"{_topic(claim.proposition)}|{entities}"
 
 
 def _looks_like_domain(text: str) -> bool:
