@@ -162,7 +162,31 @@ def _compile_with_repair(
                 )
                 raise
 
-            repaired = _repair_once(question, as_of, horizon, bundle, config, plan)
+            try:
+                repaired = _repair_once(question, as_of, horizon, bundle, config, plan)
+            except Exception as attempt_exc:
+                # The round is recorded BEFORE the failure is allowed out. Every other
+                # branch here records after ``_repair_once`` returns, so an attempt that
+                # RAISED — a final refusal re-raised by `_recompile`, a stop, or a shape
+                # outside its catch list — left the run reporting `repair_attempts: []`:
+                # a repair that was planned, started and paid for, on a record saying it
+                # was never tried. "Did not repair" and "repaired and it failed" must
+                # never be the same entry, and an empty list is what makes them one.
+                log.record(
+                    plan,
+                    failure=failure,
+                    message=str(exc),
+                    claims_before=before,
+                    claims_after=before,
+                    outcome=(
+                        "the repair attempt itself ended the run: "
+                        f"{type(attempt_exc).__name__}: "
+                        # An exception with no message must not turn a record of what
+                        # happened into a second, unrelated IndexError.
+                        + (str(attempt_exc).splitlines() or [""])[0]
+                    ),
+                )
+                raise
             after = len(repaired.evidence_store.claims) if repaired else before
             if repaired is None:
                 log.record(
@@ -403,15 +427,53 @@ def _replan_initial_compile(
     stands, with the attempts on its record.
     """
 
-    if not isinstance(exc, WorldIntegrityError) or exc.details.get("recompilable") is False:
-        return None
+    # Every decline is recorded. These three returns used to be silent, so a refusal the
+    # replan never even looked at produced the same `repair_attempts: []` as one it
+    # looked at and had nothing to do about — the same defect the run diagnosis exists
+    # to stop, in the repair record itself: "did not look" reading as "looked and found
+    # nothing". A reader must always be able to tell which happened.
     store = getattr(exc, "partial_evidence_store", None)
+    claims = len(store.claims) if store is not None else 0
+    if not isinstance(exc, WorldIntegrityError):
+        log.record(
+            None,
+            failure=type(exc).__name__,
+            message=str(exc),
+            claims_before=claims,
+            claims_after=claims,
+            outcome=(
+                "the initial compile did not refuse with a machine-readable failure "
+                "code, so no registered repair plan could be looked up"
+            ),
+        )
+        return None
+    if exc.details.get("recompilable") is False:
+        log.record(
+            None,
+            failure=str(exc.details.get("failure") or "unclassified"),
+            message=str(exc),
+            claims_before=claims,
+            claims_after=claims,
+            outcome="the refusal is final (recompilable: false) — repair was not attempted",
+        )
+        return None
     if store is None or not getattr(config.gateway, "is_live", False):
+        log.record(
+            None,
+            failure=str(exc.details.get("failure") or "unclassified"),
+            message=str(exc),
+            claims_before=claims,
+            claims_after=claims,
+            outcome=(
+                "no research rode the refusal, so there was nothing to re-read"
+                if store is None
+                else "the gateway is not live, so no replanned compilation could be produced"
+            ),
+        )
         return None
     deadline = time.monotonic() + max(0.0, config.max_compile_seconds)
     failure_exc = exc
     seen: set[str] = set()
-    claims = len(store.claims)
     for _ in range(_REPAIR_CEILING):
         failure = str(failure_exc.details.get("failure") or "unclassified")
         plan = plan_repair(failure_exc, question, subject_entity="")
@@ -506,6 +568,17 @@ def _replan_initial_compile(
             rounds.append(data["_semantic"])
             live_trace["semantic_repair_rounds"] = rounds
         return replace(assemble_bundle(store, data), live_trace=live_trace)
+    log.record(
+        None,
+        failure=str(failure_exc.details.get("failure") or "unclassified"),
+        message=str(failure_exc),
+        claims_before=claims,
+        claims_after=claims,
+        outcome=(
+            f"the replan alternated between diagnoses for {_REPAIR_CEILING} rounds "
+            "without producing a compilable world"
+        ),
+    )
     return None
 
 

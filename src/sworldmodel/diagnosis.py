@@ -153,7 +153,25 @@ class RunDiagnosis:
                 f.get("error", "?") for f in (t.get("search_failures") or [])
             ),
             "stop_reason": t.get("stop_reason"),
+            # Whether a discovery pass RAN, stated separately from what it found. Zero
+            # URLs from a pass that searched is a discovery failure; zero URLs from a
+            # backend that never searched is nothing at all, and the two must not be
+            # the same number on the same line. ``ResearchTrace.to_dict`` always writes
+            # both keys, so their presence is the record of the pass having happened.
+            "discovery_ran": _ran(t, "attempted_urls", "queries"),
         }
+
+    def _discovery_ran(self) -> bool:
+        """Did this run search at all? Either the pass left its record on the trace, or
+        a positive count is itself proof it happened (a caller may supply the section
+        directly rather than a trace)."""
+
+        disc = self.discovery()
+        return bool(
+            disc.get("discovery_ran")
+            or disc.get("urls_considered_count")
+            or disc.get("queries_used")
+        )
 
     def fetching(self) -> dict[str, Any]:
         t = self._trace()
@@ -181,7 +199,11 @@ class RunDiagnosis:
             "documents_truncated": sum(1 for c in calls if c.get("document_truncated")),
             "claim_candidates": sum(int(c.get("claims_returned") or 0) for c in calls),
             "claims_stored": store_claims,
-            "claims_admissible_at_cutoff": int(t.get("admissible_claim_count") or 0),
+            # ``None`` when nothing measured it. Reading an absent counter as ``0`` is
+            # how a frozen-store run reported "19 claim(s) stored, none admissible at
+            # the cutoff — the compiler saw an empty record" about a store whose 19
+            # claims were ALL admissible: the backend simply never wrote the counter.
+            "claims_admissible_at_cutoff": _measured(t, "admissible_claim_count"),
             "verification_rejections": [_reason(r) for r in rejected],
             "verification_rejection_reasons": _counts(
                 _verification_kind(_reason(r)) for r in rejected
@@ -342,6 +364,43 @@ class RunDiagnosis:
             for bid, w in self.run_result.final_worlds.items()
         }
 
+    def unobserved(self) -> list[dict[str, str]]:
+        """What this run's record cannot tell — said, never inferred from.
+
+        FD-34, FD-45 and FD-42 are one defect wearing three faces: a step that DID NOT
+        RUN became indistinguishable from one that ran and found nothing, and the
+        indistinguishable zero was then read as a measurement. This section is the
+        other half of the fix in :meth:`root_cause`. Each rule there that reads a count
+        for *absence* declines when nothing measured it, and says here which cause it
+        could therefore neither infer nor rule out — so a reader is never left choosing
+        between "the run observed this and it was fine" and "the run never looked".
+        """
+
+        out: list[dict[str, str]] = []
+        ext = self.extraction()
+        if ext["claims_stored"] > 0 and ext["claims_admissible_at_cutoff"] is None:
+            out.append(
+                {
+                    "measurement": "claims_admissible_at_cutoff",
+                    "why": f"{ext['claims_stored']} claim(s) are stored and this run's "
+                    "research record carries no `admissible_claim_count`: no stage of "
+                    "this run counted how many of them the compiler could actually see "
+                    "at the cutoff",
+                    "cause_neither_inferred_nor_ruled_out": "archive_coverage_failure",
+                }
+            )
+        if not self._discovery_ran():
+            out.append(
+                {
+                    "measurement": "urls_considered",
+                    "why": "this run's research record contains no discovery pass at all "
+                    "(no attempted URLs and no queries were recorded), so its zero is the "
+                    "absence of a search, not the result of one",
+                    "cause_neither_inferred_nor_ruled_out": "discovery_failure",
+                }
+            )
+        return out
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "question": self.question,
@@ -363,6 +422,7 @@ class RunDiagnosis:
             "forecast_integrity": _audit_dict(self.forecast_integrity),
             "trajectory_audit": _audit_dict(self.trajectory_audit),
             "root_cause": self.root_cause(),
+            "unobserved": self.unobserved(),
             "root_cause_vocabulary": list(ROOT_CAUSES),
             "notes": self.notes,
             "compiler_mode": self.compiler_mode,
@@ -384,16 +444,21 @@ class RunDiagnosis:
         disc = self.discovery()
         gate = self.integrity_and_grounding().get("stopped_at_gate")
 
-        # Absence of a trace is not evidence about research. A compile-stage refusal
-        # that fires before the bundle is checkpointed leaves every research count at
-        # zero — reading those zeros as "no candidate URL was discovered at all" writes
-        # a fabricated discovery failure into the record of a run that issued a full
-        # research pass. Every other research-stage cause below requires a POSITIVE
-        # count and is safe; only the zero-URL check must distinguish "the record says
-        # zero" from "there is no record".
-        research_recorded = bool(self._trace()) or bool(
-            disc.get("urls_considered_count") or disc.get("queries_used")
-        )
+        # Absence of a measurement is not evidence about what it would have measured.
+        # Every rule below that reads a count as ABSENCE — nothing admissible, no URL
+        # discovered — must first establish that something actually counted. A run that
+        # never searched and a run that searched and found nothing produce the same
+        # zero, and only one of them is a discovery failure; a backend that never wrote
+        # the admissible counter and one that measured an empty admissible view produce
+        # the same zero, and only one of them is an archive failure. Rules keying on a
+        # POSITIVE count need no such guard.
+        #
+        # The earlier guard here — "some trace exists" — was defeated by exactly the
+        # shape it was written against: a frozen-store run whose trace holds three keys
+        # and no discovery pass is a non-empty trace, so a run that issued no query was
+        # reported as "no candidate URL was discovered at all". Whether the pass RAN is
+        # now recorded by ``discovery()`` and read here.
+        research_recorded = self._discovery_ran()
 
         if ext["claims_stored"] == 0 and ext["claim_candidates"] > 0:
             out.append(
@@ -424,6 +489,10 @@ class RunDiagnosis:
             # with a cutoff seconds in the past stored claims whose availability all
             # postdated as_of, compiled from an empty admissible view, and was filed
             # as compiler_omission — pointing at the compiler for a record it never saw.
+            #
+            # `== 0` and not `not ...`: an UNWRITTEN counter is None here and must fall
+            # through to `unobserved()`. A frozen-store run whose 19 claims were every
+            # one of them admissible published this exact sentence about them.
             out.append(
                 {
                     "cause": "archive_coverage_failure",
@@ -676,6 +745,32 @@ def _audit_dict(audit: Any) -> dict[str, Any] | None:
 
     as_dict = getattr(audit, "as_dict", None)
     return as_dict() if callable(as_dict) else None
+
+
+def _measured(trace: dict[str, Any], key: str) -> int | None:
+    """A count this run actually wrote, or ``None`` when nothing wrote it.
+
+    The whole point is that the two are different values. ``int(t.get(k) or 0)``
+    collapses "the stage ran and counted nothing" into "no stage ever counted", and
+    every downstream rule then reads the second as the first. A boolean is rejected on
+    purpose: ``True`` is an ``int`` in Python and a flag is not a measurement.
+    """
+
+    value = trace.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return int(value)
+
+
+def _ran(trace: dict[str, Any], *keys: str) -> bool:
+    """Whether the stage that writes ``keys`` left its record on this trace.
+
+    Presence, not truthiness: a live research pass writes ``attempted_urls`` and
+    ``queries`` unconditionally (``ResearchTrace.to_dict``), so an empty list is a pass
+    that found nothing, while a missing key is a pass that never happened.
+    """
+
+    return any(key in trace for key in keys)
 
 
 def _counts(values: Any) -> dict[str, int]:

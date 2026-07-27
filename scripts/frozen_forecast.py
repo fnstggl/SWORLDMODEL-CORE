@@ -66,6 +66,15 @@ class FrozenResearchBackend:
                 horizon,
                 self.store.view(as_of),
             )
+            # Assembly is INSIDE the guard. It refuses in its own right — a compilation
+            # that declares no horizon, a world_spec the parser cannot read — and while
+            # it sat outside, those refusals reached ``run_forecast`` carrying no
+            # partials at all: ``_checkpoint_partial`` returned False, so the run was
+            # filed as stage="research", the whole evidence record went unwritten, and
+            # ``_replan_initial_compile`` — which exists precisely to give a
+            # recompilable compile-stage refusal its registered repair — was never
+            # reached. The compile stage does not end until the bundle exists.
+            bundle = assemble_bundle(self.store, data)
         except Exception as exc:
             # Mirror live_research._compile: the initial compile runs inside
             # ``research()``, so without this a compile-stage refusal on the frozen
@@ -79,7 +88,6 @@ class FrozenResearchBackend:
             }
             exc.partial_evidence_store = self.store  # type: ignore[attr-defined]
             raise
-        bundle = assemble_bundle(self.store, data)
         live_trace: dict = {"frozen_store": True, "claim_count": len(self.store.all())}
         if "_semantic" in data:
             live_trace["semantic_compilation"] = data["_semantic"]
