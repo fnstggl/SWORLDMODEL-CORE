@@ -477,6 +477,21 @@ class Unreconstructable(Exception):
     """The terminal cannot be re-evaluated from what this run recorded."""
 
 
+def _copy_content(
+    source: Mapping[str, Sequence[Mapping[str, Any]]] | None,
+) -> dict[str, list[dict[str, Any]]] | None:
+    """A private copy of a reconstructed content mapping — ``None`` stays ``None``.
+
+    ``None`` and ``{}`` mean different things here and must not collapse: ``{}`` is a
+    replay that reconstructed content and found none, ``None`` is a caller that supplied
+    no content at all.
+    """
+
+    if source is None:
+        return None
+    return {str(k): [dict(r) for r in v] for k, v in source.items()}
+
+
 class ReplayWorld:
     """Replayed state, presented as the read-only surface the evaluator expects.
 
@@ -607,13 +622,30 @@ def _split_args(text: str) -> list[str]:
     return parts
 
 
-def _eval_rendered(expr: str, fields: dict[str, Any], counts: dict[str, int]) -> Any:
+def _eval_rendered(
+    expr: str,
+    fields: dict[str, Any],
+    counts: dict[str, int],
+    records: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
+    events: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
+    item: Mapping[str, Any] | None = None,
+) -> Any:
     """Evaluate the RENDERED terminal string a pre-compiled-world run recorded.
 
     Deliberately tiny and total: it supports exactly the forms these runs used, and
     raises :class:`Unreconstructable` for anything else. Guessing at an unsupported
     operator would manufacture the very confidence the replay exists to check.
+
+    ``count``/``event_count`` may carry a trailing where-predicate over ``item(<attr>)``,
+    which this evaluated by silently DROPPING it and returning the raw cardinality —
+    reporting five recorded positions as five holds. It now evaluates the predicate
+    against the reconstructed content, and refuses when no content was supplied.
     """
+
+    def sub(text: str, current: Mapping[str, Any] | None = None) -> Any:
+        return _eval_rendered(
+            text, fields, counts, records, events, item if current is None else current
+        )
 
     expr = expr.strip()
     if expr in ("True", "False"):
@@ -631,12 +663,21 @@ def _eval_rendered(expr: str, fields: dict[str, Any], counts: dict[str, int]) ->
     op, arg_text = m.group(1), m.group(2)
     args = _split_args(arg_text)
     if op == "field":
-        return fields.get(str(_eval_rendered(args[0], fields, counts)))
-    if op == "event_count":
-        return counts.get(str(_eval_rendered(args[0], fields, counts)), 0)
-    if op == "count":
-        return counts.get(str(_eval_rendered(args[0], fields, counts)), 0)
-    vals = [_eval_rendered(a, fields, counts) for a in args]
+        return fields.get(str(sub(args[0])))
+    if op == "item":
+        return dict(item or {}).get(str(sub(args[0])))
+    if op in ("count", "event_count"):
+        name = str(sub(args[0]))
+        if len(args) == 1:
+            return counts.get(name, 0)
+        pool = records if op == "count" else events
+        if pool is None:
+            raise Unreconstructable(
+                f"{op}({name!r}, <where>) reads record content and none was "
+                "reconstructed for this replay"
+            )
+        return sum(1 for r in pool.get(name, ()) if bool(sub(args[1], r)))
+    vals = [sub(a) for a in args]
     if op == "equals":
         return vals[0] == vals[1]
     if op == "not":
@@ -669,18 +710,10 @@ def _eval_rendered(expr: str, fields: dict[str, Any], counts: dict[str, int]) ->
     raise Unreconstructable(f"unsupported terminal operator {op!r}")
 
 
-def _eval_ast(
-    node: Any,
-    fields: dict[str, Any],
-    counts: dict[str, int],
-    records: Mapping[str, Sequence[Mapping[str, Any]]] | None,
-    events: Mapping[str, Sequence[Mapping[str, Any]]] | None,
-) -> Any:
+def _eval_ast(node: Any, fields: dict[str, Any], counts: dict[str, int]) -> Any:
     """Evaluate the executable terminal AST with the engine's own evaluator."""
 
-    return evaluate(
-        parse_expr(node), ReplayWorld(fields, counts, records=records, events=events)
-    )
+    return evaluate(parse_expr(node), ReplayWorld(fields, counts))
 
 
 def reevaluate_terminal(
@@ -688,9 +721,6 @@ def reevaluate_terminal(
     rendered: Mapping[str, Any],
     fields: dict[str, Any],
     counts: dict[str, int],
-    *,
-    records: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
-    events: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
 ) -> tuple[bool, str | None, str]:
     """(resolved, outcome, how) for one REPLAYED branch state. Never guesses.
 

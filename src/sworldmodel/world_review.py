@@ -299,6 +299,12 @@ MECHANICAL_KEYS = (
     "multiplier_lacks_evidence",
     "no_intermediate_production_state",
     "world_skips_the_causal_period",
+    # FD-31. Whether the cadence a repeated process runs to could be checked against
+    # anything at all. Separate from the moment count because it reports the state of the
+    # CHECK, not the state of the world: with no recurrence declaration compiled, how
+    # often a process really happens is asserted by the number of occurrences somebody
+    # typed, and this says so instead of passing quietly.
+    "recurrence_is_declared",
     # FD-41. A world claiming the record already answered the question used to short
     # circuit this whole function to a single PASS, so the entire settled-record class
     # of run received no mechanical scrutiny at all — its only remaining attack was one
@@ -528,9 +534,7 @@ def _effect_write(eff: Any) -> tuple[str | None, set[str]]:
     return name, _reads_fields(value)
 
 
-def _field_writers(
-    spec: Any,
-) -> tuple[dict[str, list[tuple[str, Any]]], dict[str, list[tuple[str, Any]]]]:
+def _field_writers(spec: Any) -> tuple[dict[str, list[tuple[str, Any]]], dict[str, list[tuple[str, Any]]]]:
     """Every field write in the world, as (what mechanisms do, what actors do).
 
     Each maps field id -> [(label, effect)]. Kept apart rather than merged because the
@@ -1003,9 +1007,7 @@ def mechanical_world_checks(
     # key: it collapsed the review from five checks to one, and the four it surrendered
     # were the ones that catch the shape underneath. An actor writing the terminal is a
     # reason to scrutinise HOW it decides, not a reason to stop asking.
-    actor_terms = sorted(
-        t.split(":", 1)[1] for t in (action_written & terms) if t.startswith("field:")
-    )
+    actor_terms = sorted(t.split(":", 1)[1] for t in (action_written & terms) if t.startswith("field:"))
 
     effects = _dated_effects(spec)
     findings: list[AuditFinding] = []
@@ -1103,44 +1105,182 @@ def mechanical_world_checks(
             _mech(
                 "single_uncertain_multiplier_decides",
                 "PASS",
-                "no single uncertain factor read into the terminal quantity flips the "
-                "answer on its own",
+                "no single uncertain factor read into the terminal quantity's lineage "
+                "flips the answer on its own",
                 "computed from the compiled world: terminal probed under every "
-                "alternative of every uncertainty",
+                "alternative of every uncertainty, against the lineage "
+                f"{sorted(lineage)}",
             )
         )
 
     # 5 — is there anything between the start of the world and its answer?
-    intermediate = sorted(written_by_mechanism - field_terms)
+    # Only lineage fields count, and only where the world does more with them than copy
+    # them: an intermediate nothing reads, or one that exists solely to be assigned into
+    # the terminal, is a rename dressed as a production stage.
+    intermediate = _production_stages(lineage, field_terms, mechanism, agent)
     findings.append(
         _mech(
             "no_intermediate_production_state",
             "PASS" if intermediate else "HIGH",
             f"the mechanisms produce intermediate state: {intermediate}"
             if intermediate
-            else "the world's mechanisms write nothing except the terminal quantity "
-            "itself — there is no production, demand or capacity state between the "
-            "initial world and the answer",
-            "computed from the compiled world: fields written by process nodes and "
-            "external occurrences",
+            else "the world's mechanisms build nothing between the initial world and the "
+            "answer — every field the terminal is computed from is either the terminal "
+            "quantity itself or a relabelling of it, so there is no production, demand "
+            "or capacity state in between",
+            "computed from the compiled world: fields in the terminal's lineage written "
+            "by process nodes and external occurrences, and what reads them",
         )
     )
 
     # 6 — does the world exist across the period in which the outcome is really made?
-    moments = sorted({at for _label, at, _eff in effects if at})
-    findings.append(
-        _mech(
-            "world_skips_the_causal_period",
-            "PASS" if len(moments) > 1 else "HIGH",
-            f"the world acts at {len(moments)} distinct moments: {moments}"
-            if len(moments) > 1
-            else "everything this world does happens at a single moment "
-            f"({moments or 'no dated occurrence at all'}) — it jumps from the cutoff to "
-            "the answer and simulates none of the period in which the outcome is made",
-            "computed from the compiled world: the timestamps of every non-agent effect",
-        )
-    )
+    findings.extend(_causal_period_findings(spec, effects, lineage))
     return tuple(findings)
+
+
+def _causal_period_findings(
+    spec: Any, effects: list[tuple[str, str, Any]], lineage: set[str]
+) -> list[AuditFinding]:
+    """Does the world span the period the outcome is made in, and per process (FD-25/31).
+
+    Two defects, one mechanism. The moment count used to be taken WORLD-WIDE, so a
+    correctly-scheduled process laundered an under-scheduled one: a live review reported
+    "the world acts at 10 distinct moments" beside a compiled world whose occurrences sat
+    at two dates per process. And ``len(moments) > 1`` was the whole test, so ten
+    occurrences of a "weekly" cycle all dated the same instant passed as soon as one setup
+    step supplied a second timestamp.
+
+    So the moments counted are the moments at which the terminal's LINEAGE is written —
+    the same closure the depth checks use — and repetition is judged per process: a group
+    of occurrences repeating the same write must carry as many distinct timestamps as it
+    has members, because that is what "it happened again" means.
+    """
+
+    findings: list[AuditFinding] = []
+    moments = sorted({at for _label, at, eff in effects if at and _effect_write(eff)[0] in lineage})
+    crowded: list[str] = []
+    repeating: list[tuple[str, str, list[Any], float | None]] = []
+    for proc in spec.external_processes:
+        for what, occurrences in _repetition_groups(proc, lineage):
+            stamps = {str(occ.at) for occ in occurrences if occ.at}
+            repeating.append((proc.process_id, what, occurrences, _declared_period_seconds(proc)))
+            if len(stamps) < len(occurrences):
+                crowded.append(
+                    f"{proc.process_id} repeats '{what}' {len(occurrences)} times at "
+                    f"{len(stamps)} distinct moment(s) {sorted(stamps)}"
+                )
+    if len(moments) <= 1:
+        findings.append(
+            _mech(
+                "world_skips_the_causal_period",
+                "HIGH",
+                "everything that makes this world's answer happens at a single moment "
+                f"({moments or 'no dated occurrence at all'}) — it jumps from the cutoff "
+                "to the answer and simulates none of the period in which the outcome is "
+                "made",
+                "computed from the compiled world: the timestamps of every non-agent "
+                f"effect that writes the terminal's lineage {sorted(lineage)}",
+            )
+        )
+    elif crowded:
+        findings.append(
+            _mech(
+                "world_skips_the_causal_period",
+                "HIGH",
+                f"a process claims repetition it does not schedule: {crowded} — the same "
+                "change is typed again and again at one instant, so the world asserts a "
+                "cadence it never spans and the count of repetitions is doing the work "
+                "the calendar should",
+                "computed from the compiled world: per process, occurrences repeating "
+                "one write against the distinct timestamps they carry",
+            )
+        )
+    else:
+        findings.append(
+            _mech(
+                "world_skips_the_causal_period",
+                "PASS",
+                f"the terminal's lineage is written at {len(moments)} distinct moments: "
+                f"{moments}, and no process repeats a change without spreading it",
+                "computed from the compiled world: the timestamps of every non-agent "
+                f"effect that writes the terminal's lineage {sorted(lineage)}",
+            )
+        )
+    findings.append(_cadence_finding(repeating))
+    return findings
+
+
+def _cadence_finding(
+    repeating: list[tuple[str, str, list[Any], float | None]],
+) -> AuditFinding:
+    """Whether a repeated process's cadence could be checked against a declaration.
+
+    The count of repetitions can decide the answer on its own — eight typed cycles and
+    ten typed cycles land on opposite sides of a threshold with no uncertainty anywhere
+    in the world — and an enumerated occurrence list contains no claim about how often
+    the thing really happens, so there is nothing to check the count against.
+
+    When no declaration exists this says so rather than passing quietly. An inert hook
+    that reports PASS is worse than no hook: a gate that cannot run must never read as a
+    gate that ran and approved.
+    """
+
+    if not repeating:
+        return _mech(
+            "recurrence_is_declared",
+            "PASS",
+            "no non-agent process repeats the same change, so there is no cadence for a "
+            "declaration to pin down",
+            "computed from the compiled world: occurrences of each external process "
+            "grouped by the write they repeat",
+        )
+    undeclared = sorted({f"{pid} ('{what}' x{len(occ)})" for pid, what, occ, p in repeating if p is None})
+    if undeclared:
+        return _mech(
+            "recurrence_is_declared",
+            "MEDIUM",
+            f"this check could NOT run: {undeclared} repeat by enumeration and declare no "
+            "recurrence period, so how often the process really happens is asserted by "
+            "the number of occurrences that were typed and nothing verifies it",
+            "computed from the compiled world: no compiled process carries a recurrence "
+            "declaration to check the enumerated occurrences against",
+        )
+    wrong = sorted(
+        f"{pid} ('{what}')"
+        for pid, what, occurrences, period in repeating
+        if period is not None and not _spacing_matches(occurrences, period)
+    )
+    if wrong:
+        return _mech(
+            "recurrence_is_declared",
+            "HIGH",
+            f"the occurrences contradict the declared recurrence: {wrong} — the world "
+            "runs to a different cadence than the one it claims, so the enumerated count "
+            "is not the declaration's consequence",
+            "computed from the compiled world: gaps between consecutive occurrences "
+            "against each process's declared period",
+        )
+    return _mech(
+        "recurrence_is_declared",
+        "PASS",
+        "every repeated process declares a recurrence period and its occurrences keep to it",
+        "computed from the compiled world: gaps between consecutive occurrences against "
+        "each process's declared period",
+    )
+
+
+def _spacing_matches(occurrences: list[Any], period: float, *, tolerance: float = 0.25) -> bool:
+    """Do consecutive occurrences sit roughly one declared period apart?"""
+
+    stamps: list[datetime] = []
+    for occ in occurrences:
+        try:
+            stamps.append(datetime.fromisoformat(str(occ.at)))
+        except (TypeError, ValueError):
+            return False
+    stamps.sort()
+    gaps = [(b - a).total_seconds() for a, b in zip(stamps, stamps[1:], strict=False)]
+    return bool(gaps) and all(abs(gap - period) <= tolerance * period for gap in gaps)
 
 
 def _reads_fields(value: Any) -> set[str]:
