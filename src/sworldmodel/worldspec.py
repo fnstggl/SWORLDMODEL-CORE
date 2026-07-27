@@ -512,9 +512,14 @@ def effect_terms(eff: Effect) -> frozenset[str]:
     if isinstance(field_map, dict):
         out.update(f"field:{k}" for k in field_map)
 
-    for key in ("stage", "set_stage"):
-        if isinstance(p.get(key), str):
-            out.add("stage:")
+    # Only an unambiguous intent to move the stage counts. No universal op writes the
+    # stage today — ``world.with_stage`` is the engine's, called when a process node
+    # fires — so a *bare* ``stage`` param is descriptive metadata, and reading it as a
+    # write would refuse a create_event that merely says which stage it belongs to. Zero
+    # effects in the artifact corpus carry either key; ``set_stage`` is kept so the day
+    # one is added it is seen rather than waved through.
+    if isinstance(p.get("set_stage"), str):
+        out.add("stage:")
 
     return frozenset(out) if out else frozenset({f"op:{eff.op}"})
 

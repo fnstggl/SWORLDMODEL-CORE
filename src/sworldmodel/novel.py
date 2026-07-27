@@ -36,6 +36,7 @@ from .worldspec import (
     display_term,
     effect_terms,
     expression_terms,
+    parse_effect,
 )
 
 # What the compiled world says about who may produce one piece of world state. Every
@@ -175,25 +176,41 @@ def resolve_novel(
     if bad:
         return NovelResolution(False, f"non-universal ops proposed: {bad}"), [resp]
 
-    required = tuple(str(a) for a in (data.get("required_authority") or []))
+    declared = tuple(str(a) for a in (data.get("required_authority") or []))
 
     # 2. authority validation — against the world, not only against the interpreter.
-    #    The interpreter is a model, and a model asked "what authority does this need?"
-    #    can answer "none". That would make a novel action a way to do, without
-    #    standing, exactly what the compiled world says requires standing. So the
-    #    binding check is what the *compiled world* demands of anyone producing this
-    #    effect; the interpreter's answer is an additional constraint on top, never a
-    #    replacement for it.
-    blocked = _blocked_by_world_authority(spec, effects, actor)
-    if blocked:
-        return NovelResolution(False, blocked, effects, required), [resp]
+    #    ``required_authority`` is written by the same model that just proposed the
+    #    action, so it is a free parameter deciding whether a gate fires: asked "what
+    #    authority does this need?", a model can answer "none", and that answer must not
+    #    be able to unlock anything. The world's verdict is derived from what else
+    #    produces this state and what standing the compiled actors hold; the declaration
+    #    may only ADD to it.
+    standing = world_standing(spec, effects, actor)
+    required = tuple(sorted({*declared, *(t for s in standing for t in s.required_authority)}))
 
-    missing = [a for a in required if a not in actor.authority]
+    #    The declaration is checked first only because it is the proposal failing its own
+    #    stated requirement — the cheaper, more specific answer to give back to an actor.
+    #    Both checks are unconditional and neither can be reached around: what follows
+    #    refuses on the world's verdict whatever the declaration said, including when it
+    #    said nothing at all.
+    missing = [a for a in declared if a not in actor.authority]
     if missing:
         return (
-            NovelResolution(False, f"actor lacks authority {missing}", effects, required),
+            NovelResolution(False, f"actor lacks authority {missing}", effects, required, standing),
             [resp],
         )
+
+    refusal = next((s.refusal() for s in standing if not s.permitted), "")
+    if refusal:
+        return NovelResolution(False, refusal, effects, required, standing), [resp]
+
+    #    There is deliberately no third token check here. The world's own requirement is
+    #    enforced inside ``world_standing``: a term is permitted only when this actor
+    #    holds a compiled route to it, and ``_satisfies`` grants a route only to an actor
+    #    already holding that action's authority. Re-checking ``required`` at this point
+    #    would be a gate that can never fire — which is the very thing being fixed, one
+    #    layer up. ``required`` travels on the resolution as the record of what standing
+    #    was actually relied on.
 
     # 3-4. feasibility / resource / timing validation.
     binding = {
@@ -204,70 +221,139 @@ def resolve_novel(
     }
     ok, reason = executor.can_apply(world, effects, binding)
     if not ok:
-        return NovelResolution(False, f"infeasible: {reason}", effects, required), [resp]
+        return NovelResolution(False, f"infeasible: {reason}", effects, required, standing), [resp]
 
     # 5. translation into safe world operations -> execute.
     events, _deferred = executor.build_events(world, effects, binding)
-    return NovelResolution(True, "novel action authorized and executed", effects, required), [
-        resp,
-        *events,
-    ]
+    return NovelResolution(
+        True, "novel action authorized and executed", effects, required, standing
+    ), [resp, *events]
 
 
-def _effect_signature(eff: Effect) -> tuple[str, str]:
-    """What an effect *does*, ignoring its values: the op plus the thing it writes to.
+def terminal_terms(spec: WorldSpec) -> frozenset[str]:
+    """Everything the compiled terminal reads.
 
-    Two effects with the same signature change the same part of the world, whatever the
-    action producing them is called.
+    Both legs: ``unresolved_when`` decides the answer exactly as much as ``yes_when``
+    does — writing it turns a determined branch into an undetermined one.
     """
 
-    p = eff.params_dict
-    target = str(
-        p.get("collection") or p.get("field") or p.get("document") or p.get("resource") or ""
+    return expression_terms(spec.terminal.yes_when) | expression_terms(
+        spec.terminal.unresolved_when
     )
-    return (eff.op, target)
 
 
-def _blocked_by_world_authority(
-    spec: WorldSpec, effects: tuple[Effect, ...], actor: ActorState
-) -> str:
-    """Refuse a novel action that reaches an effect the compiled world gates.
+def _environment_producers(spec: WorldSpec) -> dict[str, list[str]]:
+    """Which non-agent parts of the compiled world write which terms.
 
-    If every compiled action that produces this same effect requires standing this actor
-    does not hold, the actor cannot reach that effect by renaming the route to it.
-    Effects the compiled world has no action for are not covered here — those are
-    genuinely novel, and the interpreter's declared authority governs them.
+    A process node's own ``effects`` and an external process's occurrences are the world
+    happening, not anybody acting: they fire on the calendar, on their entry condition,
+    with no actor and no intention behind them. Labels match ``world_compiler``'s
+    producer lineage so a compile-time refusal and this one name the same producer.
     """
+
+    out: dict[str, list[str]] = {}
+    for node in spec.process.nodes:
+        for eff in node.effects:
+            for term in effect_terms(eff):
+                out.setdefault(term, []).append(f"process_node:{node.node_id}")
+        if node.stage:
+            out.setdefault("stage:", []).append(f"process_node:{node.node_id}")
+    for proc in spec.external_processes:
+        for i, occ in enumerate(proc.occurrences):
+            for eff in occ.effects:
+                for term in effect_terms(eff):
+                    out.setdefault(term, []).append(f"external_process:{proc.process_id}#{i}")
+    return out
+
+
+def _satisfies(action: ActionDefinition, actor: ActorState) -> bool:
+    """Whether this actor could take this compiled action at all — who it is, not when.
+
+    Standing is a property of the actor and the action, so stage windows and
+    preconditions are deliberately not consulted: they say *when* a route is open, and
+    a route that is shut today is still the actor's route.
+    """
+
+    return action.eligible(actor.role, actor.actor_id) and all(
+        token in actor.authority for token in action.required_authority
+    )
+
+
+def world_standing(
+    spec: WorldSpec, effects: tuple[Effect, ...], actor: ActorState
+) -> tuple[TermStanding, ...]:
+    """What the compiled world says about this actor producing each of these effects.
+
+    One :class:`TermStanding` per term the proposal would write, in effect order, with
+    no term left unclassified. The compiled actions are the only producers that confer
+    standing; process nodes and external processes are producers that confer none, which
+    is precisely why an effect they alone produce must be refused rather than waved
+    through. Rain is not an action. A scheduled release is not an action. A quarterly
+    production run is not an action.
+    """
+
+    environment = _environment_producers(spec)
+    decides = terminal_terms(spec)
+    out: list[TermStanding] = []
+    seen: set[str] = set()
 
     for eff in effects:
-        sig = _effect_signature(eff)
-        gatekeepers = [
-            a for a in spec.actions if any(_effect_signature(e) == sig for e in a.effects)
-        ]
-        if not gatekeepers:
-            continue
-        if any(
-            all(token in actor.authority for token in a.required_authority)
-            and a.eligible(actor.role, actor.actor_id)
-            for a in gatekeepers
-        ):
-            continue
-        needed = sorted({t for a in gatekeepers for t in a.required_authority})
-        return (
-            f"this would {eff.op} {sig[1] or 'world state'}, which in this world requires "
-            f"standing the actor does not hold (compiled actions producing it require "
-            f"{needed}); a novel action is not a way around authority"
-        )
-    return ""
+        for term in sorted(effect_terms(eff)):
+            if term in seen:
+                continue
+            seen.add(term)
+            producers = [a for a in spec.actions if term in _action_terms(a)]
+            env = tuple(dict.fromkeys(environment.get(term, ())))
+            if producers:
+                satisfied = next((a for a in producers if _satisfies(a, actor)), None)
+                needed = (
+                    tuple(satisfied.required_authority)
+                    if satisfied is not None
+                    else tuple(sorted({t for a in producers for t in a.required_authority}))
+                )
+                out.append(
+                    TermStanding(
+                        term=term,
+                        standing=STANDING_ACTOR,
+                        actor_producers=tuple(a.action_id for a in producers),
+                        environment_producers=env,
+                        satisfied_by=satisfied.action_id if satisfied is not None else "",
+                        required_authority=needed,
+                        decides_terminal=term in decides,
+                    )
+                )
+                continue
+            out.append(
+                TermStanding(
+                    term=term,
+                    standing=STANDING_ENVIRONMENT if env else STANDING_UNPRODUCED,
+                    environment_producers=env,
+                    decides_terminal=term in decides,
+                )
+            )
+    return tuple(out)
+
+
+def _action_terms(action: ActionDefinition) -> frozenset[str]:
+    out: frozenset[str] = frozenset()
+    for eff in action.effects:
+        out |= effect_terms(eff)
+    return out
 
 
 def _parse_effects(raw: Any) -> tuple[Effect, ...]:
+    """Read the interpreter's effects exactly as the compiled path reads a compiler's.
+
+    ``parse_effect`` is used rather than a local construction so the *same JSON* names
+    the same world state whichever side wrote it. It was a local construction, and the
+    divergence was the thing to be afraid of: the compiled side renames a model's
+    ``field_id`` to ``field`` and the novel side did not, so an authority check reading
+    ``field`` and an executor reading ``field`` would have seen an effect that, on this
+    path alone, named neither. A gate and the thing it gates must read one object.
+    """
+
     if not isinstance(raw, list):
         return ()
-    out: list[Effect] = []
-    for item in raw:
-        if not isinstance(item, dict) or "op" not in item:
-            continue
-        params = {k: v for k, v in item.items() if k != "op"}
-        out.append(Effect(op=str(item["op"]), params=tuple(sorted(params.items()))))
-    return tuple(out)
+    return tuple(
+        parse_effect(item) for item in raw if isinstance(item, dict) and str(item.get("op", ""))
+    )

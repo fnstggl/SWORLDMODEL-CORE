@@ -75,13 +75,22 @@ def participant_brief(
     its own heading is *visible* as a party with nothing to do — which is exactly the
     judgement the planner has to make about whether it belongs in the world at all.
 
-    The headings are alphabetical, deliberately. They were ordered by how many claims
-    named each one, which put OPEC+ and its sixteen claims at the top of the brief and
-    every member country below it — a ranking by prominence, read before the planner had
-    considered anybody, in a decision that is precisely about whether the group or its
-    members are the parties. Claim count still decides who *survives* truncation, because
-    that is about not dropping the best-attested names; it no longer decides who is read
-    first, because the brief has no business having an opinion about that.
+    Headings are ordered by how many claims name each one, most-attested first. That
+    looked like a bug and was tested as one: it puts OPEC+ and its sixteen claims above
+    every member country, a ranking by prominence read before the planner has considered
+    anybody, in a decision that is precisely about whether the group or its members are
+    the parties. Held against an alphabetical variant and a no-brief control on the same
+    store, same question, same cutoff, one planner call each, the ordering did the
+    opposite of what was suspected:
+
+        claim-count order  ->  seven member countries, each a deciding entity
+        alphabetical       ->  one coalition standing for seven
+        no brief at all    ->  one coalition standing for seven
+
+    So the brief earns its place — without it the planner compresses — and this ordering
+    is the one that surfaces the members. Reverted to it rather than kept on the theory.
+    (One sample per arm, so the direction is worth more than the margin; what is solid is
+    that alphabetical is not an improvement.)
     """
 
     claims = view.available()
@@ -94,8 +103,7 @@ def participant_brief(
             by_name.setdefault(n, []).append(c)
     if not by_name:
         return ""
-    kept = sorted(by_name, key=lambda n: (-len(by_name[n]), n))[:max_names]
-    ordered = sorted(kept)
+    ordered = sorted(by_name, key=lambda n: (-len(by_name[n]), n))[:max_names]
     lines = [
         "WHAT THE RECORD SAYS ABOUT EACH NAME IT ATTESTS. These are the same claims as "
         "above, grouped by the names each one names — no new evidence, and no claim "
@@ -108,8 +116,8 @@ def participant_brief(
     # Bounded overall as well as per name: a live store with a hundred claims across
     # thirty names would otherwise put more than a hundred kilobytes of duplicated
     # evidence in front of the planner, and a brief that crowds out the plan is not a
-    # help. `kept` above already dropped the thinnest headings, so what remains here is
-    # a second bound on the total, applied in reading order.
+    # help. Names are already ordered by how much the record says about them, so the
+    # truncation drops the thinnest headings first.
     used = len(lines[0])
     for name in ordered:
         block = [f"- {name}"]
@@ -443,6 +451,11 @@ increase or pause or reverse, agreeing to an adjustment, acting on the output it
 controls. Those are affordances, and the record naming a party doing one is exactly the
 grounding an affordance needs (cite the claim). Every person, organization, coalition,
 institution or population you place in "entities" must end up holding at least one.
+
+A claim that names several parties taking one act grounds an affordance for EACH of
+them: "the seven countries met, reviewed conditions and agreed an adjustment" says each
+of the seven attended, reviewed, and gave or withheld agreement, so citing that claim on
+an affordance for each named party is grounded rather than invented.
 
 There are two ways to fail this and they are not symmetric. Inventing an act the record
 does not attribute to a party is a FABRICATED ACTOR and is the worse failure: it puts a
