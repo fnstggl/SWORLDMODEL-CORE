@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import random
+import threading
 import time
 from typing import Any
 
@@ -35,6 +36,7 @@ DEFAULT_TEMPERATURES: dict[str, float] = {
     "contradiction": 0.1,
     "compile_world_spec": 0.3,
     "semantic_plan": 0.3,
+    "semantic_plan_delta": 0.3,
     "semantic_review": 0.2,
     "interpret_novel": 0.2,
     "exclusion_challenge": 0.1,
@@ -56,6 +58,10 @@ DEFAULT_MAX_TOKENS: dict[str, int] = {
     # still enumerates entities, states, affordances, processes and uncertainties, and
     # the provider's reasoning tokens count against the same budget.
     "semantic_plan": 12000,
+    # A revision returns only the corrected objects (plus the provider's reasoning
+    # tokens); the deterministic merge supplies everything unchanged. This budget is
+    # the delta contract's whole point: a revision round no longer pays for the plan.
+    "semantic_plan_delta": 6000,
     # One verdict plus per-finding reasons and exact corrections.
     "semantic_review": 4000,
     "interpret_novel": 2000,
@@ -112,6 +118,12 @@ def _retry_after(headers: dict[str, str]) -> float:
 class DeepSeekGateway(ModelGateway):
     is_live = True
 
+    # An identical (model, task, prompt, seed, temperature) request is the same
+    # decision context; the trajectory audit already classifies re-deciding it as the
+    # runtime spinning, so the live gateway answers it from its own memo instead of
+    # re-spending the provider. The reuse is recorded in the call log.
+    memoize_identical_requests = True
+
     def __init__(
         self,
         transport: HttpTransport | None = None,
@@ -126,8 +138,15 @@ class DeepSeekGateway(ModelGateway):
         max_output_tokens: int = 32000,
         backoff_base: float = 0.5,
         outage_patience_seconds: float = 180.0,
+        max_concurrent_requests: int = 8,
     ) -> None:
         super().__init__()
+        # Bounded parallelism at the provider boundary: branch simulation, reviews and
+        # structural alternatives may issue requests concurrently, and this is the one
+        # place their combined concurrency is capped so parallel execution cannot turn
+        # into a rate-limit stampede. The per-request 429/backoff handling below still
+        # applies inside the bound.
+        self._concurrency = threading.BoundedSemaphore(max(1, max_concurrent_requests))
         self.transport = transport or UrllibTransport()
         self.api_key = api_key or os.environ.get("DEEPSEEK_API_KEY", "")
         self.base_url = (
@@ -190,12 +209,13 @@ class DeepSeekGateway(ModelGateway):
             attempt += 1
             start = time.monotonic()
             try:
-                resp = self.transport.post_json(
-                    self._endpoint(),
-                    body,
-                    headers={"Authorization": f"Bearer {self.api_key}"},
-                    timeout=self.timeout,
-                )
+                with self._concurrency:
+                    resp = self.transport.post_json(
+                        self._endpoint(),
+                        body,
+                        headers={"Authorization": f"Bearer {self.api_key}"},
+                        timeout=self.timeout,
+                    )
             except HttpError as exc:  # transport-level failure
                 last_error = f"{_failure_kind(exc)}: {exc}"
                 retries += 1
@@ -232,7 +252,7 @@ class DeepSeekGateway(ModelGateway):
                 )
                 raise GatewayError(f"DeepSeek {kind} for {request.task_kind}: {resp.text[:300]}")
 
-            data, tokens_in, tokens_out, content = self._parse(resp.text)
+            data, tokens_in, tokens_out, tokens_cached, content = self._parse(resp.text)
             if data is None or not self._schema_ok(data, request.expected_keys):
                 truncated = self._looks_truncated(resp.text, content)
                 if truncated:
@@ -274,6 +294,7 @@ class DeepSeekGateway(ModelGateway):
                             retries=retries,
                             validation_failures=tuple(validation_failures),
                             latency_ms=latency,
+                            tokens_cached=tokens_cached,
                         )
                 failure = (
                     f"{'truncated' if truncated else 'malformed/missing-keys'} on attempt {attempt}"
@@ -318,6 +339,7 @@ class DeepSeekGateway(ModelGateway):
                 retries=retries,
                 validation_failures=tuple(validation_failures),
                 latency_ms=latency,
+                tokens_cached=tokens_cached,
             )
 
         self.note_failure()
@@ -353,25 +375,34 @@ class DeepSeekGateway(ModelGateway):
         time.sleep(max(floor, base * (0.5 + random.random() / 2)))
 
     @staticmethod
-    def _parse(text: str) -> tuple[dict[str, Any] | None, int, int, str]:
+    def _parse(text: str) -> tuple[dict[str, Any] | None, int, int, int, str]:
         try:
             envelope = json.loads(text)
         except json.JSONDecodeError:
-            return None, 0, 0, text
+            return None, 0, 0, 0, text
         usage = envelope.get("usage", {}) or {}
         tokens_in = int(usage.get("prompt_tokens", 0))
         tokens_out = int(usage.get("completion_tokens", 0))
+        # DeepSeek's automatic context caching reports how many prompt tokens were
+        # served from the provider-side prefix cache. Two envelope shapes exist:
+        # top-level `prompt_cache_hit_tokens`, and the OpenAI-style
+        # `prompt_tokens_details.cached_tokens`. Read whichever is present.
+        details = usage.get("prompt_tokens_details") or {}
+        cached = int(
+            usage.get("prompt_cache_hit_tokens", 0)
+            or (details.get("cached_tokens", 0) if isinstance(details, dict) else 0)
+        )
         try:
             content = envelope["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError):
-            return None, tokens_in, tokens_out, text
+            return None, tokens_in, tokens_out, cached, text
         try:
             data = json.loads(content)
         except json.JSONDecodeError:
-            return None, tokens_in, tokens_out, content
+            return None, tokens_in, tokens_out, cached, content
         if not isinstance(data, dict):
-            return None, tokens_in, tokens_out, content
-        return data, tokens_in, tokens_out, content
+            return None, tokens_in, tokens_out, cached, content
+        return data, tokens_in, tokens_out, cached, content
 
     @staticmethod
     def _schema_ok(data: dict[str, Any], expected_keys: tuple[str, ...]) -> bool:

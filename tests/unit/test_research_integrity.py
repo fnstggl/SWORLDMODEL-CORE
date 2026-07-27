@@ -101,6 +101,61 @@ MINIMAL_WORLD = {
     },
 }
 
+# The semantic-mode counterpart of MINIMAL_WORLD: research is what these tests are
+# about, and the backend now compiles through the DEFAULT (semantic) path, so the
+# scripted compile boundary answers in the semantic contract. One operational process
+# produces the resolving state inside the window; nothing cites claims, so the plan
+# validates whatever this particular test managed to extract.
+MINIMAL_PLAN = {
+    "resolution": {
+        "question": QUESTION,
+        "yes_condition": "the board adopts the standard",
+        "subject_entity": "Widget standard",
+        "resolution_units": "recorded positions",
+        "target_outcome": "the board adopts",
+        "expected_participants": None,
+        "evidence_claim_ids": [],
+    },
+    "entities": [],
+    "states": [
+        {
+            "name": "adoption recorded",
+            "owner": "world",
+            "state_type": "boolean",
+            "unit": "",
+            "initial": "UNKNOWN",
+            "why_material": "the resolving state",
+            "evidence_claim_ids": [],
+        }
+    ],
+    "events": [],
+    "affordances": [],
+    "processes": [
+        {
+            "name": "board decision process",
+            "meaning": "the board's decision is recorded",
+            "kind": "operational",
+            "participants": [],
+            "inputs": [],
+            "occurrences": [
+                {
+                    "description": "the decision is recorded",
+                    "at": "2027-02-01T00:00:00+00:00",
+                    "changes": [{"op": "set", "target": "adoption recorded", "value": True}],
+                }
+            ],
+            "evidence_claim_ids": [],
+        }
+    ],
+    "uncertainties": [],
+    "terminal": {"form": "state_equals", "state": "adoption recorded", "value": True},
+    "terminal_producer_note": "the board decision process sets the resolving state "
+    "inside the window; nothing initializes it",
+    "world_facts": [],
+}
+
+APPROVE_REVIEW = {"verdict": "APPROVE", "reasons": [], "corrections": []}
+
 PLAN = {
     "process_summary": "the board decides",
     "resolution_event": "the adoption vote",
@@ -206,7 +261,8 @@ def _gateway(extract: Any) -> ProgrammableGateway:
         {
             "research_plan": PLAN,
             "extract_claims": extract,
-            "compile_world_spec": MINIMAL_WORLD,
+            "semantic_plan": MINIMAL_PLAN,
+            "semantic_review": APPROVE_REVIEW,
             "followup_queries": {"queries": []},
         }
     )
@@ -214,6 +270,29 @@ def _gateway(extract: Any) -> ProgrammableGateway:
 
 def _requested(transport: FakeTransport) -> list[str]:
     return [c.url for c in transport.calls]
+
+
+def _research_record(backend: LiveResearchBackend) -> tuple[list, dict]:
+    """The (claims, research trace) a pass produced, however it ended.
+
+    A pass that verifies nothing leaves an empty admissible view, and the compile
+    boundary refuses that immediately rather than spending the repair budget
+    discovering that nothing can cite nothing. The refusal carries the completed
+    research on the exception — the property that keeps a compile-stage refusal from
+    erasing a retrieval record — so these research-behavior tests read it from
+    whichever path the pass took.
+    """
+
+    try:
+        bundle = backend.research(QUESTION, AS_OF, HORIZON)
+    except Exception as exc:
+        store = getattr(exc, "partial_evidence_store", None)
+        trace = getattr(exc, "partial_live_trace", None)
+        assert store is not None and trace is not None, (
+            f"a refusal must carry the research it completed, got {exc!r}"
+        )
+        return store.all(), trace
+    return bundle.evidence_store.all(), bundle.live_trace or {}
 
 
 # ---------------------------------------------------------------------------
@@ -279,10 +358,10 @@ def test_a_model_that_obeys_the_injection_still_stores_nothing() -> None:
         results=[ROSTER_URL], pages={ROSTER_URL: HOSTILE_PAGE}, captures={ROSTER_URL: CAPTURE}
     )
     backend = _backend(transport, _gateway(obeyed))
-    bundle = backend.research(QUESTION, AS_OF, HORIZON)
+    claims, trace = _research_record(backend)
 
-    assert bundle.evidence_store.all() == []
-    rejected = " ".join(str(r) for r in bundle.live_trace["sources_rejected"])
+    assert claims == []
+    rejected = " ".join(str(r) for r in trace["sources_rejected"])
     assert "voted 5-0 to adopt" in rejected and "not verified" in rejected
 
 
@@ -339,13 +418,13 @@ def test_the_transport_itself_refuses_a_private_target() -> None:
 def test_pastcast_refuses_a_page_with_no_capture_at_or_before_the_cutoff() -> None:
     transport = _transport(results=[ROSTER_URL], pages={ROSTER_URL: ROSTER_PAGE}, captures={})
     backend = _backend(transport, _gateway(ROSTER_CLAIMS))
-    bundle = backend.research(QUESTION, AS_OF, HORIZON)
+    claims, trace = _research_record(backend)
 
     # The live page is never requested: an unarchivable URL is not admissible evidence
     # for a past cutoff, however innocuous its self-declared date looks.
     assert ROSTER_URL not in _requested(transport)
-    assert bundle.evidence_store.all() == []
-    assert any("no archived capture" in r["reason"] for r in bundle.live_trace["sources_rejected"])
+    assert claims == []
+    assert any("no archived capture" in r["reason"] for r in trace["sources_rejected"])
 
 
 def test_pastcast_reads_the_archived_capture_and_records_the_provenance() -> None:
@@ -471,7 +550,8 @@ def _channels(max_queries: int) -> list[str]:
         {
             "research_plan": _WIDE_PLAN,
             "extract_claims": {"claims": []},
-            "compile_world_spec": MINIMAL_WORLD,
+            "semantic_plan": MINIMAL_PLAN,
+            "semantic_review": APPROVE_REVIEW,
             "followup_queries": {"queries": []},
         }
     )
@@ -483,7 +563,7 @@ def _channels(max_queries: int) -> list[str]:
         ),
         now=NOW,
     )
-    trace = backend.research(QUESTION, AS_OF, HORIZON).live_trace
+    _claims, trace = _research_record(backend)
     return [q["channel"] for q in trace["queries"]], [q["query"] for q in trace["queries"]]
 
 
@@ -710,7 +790,7 @@ def test_a_challenge_page_is_a_failure_not_a_result_set() -> None:
 def test_search_failure_reaches_the_trace_and_no_url_is_invented() -> None:
     transport = _transport(results=[], pages={})  # _ddg([]) has no result links
     backend = _backend(transport, _gateway({"claims": []}))
-    bundle = backend.research(QUESTION, AS_OF, HORIZON)
+    _claims, trace = _research_record(backend)
 
-    assert bundle.live_trace["search_failures"], "a failed search must be reported"
-    assert bundle.live_trace["sources_fetched"] == []
+    assert trace["search_failures"], "a failed search must be reported"
+    assert trace["sources_fetched"] == []

@@ -1,0 +1,88 @@
+{
+ "cases": [
+  {
+   "admissible": "0",
+   "as_of": "2026-05-14T23:59:59-06:00",
+   "case": "committee",
+   "claims": "0",
+   "horizon": "2026-06-25T23:59:59-06:00",
+   "mode": "pastcast",
+   "question": "Will Banco de Mexico's Governing Board vote unanimously to hold its policy interest rate unchanged at its June 25, 2026 monetary policy decision?",
+   "store": "/home/user/SWORLDMODEL-CORE/artifacts/stores/committee/evidence_store.json"
+  },
+  {
+   "admissible": "30",
+   "as_of": "2026-07-26T16:56:55+00:00",
+   "case": "geopolitical",
+   "claims": "30",
+   "horizon": "2026-10-01T23:59:59+00:00",
+   "mode": "nowcast",
+   "question": "Will OPEC+ announce an increase in crude oil production quotas at or before its next scheduled ministerial meeting in 2026?",
+   "store": "/home/user/SWORLDMODEL-CORE/artifacts/stores/geopolitical/evidence_store.json"
+  },
+  {
+   "admissible": "7",
+   "as_of": "2026-07-26T17:02:20+00:00",
+   "case": "individual",
+   "claims": "7",
+   "horizon": "2026-09-15T23:59:59+00:00",
+   "mode": "nowcast",
+   "question": "Will Andrew Bailey, Governor of the Bank of England, publicly signal support for a further Bank Rate cut before September 15, 2026?",
+   "store": "/home/user/SWORLDMODEL-CORE/artifacts/stores/individual/evidence_store.json"
+  },
+  {
+   "admissible": "13",
+   "as_of": "2026-07-26T17:05:32+00:00",
+   "case": "negotiation",
+   "claims": "13",
+   "horizon": "2026-10-01T23:59:59+00:00",
+   "mode": "nowcast",
+   "question": "Will the European Union and Mercosur formally sign their trade agreement before October 1, 2026?",
+   "store": "/home/user/SWORLDMODEL-CORE/artifacts/stores/negotiation/evidence_store.json"
+  },
+  {
+   "admissible": "2",
+   "as_of": "2026-07-26T17:09:53+00:00",
+   "case": "population",
+   "claims": "2",
+   "horizon": "2026-10-05T23:59:59+00:00",
+   "mode": "nowcast",
+   "question": "Will Tesla report more than 400,000 vehicle deliveries for the third quarter of 2026?",
+   "store": "/home/user/SWORLDMODEL-CORE/artifacts/stores/population/evidence_store.json"
+  }
+ ],
+ "frozen_at": "2026-07-26T17:22:45.239314+00:00",
+ "holdouts": [
+  {
+   "admissible": "2",
+   "as_of": "2026-07-26T17:14:54+00:00",
+   "case": "holdout_science_institution",
+   "claims": "2",
+   "horizon": "2026-10-05T23:59:59+00:00",
+   "mode": "nowcast",
+   "question": "Will the Nobel Prize in Physiology or Medicine 2026 be announced on or before October 5, 2026?",
+   "store": "/home/user/SWORLDMODEL-CORE/artifacts/stores/holdout_science_institution/evidence_store.json"
+  },
+  {
+   "admissible": "3",
+   "as_of": "2026-07-26T17:19:30+00:00",
+   "case": "holdout_space_operations",
+   "claims": "3",
+   "horizon": "2026-10-01T23:59:59+00:00",
+   "mode": "nowcast",
+   "question": "Will SpaceX complete more than 100 Falcon 9 launches in calendar year 2026 by October 1, 2026?",
+   "store": "/home/user/SWORLDMODEL-CORE/artifacts/stores/holdout_space_operations/evidence_store.json"
+  },
+  {
+   "admissible": "2",
+   "as_of": "2026-07-26T17:17:14+00:00",
+   "case": "holdout_sports_governance",
+   "claims": "2",
+   "horizon": "2026-12-31T23:59:59+00:00",
+   "mode": "nowcast",
+   "question": "Will FIFA publicly confirm the match schedule for the 2030 World Cup before December 31, 2026?",
+   "store": "/home/user/SWORLDMODEL-CORE/artifacts/stores/holdout_sports_governance/evidence_store.json"
+  }
+ ],
+ "note": "8-case A/B matrix; stores frozen by scripts/freeze_stores.py"
+}

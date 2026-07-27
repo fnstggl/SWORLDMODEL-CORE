@@ -88,6 +88,40 @@ class FrozenResearchBackend:
         return replace(bundle, live_trace=live_trace)
 
 
+def _write_metrics(out: Path, gateway: DeepSeekGateway, wall: float, mode: str, code: int) -> None:
+    """The run's measured spend, written for both outcomes so the benchmark reads one
+    artifact per run instead of scraping logs."""
+
+    tokens_in = gateway.total_tokens_in
+    (out / "metrics.json").write_text(
+        canonical_json(
+            {
+                "mode": mode,
+                "exit": code,
+                "wall_seconds": round(wall, 1),
+                "calls": gateway.call_count,
+                "calls_by_stage": gateway.stage_call_counts(),
+                "tokens_in": tokens_in,
+                "tokens_out": gateway.total_tokens_out,
+                "tokens_cached_prompt": gateway.total_tokens_cached,
+                "prompt_cache_hit_rate": (
+                    round(gateway.total_tokens_cached / tokens_in, 4) if tokens_in else 0.0
+                ),
+                "memo_reuses": gateway.memo_hits,
+                "retries": gateway.retries,
+                "failed_calls": gateway.failed_calls,
+                # The floor analysis: how much of the wall is provider generation.
+                # provider_seconds_total sums every call's latency (it exceeds the
+                # wall when calls overlap); the serial floor is what a fully serial
+                # run of the same calls would have cost.
+                "provider_seconds_total": round(sum(gateway.latencies_ms) / 1000, 1),
+                "max_call_seconds": round(max(gateway.latencies_ms, default=0) / 1000, 1),
+            }
+        )
+        + "\n"
+    )
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--store", required=True)
@@ -139,6 +173,7 @@ def main() -> int:
             compiler_mode=args.mode,
         )
         (out / "diagnosis.json").write_text(canonical_json(diagnosis.as_dict()) + "\n")
+        _write_metrics(out, gateway, wall, args.mode, 1)
         details = getattr(refusal.__cause__, "details", {}) or {}
         print(f"REFUSED [{args.mode}] at {refusal.stage}: {refusal.__cause__ or refusal}")
         print(f"failure: {details.get('failure')}")
@@ -157,9 +192,11 @@ def main() -> int:
             compiler_mode=args.mode,
         )
         (out / "diagnosis.json").write_text(canonical_json(diagnosis.as_dict()) + "\n")
+        _write_metrics(out, gateway, wall, args.mode, 4)
         print(f"FAILED [{args.mode}] in simulation after {wall:.0f}s: {stopped}")
         return 4
     wall = time.monotonic() - t0
+    _write_metrics(out, gateway, wall, args.mode, 0)
     p = result.simulation_probability
     print(f"COMPLETED [{args.mode}]  status={result.status.value}")
     print(f"probability: {'—' if p is None else f'{p:.4f}'} ({result.probability_source})")

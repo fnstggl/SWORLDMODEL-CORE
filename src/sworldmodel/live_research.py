@@ -274,7 +274,7 @@ class LiveResearchBackend:
         *,
         budget: ResearchBudget | None = None,
         now: datetime | None = None,
-        compiler_mode: str = "direct",
+        compiler_mode: str = "semantic",
     ) -> None:
         self.gateway = gateway
         self.transport = transport or UrllibTransport()
@@ -287,6 +287,14 @@ class LiveResearchBackend:
         # resolved once. Created on the first public call.
         self._health = ProviderHealth()
         self._decoder = GoogleNewsDecoder(self.transport)
+        # On-disk record-and-replay caches (SWORLDMODEL_CACHE=off disables both).
+        # Neither changes what a run *decides* to fetch or extract — budgets count
+        # cache hits exactly like live work, so a cache-hot run walks the same
+        # discovery path as a cold one and only the wall clock differs.
+        from .runcache import ExtractionCache, SourceCache
+
+        self._source_cache = SourceCache()
+        self._extract_cache = ExtractionCache()
         # Cumulative spend for this question, across the opening pass and every repair.
         self._spent_queries = 0
         self._spent_fetches = 0
@@ -384,6 +392,22 @@ class LiveResearchBackend:
         wanted = tuple(dict.fromkeys(q.strip() for q in queries if q and q.strip()))
         if not wanted:
             return None
+        prior_mode = str((prior.live_trace or {}).get("compiler_mode") or "")
+        if prior_mode and prior_mode != self.compiler_mode:
+            # Resuming another mode's artifacts would splice one compiler's plan and
+            # repair history into the other's run — a silent mixed-mode result the
+            # trace could never explain. The mismatch is a refusal, not a fallback.
+            raise WorldIntegrityError(
+                f"cannot resume research recorded under compiler mode {prior_mode!r} "
+                f"in a {self.compiler_mode!r} run — artifacts do not cross compiler "
+                "modes",
+                details={
+                    "failure": "compiler_mode_mismatch",
+                    "recompilable": False,
+                    "recorded_mode": prior_mode,
+                    "run_mode": self.compiler_mode,
+                },
+            )
         mode = self.retrieval_mode(as_of)
         store = prior.evidence_store
         trace = ResearchTrace.resume(prior.live_trace)
@@ -813,7 +837,7 @@ class LiveResearchBackend:
     ) -> list[FetchedSource]:
         seen = session.seen_urls
         room = max(0, self.budget.total_fetches - self._spent_fetches)
-        todo = [u for u in dict.fromkeys(urls) if u not in seen][
+        todo = [u for u in dict.fromkeys(_normalized_dedup(urls)) if u not in seen][
             : min(self.budget.max_fetches, room)
         ]
         for u in todo:
@@ -822,11 +846,27 @@ class LiveResearchBackend:
         results: list[FetchedSource] = []
         if not todo:
             return results
-        with ThreadPoolExecutor(max_workers=self.budget.fetch_concurrency) as pool:
-            fetched = list(
-                pool.map(lambda u: fetch_source(self.transport, u, now=now, as_of=as_of), todo)
-            )
         pastcast = requires_archived_copy(as_of, now)
+        cache_cutoff = as_of if pastcast else None
+        cached: list[FetchedSource] = []
+        cached_urls: set[str] = set()
+        to_fetch: list[str] = []
+        for u in todo:
+            replayed = self._source_cache.load(u, archive_cutoff=cache_cutoff)
+            if replayed is not None:
+                cached.append(replayed)
+                cached_urls.add(u)
+            else:
+                to_fetch.append(u)
+        fetched: list[FetchedSource] = []
+        if to_fetch:
+            with ThreadPoolExecutor(max_workers=self.budget.fetch_concurrency) as pool:
+                fetched = list(
+                    pool.map(
+                        lambda u: fetch_source(self.transport, u, now=now, as_of=as_of), to_fetch
+                    )
+                )
+        fetched = cached + fetched
         for src in fetched:
             if not src.ok and not pastcast:
                 # A known URL that direct fetch could not read — blocked, empty,
@@ -837,6 +877,8 @@ class LiveResearchBackend:
                 if recovered is not None:
                     src = recovered
             if src.ok:
+                if src.url not in cached_urls:
+                    self._source_cache.store(src, archive_cutoff=cache_cutoff)
                 results.append(src)
                 trace.fetched.append(
                     {
@@ -848,7 +890,9 @@ class LiveResearchBackend:
                         "archived_at": _iso(src.archived_at),
                         "observed_at": _iso(src.observed_at),
                         "content_sha256": src.content_hash,
-                        "via": "jina_reader" if src.fetched_url.startswith("jina:") else "direct",
+                        "via": "source_cache"
+                        if src.url in cached_urls
+                        else ("jina_reader" if src.fetched_url.startswith("jina:") else "direct"),
                     }
                 )
             else:
@@ -944,7 +988,11 @@ class LiveResearchBackend:
             """
 
             try:
-                return s, extract_claims(self.gateway, question, s, as_of), ""
+                return (
+                    s,
+                    extract_claims(self.gateway, question, s, as_of, cache=self._extract_cache),
+                    "",
+                )
             except GatewayError as exc:
                 return s, None, str(exc)
 
@@ -968,6 +1016,7 @@ class LiveResearchBackend:
                     "window_chars": result.window_chars,
                     "document_truncated": result.truncated,
                     "claims_returned": len(result.claims),
+                    "replayed_from_cache": result.from_cache,
                 }
             )
             for c in result.claims:
@@ -1327,6 +1376,38 @@ Return JSON {{"reconcilable": true|false, "reading": "<one line: how both are tr
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+_TRACKING_PARAMS = frozenset(
+    {"utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content", "fbclid", "gclid"}
+)
+
+
+def _normalized_dedup(urls: list[str]) -> list[str]:
+    """Drop URLs that are the same document wearing different decoration.
+
+    Two candidate URLs differing only in fragment or in pure tracking parameters
+    (utm_*, fbclid, gclid) name the same document; fetching both spends a fetch slot
+    to read the same bytes twice. The FIRST occurrence's original URL is kept and
+    fetched verbatim — normalization is only the dedup key, never the request.
+    """
+
+    from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+    seen_keys: set[str] = set()
+    out: list[str] = []
+    for url in urls:
+        try:
+            parts = urlsplit(url)
+            query = [(k, v) for k, v in parse_qsl(parts.query) if k not in _TRACKING_PARAMS]
+            key = urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), ""))
+        except ValueError:
+            key = url
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        out.append(url)
+    return out
 
 
 def _missing_query(label: str) -> str:

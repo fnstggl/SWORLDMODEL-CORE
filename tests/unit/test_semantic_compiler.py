@@ -1162,7 +1162,11 @@ def test_must_refuse_false_gaps_skip_the_revision_round(
                 HORIZON,
                 view,
             )
-        planner_calls = sum(1 for r in gw.seen if r.task_kind == "semantic_plan")
+        # The revision round is a DELTA call now; the gap still costs exactly one
+        # planner round either way.
+        planner_calls = sum(
+            1 for r in gw.seen if r.task_kind in ("semantic_plan", "semantic_plan_delta")
+        )
         return planner_calls, exc.value
 
     stubborn = LoweringGap(
@@ -1316,8 +1320,9 @@ def test_a_repair_with_a_prior_plan_revises_instead_of_rerolling() -> None:
     """A review-forced recompile that re-planned from scratch replaced a plan whose
     downside alternative cited the constraint claims with four uncited growth-only
     scenarios — the cited NO branch vanished and the run reported 1.0. A repair that
-    carries the prior plan must issue a REVISE call holding the planner to exactly
-    the named corrections; a repair with no prior plan stays a fresh plan."""
+    carries the prior plan must issue a DELTA revision call holding the planner to
+    exactly the named corrections — never a full regeneration; a repair with no prior
+    plan stays a fresh full plan."""
 
     from _fakes import ProgrammableGateway
     from sworldmodel.semantic_compile import semantic_compile_live
@@ -1325,6 +1330,8 @@ def test_a_repair_with_a_prior_plan_revises_instead_of_rerolling() -> None:
     view = _store_for(harbor_plan())
     responses = {
         "semantic_plan": harbor_plan(),
+        # An empty delta: the merge keeps the prior plan exactly as it was.
+        "semantic_plan_delta": {"revised": {}, "removed": {}},
         "semantic_review": {"verdict": "APPROVE", "reasons": [], "corrections": []},
     }
 
@@ -1338,10 +1345,14 @@ def test_a_repair_with_a_prior_plan_revises_instead_of_rerolling() -> None:
         extra_instruction="the review found X; fix exactly X",
         prior_plan=harbor_plan(),
     )
-    first = next(r for r in gw.seen if r.task_kind == "semantic_plan")
-    assert "REVISE the previous semantic plan" in first.prompt
+    # The repair issues NO full-plan call at all: the first (and only) planner-side
+    # call is the delta revision carrying the prior plan and the repair instruction.
+    assert not [r for r in gw.seen if r.task_kind == "semantic_plan"]
+    first = next(r for r in gw.seen if r.task_kind == "semantic_plan_delta")
+    assert "PREVIOUS PLAN" in first.prompt
     assert "the review found X; fix exactly X" in first.prompt
     assert "keep every cited value" in first.prompt
+    assert "REVISION DELTA" in first.prompt
 
     gw2 = ProgrammableGateway(dict(responses))
     semantic_compile_live(
@@ -1352,8 +1363,10 @@ def test_a_repair_with_a_prior_plan_revises_instead_of_rerolling() -> None:
         view,
         extra_instruction="the review found X; fix exactly X",
     )
-    first2 = next(r for r in gw2.seen if r.task_kind == "semantic_plan")
-    assert "REVISE the previous semantic plan" not in first2.prompt
+    first2 = gw2.seen[0]
+    assert first2.task_kind != "semantic_plan_delta"
+    assert next(r for r in gw2.seen if r.task_kind == "semantic_plan") is not None
+    assert "PREVIOUS PLAN" not in first2.prompt
 
 
 def test_a_twice_unreadable_plan_refuses_as_the_pipeline_not_as_a_value_error() -> None:
@@ -1384,3 +1397,40 @@ def test_a_twice_unreadable_plan_refuses_as_the_pipeline_not_as_a_value_error() 
     assert exc.value.details["failure"] == "semantic_plan_invalid"
     assert exc.value.details["recompilable"] is True
     assert any("all_of" in e for e in exc.value.details["semantic_errors"])
+
+
+def test_a_state_nothing_touches_is_refused_before_the_coverage_gate() -> None:
+    """An inert state is caught mechanically, at zero model cost.
+
+    The eight-case A/B measured the alternative: a declared-but-unwired object
+    survives the plan validator, gets compiled, and is refused by the COVERAGE gate
+    afterwards — which costs an entire extra compile cycle (a fresh plan delta, fresh
+    validator rounds and a fresh independent review, four to six serially dependent
+    model calls). A state nothing reads, nothing writes and no uncertainty draws
+    cannot affect the outcome under any semantics, so the validator refuses it where
+    the refusal is free.
+
+    The rule is deliberately confined to states: an entity rule was tried and refused
+    three of the invented-domain worlds below, a stricter standard than the gate it
+    was anticipating.
+    """
+
+    data = harbor_plan()
+    data["states"] = [
+        {
+            "name": "harbor visitor count",
+            "owner": "world",
+            "state_type": "quantity",
+            "unit": "visitors",
+            "initial": "UNKNOWN",
+            "why_material": "claimed to matter, wired to nothing",
+            "evidence_claim_ids": [],
+        }
+    ]
+    errors = _valid(data)
+    assert any("decorative" in e and "harbor visitor count" in e for e in errors)
+
+    # The invented-domain worlds all still validate: the rule catches inert states,
+    # not faithful ones.
+    for plan in (harbor_plan(), council_plan(), observatory_plan()):
+        assert not [e for e in _valid(plan) if "decorative" in e]

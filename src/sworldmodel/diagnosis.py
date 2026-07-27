@@ -59,6 +59,7 @@ ROOT_CAUSES = (
     "provider_failure",
     "budget_configuration_failure",
     "external_information_unavailable",
+    "run_configuration_mismatch",
 )
 
 
@@ -105,7 +106,7 @@ class RunDiagnosis:
     # Which compiler built (or failed to build) this run's world. A property of the
     # run's configuration, recorded unconditionally — a refused semantic run and a
     # direct run must never be indistinguishable in their artifacts.
-    compiler_mode: str = "direct"
+    compiler_mode: str = "semantic"
 
     # -- sections ------------------------------------------------------------
 
@@ -497,6 +498,22 @@ class RunDiagnosis:
                 {
                     "cause": "compiler_omission",
                     "why": f"the semantic compiler stopped at the {gate} gate",
+                }
+            )
+        if gate == "no_admissible_evidence":
+            out.append(
+                {
+                    "cause": "archive_coverage_failure",
+                    "why": "no claim is admissible at the cutoff, so no world was "
+                    "compiled at all — the record, not the compiler, is what is missing",
+                }
+            )
+        if gate == "compiler_mode_mismatch":
+            out.append(
+                {
+                    "cause": "run_configuration_mismatch",
+                    "why": "the run tried to resume artifacts recorded under the other "
+                    "compiler mode — modes never mix silently, so the mismatch refuses",
                 }
             )
         if gate == "semantic_review_abstained":

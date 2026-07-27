@@ -31,7 +31,14 @@ The governing rule:
 forecast(question, as_of, horizon, config)          # api.py — the single entry point
   → live research       live_research.py  (rss/search/source_fetch/pdf_text/source_extract)
                         → evidence.py (canonical store, lineage, cutoff)
-  → compile WorldSpec   world_compiler.py → worldspec.py (schema)          # LLM, from evidence
+  → compile (semantic, the default)                                        # api.compile_for_mode
+        semantic plan   semantic_plan.py       # LLM authors causal MEANING only
+        reality review  semantic_compile.py    # independent LLM judgement
+        validation      validate_semantic_plan # code, zero model calls
+        delta repair    merge_plan_delta       # revisions merge; no full regeneration
+        lowering        semantic_lowering.py → worldspec.py (schema)  # code mints all symbols
+        (the direct compiler, world_compiler.compile_world_spec_live, remains ONLY
+         behind the explicit --compiler direct diagnostic flag)
                         (handed coverage.evidence_checklist so nothing verified is forgotten)
   → contract            models.ResolutionContract (locks the declarative terminal)
   → reality gate        reality.py                                          # refuse a false world

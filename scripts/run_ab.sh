@@ -7,6 +7,7 @@ set -u
 cd /home/user/SWORLDMODEL-CORE
 COMMIT=$(git rev-parse --short HEAD)
 OUT=artifacts/ab
+mkdir -p "$OUT"
 RESULTS=$OUT/ab_results.jsonl
 : > "$RESULTS"
 echo "A/B at commit $COMMIT"
@@ -27,6 +28,7 @@ d = Path(f"/home/user/SWORLDMODEL-CORE/artifacts/ab/{case}_{mode}")
 row = {"case": case, "mode": mode, "exit": code, "commit": commit}
 f = d / "forecast.json"
 g = d / "diagnosis.json"
+m = d / "metrics.json"
 if f.exists():
     fc = json.loads(f.read_text())
     row.update(status=fc.get("status"), probability=fc.get("simulation_probability"),
@@ -38,6 +40,16 @@ elif g.exists():
     row.update(status="refused", failure_stage=dg.get("failure_stage"),
                failure=str(dg.get("failure"))[:200], calls=dg.get("model_calls"),
                wall=dg.get("wall_seconds"))
+if m.exists():
+    mt = json.loads(m.read_text())
+    row.update(wall=mt.get("wall_seconds"), calls=mt.get("calls"),
+               tokens_in=mt.get("tokens_in"), tokens_out=mt.get("tokens_out"),
+               tokens_cached=mt.get("tokens_cached_prompt"),
+               cache_hit_rate=mt.get("prompt_cache_hit_rate"),
+               memo_reuses=mt.get("memo_reuses"),
+               calls_by_stage=mt.get("calls_by_stage"),
+               provider_seconds=mt.get("provider_seconds_total"),
+               max_call_seconds=mt.get("max_call_seconds"))
 print(json.dumps(row, sort_keys=True))
 PY
     ) &

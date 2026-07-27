@@ -146,6 +146,16 @@ def _audit(config: ForecastConfig, ctx: TraceContext, wall_seconds: float) -> di
         "model_calls_by_stage": gw.stage_call_counts(),
         "tokens_in": gw.total_tokens_in,
         "tokens_out": gw.total_tokens_out,
+        # Measured, never asserted: identical-request reuses served from the
+        # gateway's memo, and prompt tokens the provider says it served from its own
+        # prefix cache.
+        "memo_reuses": getattr(gw, "memo_hits", 0),
+        "tokens_cached_prompt": getattr(gw, "total_tokens_cached", 0),
+        "prompt_cache_hit_rate": (
+            round(getattr(gw, "total_tokens_cached", 0) / gw.total_tokens_in, 4)
+            if gw.total_tokens_in
+            else 0.0
+        ),
         "retries": gw.retries,
         "failed_calls": gw.failed_calls,
         "avg_latency_ms": int(sum(lat) / len(lat)) if lat else 0,
@@ -167,6 +177,11 @@ def _print_audit(audit: dict[str, Any]) -> None:
     print(
         f"tokens in/out: {audit['tokens_in']}/{audit['tokens_out']}  "
         f"retries: {audit['retries']}  failed: {audit['failed_calls']}"
+    )
+    print(
+        f"cache: {audit['memo_reuses']} identical-request reuses, "
+        f"{audit['tokens_cached_prompt']} provider-cached prompt tokens "
+        f"(hit rate {audit['prompt_cache_hit_rate']:.1%})"
     )
     print(f"latency avg/max ms: {audit['avg_latency_ms']}/{audit['max_latency_ms']}")
     print(f"live HTTP requests: {audit['http_requests']}")
@@ -496,10 +511,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     fc.add_argument(
         "--compiler",
-        choices=("direct", "semantic"),
-        default="direct",
-        help="world compiler: 'direct' (one call authors the WorldSpec) or 'semantic' "
-        "(plan → independent review → deterministic lowering into the same WorldSpec)",
+        choices=("semantic", "direct"),
+        default="semantic",
+        help="world compiler. 'semantic' (the default and canonical path): plan → "
+        "independent reality review → static validation → deterministic lowering into "
+        "the executable WorldSpec. 'direct' (one call authors the WorldSpec) is a "
+        "diagnostic flag kept only for controlled comparison and regression diagnosis; "
+        "nothing ever falls back to it",
     )
     fc.add_argument("--max-queries", type=int, default=14)
     fc.add_argument("--research-rounds", type=int, default=3)
