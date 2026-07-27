@@ -339,6 +339,7 @@ class ActionExecutor:
             status="executed",
             reason="novel action authorized and executed",
             mode="novel_action",
+            deferred=list(resolution.deferred),
             gateway_responses=gateway_responses,
         )
 

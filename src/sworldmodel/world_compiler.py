@@ -659,35 +659,23 @@ def _expr_terms(expr: Any) -> set[str]:
 
 
 def _effect_produces(eff: Any) -> set[str]:
-    """The namespaced terms one compiled effect can write."""
+    """The namespaced terms one compiled effect can write.
 
-    params = eff.params_dict
-    out: set[str] = set()
-    if eff.op in ("set_field", "adjust_field"):
-        name = params.get("field")
-        if isinstance(name, str):
-            out.add(f"field:{name}")
-    elif eff.op == "append_record":
-        coll = params.get("collection")
-        if isinstance(coll, str):
-            out.add(f"collection:{coll}")
-    elif eff.op in ("create_event", "schedule_event"):
-        kind = params.get("event_type", params.get("kind"))
-        out.add(f"event:{kind}" if isinstance(kind, str) else "event:")
-    elif eff.op in ("transfer_resource", "consume_resource"):
-        res = params.get("resource")
-        if isinstance(res, str):
-            out.add(f"resource:{res}")
-    elif eff.op == "create_or_update_document":
-        doc = params.get("document")
-        fields = params.get("fields")
-        if isinstance(doc, str) and isinstance(fields, dict):
-            out.update(f"document:{doc}.{k}" for k in fields)
-    # Anything that sets a stage moves the stage term.
-    for key in ("stage", "set_stage"):
-        if isinstance(params.get(key), str):
-            out.add("stage:")
-    return out
+    Delegates to :func:`worldspec.effect_terms` — the single definition of what an
+    effect writes, and the same one the runtime's novel-action authority check reads.
+    Two copies of this mapping are two chances to disagree about who produced the
+    answer, and this copy was already missing ``release_data``: the op ``world.apply``
+    uses to write every key of its ``fields`` map straight into world state. A terminal
+    term written only by a scheduled release therefore had NO producer as far as this
+    function was concerned, so ``enforce_outcome_is_produced`` refuses a world whose
+    terminal IS produced — a correct world refused, which is worse than the hole — and
+    ``_environment_preset_terminal_terms`` cannot see an environment announcement
+    written as a release.
+    """
+
+    from .worldspec import effect_terms
+
+    return set(effect_terms(eff))
 
 
 def terminal_producers(spec: WorldSpec) -> dict[str, tuple[str, ...]]:

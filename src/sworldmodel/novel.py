@@ -21,6 +21,7 @@ the nearest known action.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from .actors import ActorState
@@ -125,6 +126,10 @@ class NovelResolution:
     # resolution so a permitted novel action records the standing it acted on, not only
     # a refused one records the standing it lacked.
     standing: tuple[TermStanding, ...] = ()
+    # Effects the proposal stamped in the future. They are scheduled, not applied, and
+    # they must reach the caller: dropping them reported an action as executed that
+    # produced nothing at all.
+    deferred: tuple[tuple[datetime, Effect], ...] = ()
 
 
 def resolve_novel(
@@ -224,9 +229,18 @@ def resolve_novel(
         return NovelResolution(False, f"infeasible: {reason}", effects, required, standing), [resp]
 
     # 5. translation into safe world operations -> execute.
-    events, _deferred = executor.build_events(world, effects, binding)
+    #    An effect stamped in the future has not happened; it is scheduled. The deferred
+    #    list was discarded here, so a novel `schedule_event` produced zero events and
+    #    was still reported "authorized and executed" — the actor told its intention had
+    #    become a consequence when nothing whatever had occurred.
+    events, deferred = executor.build_events(world, effects, binding)
     return NovelResolution(
-        True, "novel action authorized and executed", effects, required, standing
+        True,
+        "novel action authorized and executed",
+        effects,
+        required,
+        standing,
+        tuple(deferred),
     ), [resp, *events]
 
 
