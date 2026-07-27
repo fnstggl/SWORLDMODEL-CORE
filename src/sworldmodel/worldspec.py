@@ -400,6 +400,142 @@ def parse_effects(items: Any) -> tuple[Effect, ...]:
 
 
 # ---------------------------------------------------------------------------
+# The term vocabulary: what an expression READS and what an effect WRITES
+# ---------------------------------------------------------------------------
+#
+# One namespaced name per addressable piece of world state, so "what the terminal reads"
+# and "what this effect writes" are comparable strings rather than two shapes that have
+# to be matched by hand. The namespaces are the ones :mod:`expressions` keeps strictly
+# apart — an action writing a *document* field ``deal_signed`` does not write the *world*
+# field ``deal_signed`` — and they match ``world_compiler``'s producer-lineage vocabulary
+# so a compile-time refusal and a runtime refusal name the same thing the same way.
+#
+#   field:<name>            a world field
+#   collection:<name>       a record collection
+#   event:<type>            events of one type (``event:`` when the type is not literal)
+#   resource:<id>           a resource, whoever holds it
+#   document:<doc>.<field>  one field of one document
+#   stage:                  the process stage
+#   op:<op>                 an operation that addresses no state above (see below)
+#
+# ``op:<op>`` exists so that *every* effect names at least one thing. An effect whose
+# reach came back empty would be indistinguishable from an effect that writes nothing,
+# and a caller asking "who else may do this?" would get the same silence for
+# ``deliver_information`` (nothing in this vocabulary describes it) as for an effect it
+# simply failed to classify. Silence that means two different things is the defect this
+# vocabulary exists to avoid.
+
+_EXPR_TERM_READERS: dict[str, str] = {
+    "field": "field",
+    "count": "collection",
+    "sum": "collection",
+    "values": "collection",
+    "exists": "collection",
+    "event_count": "event",
+    "resource": "resource",
+}
+
+# Effect params that carry a ``{name: value}`` map written straight into world fields.
+# ``release_data`` is the scheduled-release shape: ``world.apply`` writes every key of
+# its ``fields`` map into world state, so a release IS a producer of those fields.
+_FIELD_MAP_PARAMS: dict[str, str] = {"release_data": "fields"}
+
+
+def expression_terms(expr: Any) -> frozenset[str]:
+    """Every piece of world state a declarative expression reads, namespaced.
+
+    Total: a non-:class:`Expr` reads nothing. An aggregate whose subject is decided at
+    runtime rather than named at compile time contributes the bare namespace
+    (``event:``) for the event operators and nothing for the others, matching what the
+    compiler's own term extraction does.
+    """
+
+    if not isinstance(expr, Expr):
+        return frozenset()
+    out: set[str] = set()
+
+    def walk(node: Any) -> None:
+        if not isinstance(node, Expr):
+            return
+        space = _EXPR_TERM_READERS.get(node.op)
+        if space is not None and node.args:
+            name = _literal_name(node.args[0])
+            if name:
+                out.add(f"{space}:{name}")
+            elif space == "event":
+                out.add("event:")
+        elif node.op == "document_field" and len(node.args) >= 2:
+            doc, fld = _literal_name(node.args[0]), _literal_name(node.args[1])
+            if doc and fld:
+                out.add(f"document:{doc}.{fld}")
+        elif node.op == "stage":
+            out.add("stage:")
+        for arg in node.args:
+            walk(arg)
+
+    walk(expr)
+    return frozenset(out)
+
+
+def effect_terms(eff: Effect) -> frozenset[str]:
+    """Every piece of world state one effect can write, in the same vocabulary.
+
+    Never empty: an effect that addresses nothing in the namespaces above is reported as
+    ``op:<op>`` rather than as an empty set, so "this writes nothing nameable" and "this
+    was not classified" can never be confused for one another.
+    """
+
+    p = eff.params_dict
+    out: set[str] = set()
+
+    if eff.op in ("set_field", "adjust_field"):
+        name = p.get("field")
+        if isinstance(name, str) and name:
+            out.add(f"field:{name}")
+    elif eff.op == "append_record":
+        coll = p.get("collection")
+        if isinstance(coll, str) and coll:
+            out.add(f"collection:{coll}")
+    elif eff.op in ("create_event", "schedule_event"):
+        kind = p.get("event_type", p.get("kind"))
+        out.add(f"event:{kind}" if isinstance(kind, str) and kind else "event:")
+    elif eff.op in ("transfer_resource", "consume_resource"):
+        res = p.get("resource")
+        if isinstance(res, str) and res:
+            out.add(f"resource:{res}")
+    elif eff.op == "create_or_update_document":
+        doc, fields = p.get("document"), p.get("fields")
+        if isinstance(doc, str) and doc and isinstance(fields, dict):
+            out.update(f"document:{doc}.{k}" for k in fields)
+
+    field_map = p.get(_FIELD_MAP_PARAMS.get(eff.op, ""))
+    if isinstance(field_map, dict):
+        out.update(f"field:{k}" for k in field_map)
+
+    for key in ("stage", "set_stage"):
+        if isinstance(p.get(key), str):
+            out.add("stage:")
+
+    return frozenset(out) if out else frozenset({f"op:{eff.op}"})
+
+
+def display_term(term: str) -> str:
+    """A namespaced term, written the way a person reads it.
+
+    A refusal message should say ``rate_decision``, not ``field:rate_decision``.
+    """
+
+    kind, _, name = term.partition(":")
+    if kind == "field":
+        return name
+    if kind == "stage":
+        return "stage"
+    if kind == "op":
+        return f"{name} (operation)"
+    return f"{name} ({kind})" if name else kind
+
+
+# ---------------------------------------------------------------------------
 # Entities and actors
 # ---------------------------------------------------------------------------
 
