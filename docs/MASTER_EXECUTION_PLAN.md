@@ -89,6 +89,21 @@ personally inspects real-run artifacts before closing anything.
   Rule of thumb this instantiates: when a measurement calls correct behavior a defect,
   fix the measurement — never bend the world to satisfy it.
 
+- **D11 Suppression empties the field, not just the label.** CTO ruling, Phase 4. When
+  D2 suppresses a point estimate, `ForecastResult.simulation_probability` is set to
+  None — the field that IS the published headline. A label beside a retained number
+  does not suppress it: the forensic audit found readers taking the headline while
+  `probability_source` and [0,1] bounds sat next to it saying otherwise. The type
+  already allows it (`float | None`, models.py:418) and the CLI already renders None.
+  The figure survives as diagnostics-only `scenario_average` plus
+  `integrity.probability_after_simulation`; a stale `point_estimate_is_calibrated:
+  true` is as misleading as the number and must fall with it. Suppression fires when
+  ungrounded weights DISAGREE **or** when resolved mass is a MINORITY of total branch
+  mass (FD-17 proved the disagreement test alone cannot fire when the other branches
+  are unresolved rather than opposed). Tests that pin the pre-D2 contract are
+  retargeted, never deleted: each keeps proving its arithmetic against
+  `scenario_average` and gains the suppression fact.
+
 - **D9 Reclassified prior results.** Tesla 50% = invalid forecast
   (BRANCH_WEIGHTS_DOMINATED, one-step world). BoE 25% = valid causal pathway,
   invalid calibrated number. OPEC+ 100% = factual lookup with an unadjudicated
