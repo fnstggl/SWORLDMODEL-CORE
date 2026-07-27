@@ -56,7 +56,9 @@ _NOT_A_NAME = re.compile(
 )
 
 
-def participant_brief(view: EvidenceView, *, max_names: int = 24, max_claims: int = 8) -> str:
+def participant_brief(
+    view: EvidenceView, *, max_names: int = 24, max_claims: int = 8, max_chars: int = 24_000
+) -> str:
     """The same verified claims, re-projected under the names they attest.
 
     ``render_evidence`` lists claims in authority order, which is the right ordering for
@@ -94,13 +96,24 @@ def participant_brief(view: EvidenceView, *, max_names: int = 24, max_claims: in
         "affordance you give a party must be traceable to a line under that party's own "
         "heading.",
     ]
+    # Bounded overall as well as per name: a live store with a hundred claims across
+    # thirty names would otherwise put more than a hundred kilobytes of duplicated
+    # evidence in front of the planner, and a brief that crowds out the plan is not a
+    # help. Names are already ordered by how much the record says about them, so the
+    # truncation drops the thinnest headings first.
+    used = len(lines[0])
     for name in ordered:
-        lines.append(f"- {name}")
+        block = [f"- {name}"]
         for c in sorted(by_name[name], key=lambda c: (-int(c.authority_level), c.id))[:max_claims]:
-            lines.append(f"    {c.id} | {c.proposition}")
+            block.append(f"    {c.id} | {c.proposition}")
             excerpt = (c.supporting_excerpt or "").strip()
             if excerpt and excerpt[:60] != c.proposition[:60]:
-                lines.append(f'      "{excerpt[:400]}"')
+                block.append(f'      "{excerpt[:400]}"')
+        size = sum(len(x) + 1 for x in block)
+        if used + size > max_chars:
+            break
+        lines.extend(block)
+        used += size
     return "\n".join(lines)
 
 
@@ -433,6 +446,22 @@ party the record shows taking no act that bears on this outcome, saying so in
 excluded_candidates; and if the outcome genuinely IS one party's decision to take —
 which happens, and is a legitimate world — say that plainly with expected_participants
 matching, rather than compressing several real deciders into one aggregate.
+
+A BODY THAT DECIDES BY ITS MEMBERS AGREEING IS NOT ONE DECIDER. Collapsing a group into
+a single object with represents_count is right only when its members have no separate
+position to hold — a delegation voting as instructed, a bloc with one mandate. It is
+WRONG wherever the record shows the members arriving at the decision: if it says they
+met and agreed, that is several parties and the rule by which they settle, and the thing
+your simulation has to play out is whether they agree THIS time. Two tests, both read
+off the record and not off your judgement of how important the members are:
+  · does the record name the members individually as the parties who take the decision?
+  · does it attribute a distinct position, demand, reservation or act to any one of them
+    by name — urging, pressing, objecting, reaffirming, holding out?
+If either is yes, that member holds its own position and its own affordances, and
+absorbing it into the aggregate deletes evidence you were given. Note what the second
+test costs you if you ignore it: a member with a named standing position, dropped into
+excluded_candidates as immaterial, is a verified claim the world silently lost — the
+coverage gate reads that as evidence destroyed and refuses the run.
 
 POSITIONS BEFORE OUTCOMES. Where several parties bear on one decision, the world needs
 the state that sits BETWEEN them: what each party has said, conceded, committed to or

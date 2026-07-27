@@ -160,6 +160,7 @@ def _audit(config: ForecastConfig, ctx: TraceContext, wall_seconds: float) -> di
             "stop_reason": d.stop_reason,
             "unfired_in_horizon": d.unfired_in_horizon,
             "pending_beyond_horizon": len(d.pending_beyond_horizon),
+            "convergence": d.convergence.as_dict(),
             "execution_status": d.execution_status,
             "execution_limit": d.execution_limit,
             "unresolved_class": d.unresolved_class,
@@ -212,9 +213,15 @@ def _print_audit(audit: dict[str, Any]) -> None:
     print(f"actor invocations: {audit['actor_invocations_total']}")
     for bid, b in audit.get("branches", {}).items():
         calls = ", ".join(f"{a}×{n}" for a, n in sorted(b["actor_calls"].items()))
+        c = b.get("convergence") or {}
         print(
             f"  {bid}: {b['batches']} batches, {b['events']} events, "
             f"actor calls [{calls or 'none'}]; stop: {b['stop_reason']}"
+        )
+        print(
+            f"      loop: {c.get('repeat_decisions', 0)} repeat decision(s), "
+            f"{c.get('self_echo_wakes_suppressed', 0)} self-echo wake(s) withheld, "
+            f"{c.get('non_decision_wakes_refused', 0)} non-decision wake(s) refused"
         )
     _print_coverage(audit.get("coverage") or {})
 

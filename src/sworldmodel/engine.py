@@ -38,6 +38,10 @@ from .actors import (
     PLAN_ACTIVE,
     ActorRuntime,
     ActorState,
+    ConvergenceDiagnostics,
+    NonDecision,
+    check_non_decision,
+    is_self_echo,
 )
 from .compiled import CompiledWorld
 from .effects import UNIVERSAL_OPS, EffectExecutor
@@ -341,6 +345,11 @@ class BranchDiagnostics:
     stop_reason: str = "schedule exhausted"
     pending_beyond_horizon: list[dict[str, Any]] = field(default_factory=list)
     unfired_in_horizon: int = 0
+    # W3. Where the actor calls went: how many wakes were withheld as the actor's own
+    # echo, how many were refused as non-decisions, and how many calls re-produced a
+    # decision already taken. Without these a run that spins reads exactly like a run
+    # that deliberates — 51 invocations either way — and no artifact tells them apart.
+    convergence: ConvergenceDiagnostics = field(default_factory=ConvergenceDiagnostics)
     # W2. ``execution_status`` is EXECUTION_COMPLETE only when the branch ran until the
     # world had nothing further scheduled inside the window. Every other stop — any
     # budget, the no-progress guard, a provider failure — is EXECUTION_INCOMPLETE and
@@ -795,9 +804,12 @@ def _event_loop(
             _stop_on_budget(diag, f"event budget exhausted ({budget.max_events})", "max_events")
             break
         if sum(diag.actor_call_counts.values()) >= budget.max_actor_calls:
+            # Loud, and specific about what the calls bought: 80 spent deliberating and
+            # 80 spent re-deciding one thing are the same number and opposite runs.
             _stop_on_budget(
                 diag,
-                f"actor-call budget exhausted ({budget.max_actor_calls})",
+                f"actor-call budget exhausted ({budget.max_actor_calls}); "
+                f"{diag.convergence.summary()}",
                 "max_actor_calls",
             )
             break
@@ -973,7 +985,7 @@ def _dispatch(
     if kind == KIND_ACTION_COMPLETION:
         return _complete_action(world, spec, entry, action_exec, ledger)
     if kind == KIND_NOTICE:
-        return _notice(world, spec, entry)
+        return _notice(world, spec, entry, diag)
     if kind == KIND_DECISION:
         return _invoke_actor(
             world,
@@ -1333,7 +1345,7 @@ def _complete_action(
 
 
 def _notice(
-    world: WorldState, spec: WorldSpec, entry: ScheduledEntry
+    world: WorldState, spec: WorldSpec, entry: ScheduledEntry, diag: BranchDiagnostics
 ) -> tuple[WorldState, list[Event]]:
     """An actor's attention arrives: everything available to it by now becomes noticed.
 
@@ -1361,7 +1373,7 @@ def _notice(
         )
     )
 
-    reason, detail = _relevance(world, spec, world.actors[aid], ids)
+    reason, detail = _relevance(world, spec, world.actors[aid], ids, convergence=diag.convergence)
     if reason:
         world = world.with_schedule(
             world.schedule.push(
@@ -1496,6 +1508,63 @@ def _no_feasible_action_record(
     )
 
 
+# The validation_status recorded when a wake is refused because nothing in the actor's
+# situation has moved since it last decided. Like NO_FEASIBLE_ACTION it is a statement
+# about the wake, not about a decision: no model was called and no intention was formed.
+NON_DECISION = "non_decision"
+
+
+def _non_decision_record(
+    world: WorldState,
+    actor: ActorState,
+    entry: ScheduledEntry,
+    non_decision: NonDecision,
+) -> ActorDecisionRecord:
+    """The record of a wake refused for having no material cause.
+
+    It goes on the ledger for the same reason a no-feasible-action wake does: a wake
+    that vanishes silently makes a world look inert for no stated reason. This one names
+    the situation key it duplicates, so a reader can find the decision it would have
+    repeated and check the judgement for themselves.
+    """
+
+    p = entry.payload_dict
+    state = actor.state_dict()
+    return ActorDecisionRecord(
+        branch_id=world.branch_id,
+        actor_id=actor.actor_id,
+        branch_time=world.time.isoformat(),
+        stage=world.stage,
+        wake_reason=str(p.get("wake_reason", "")),
+        wake_detail=str(p.get("wake_detail", "")),
+        trigger_event_ids=list(entry.causal_parents),
+        delivered_observation_ids=[
+            d.event_id for d in world.deliveries if d.actor_id == actor.actor_id
+        ],
+        noticed_observation_ids=[],
+        retrieved_memory_ids=[],
+        plan_before=None,
+        plan_after=None,
+        plan_disposition="not consulted: the wake had no cause the actor had not answered",
+        state_before=state,
+        state_after=state,
+        decision_context={
+            "convergence": {
+                "situation_key": non_decision.situation_key,
+                "duplicates_prior_intent_key": non_decision.prior_intent_key,
+            }
+        },
+        intent={},
+        validation_status=NON_DECISION,
+        validation_reason=non_decision.reason,
+        event_ids=[],
+        world_version_at_decision=world.version,
+        prompt_hash="",
+        model="",
+        tokens_out=0,
+    )
+
+
 # An intention the environment accepted and put into the world, as opposed to a wait,
 # a refusal or a failure. Only these mean the actor has actually taken the opportunity.
 _ACTED_STATUSES = frozenset({"started", "executed"})
@@ -1595,6 +1664,18 @@ def _invoke_actor(
         trigger_detail=detail,
         trigger_obs_id=(list(p.get("observation_ids") or []) or [None])[0],
     )
+    # A wake at which nothing about this actor's situation differs from the one it
+    # last decided from cannot produce a new decision: same instant, same stated cause,
+    # same readable world, same menu, same mind, and nothing has reached it from anybody
+    # else since. Refused before the model is called, and recorded rather than lost. A
+    # genuine repetition is never touched — any of those moving, the clock included,
+    # changes the situation and the act stands.
+    non_decision = check_non_decision(actor, view)
+    if non_decision is not None:
+        diag.convergence.record_non_decision(aid)
+        decisions.append(_non_decision_record(world, actor, entry, non_decision))
+        return world, []
+
     world = world.with_schedule(
         world.schedule.drop_matching(kind=KIND_DECISION, actor_id=aid, at=world.time)
     )
@@ -1609,6 +1690,12 @@ def _invoke_actor(
     result = actor_runtime.step(actor, view, seed=seed)
     world = world.with_actor(result.actor)
     diag.actor_call_counts[aid] = diag.actor_call_counts.get(aid, 0) + 1
+    if result.is_repeat:
+        # The call was made and re-produced the decision already taken. The intention
+        # still executes: the runtime does not cancel an act because it has seen it
+        # before, and a monotone terminal the repeat satisfies must still be satisfied.
+        # What is recorded is that this call bought nothing.
+        diag.convergence.record_repeat(aid)
 
     outcome = action_exec.execute(
         result.actor, result.choice, world, spec, seed, microstep=entry.microstep
@@ -1806,7 +1893,12 @@ _OBSERVABLE_EVENT_KINDS = frozenset(
 
 
 def _relevance(
-    world: WorldState, spec: WorldSpec, actor: ActorState, noticed: frozenset[str]
+    world: WorldState,
+    spec: WorldSpec,
+    actor: ActorState,
+    noticed: frozenset[str],
+    *,
+    convergence: ConvergenceDiagnostics | None = None,
 ) -> tuple[str, str]:
     """Is what this actor just noticed a reason to reconsider?
 
@@ -1817,10 +1909,43 @@ def _relevance(
     wrote for this particular world. Otherwise it remembers what it saw and carries on —
     which is what people do, and what keeps this from becoming a machine that consults
     everyone about everything.
+
+    **What the actor produced itself is not one of those causes.** Every rule below is
+    applied to what reached it from the rest of the world; its own act echoing back is
+    excluded first (:func:`sworldmodel.actors.is_self_echo`), because an agent learning
+    of its own action is not news and waking on it is a feedback loop with no damping.
+    ``observers_of`` already refuses to hand an actor its own public act; a compiled
+    effect that names the actor in its own audience defeats that guard, and this is the
+    check that does not depend on any compiler behaving.
+
+    Two things are deliberately untouched. Another agent's *reaction* to the act still
+    wakes this one — the event's author is somebody else, and that is the social
+    dynamic the runtime exists to simulate. And so does the world's verdict on the
+    attempt (a refusal, a failure), which is the one thing an actor genuinely did not
+    already know. The event is still delivered, still noticed and still remembered; only
+    the wake is withheld, because visibility, delivery, notice and reconsideration are
+    four separate transitions and this is a statement about the last one alone.
     """
 
     by_id = {e.event_id: e for e in world.event_history}
-    events = [by_id[i] for i in sorted(noticed) if i in by_id]
+    all_events = [by_id[i] for i in sorted(noticed) if i in by_id]
+    events = [e for e in all_events if not is_self_echo(actor.actor_id, e.actor_id, e.kind)]
+    reason, detail = _wake_reason_from(world, spec, actor, events)
+    if reason:
+        return reason, detail
+    if len(events) != len(all_events):
+        # Counted as suppressed only when the echo would ACTUALLY have woken it: the
+        # number has to be a count of loops broken, not of self-produced events seen.
+        echoed, _ = _wake_reason_from(world, spec, actor, all_events)
+        if echoed and convergence is not None:
+            convergence.record_self_echo(actor.actor_id)
+    return "", ""
+
+
+def _wake_reason_from(
+    world: WorldState, spec: WorldSpec, actor: ActorState, events: list[Event]
+) -> tuple[str, str]:
+    """The stated cause, if any, that these events give this actor to reconsider."""
 
     for ev in events:
         if actor.actor_id in ev.audience or actor.actor_id in ev.target_ids:

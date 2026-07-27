@@ -1738,24 +1738,49 @@ def _society_errors(plan: SemanticPlan) -> list[str]:
         if e.structural_type in AGENT_STRUCTURAL_TYPES
         and e.representation_scale != "external_process"
     ]
-    inert = [e.name for e in parties if e.name not in acting]
-    if len(parties) >= 2 and len([e for e in parties if e.name in acting]) <= 1:
+    inert = sorted(e.name for e in parties if e.name not in acting)
+    # Two ways the plan contradicts its own claim, and the world has to trip one of them
+    # — a party sitting quietly in a world that never said it was many-sided is judged by
+    # nothing here.
+    one_actor_many_claimed = (
+        len(parties) >= 2
+        and len([e for e in parties if e.name in acting]) <= 1
+        and (plan.expected_participants or 0) >= 2
+    )
+    # `phase2/geopolitical3` is why the first form is not enough on its own: eleven
+    # entities, twenty-three declared participants, and TWO acting objects — OPEC+
+    # representing 23 and a seven-country group representing 7 — with the eight named
+    # countries standing between them holding nothing. Two actors is not a society when
+    # both of them are aggregates of the people who are also standing there.
+    aggregates = sorted(
+        e.name for e in plan.entities if e.decides and (e.represents_count or 0) >= 2
+    )
+    compressed_and_displayed = bool(aggregates and inert)
+    if inert and (one_actor_many_claimed or compressed_and_displayed):
+        why = (
+            f"it declares {plan.expected_participants} decision-relevant participants and "
+            "then lets one of them act"
+            if one_actor_many_claimed
+            else f"{aggregates} already stand in for their members, and those members are "
+            "in the world as well"
+        )
         errors.append(
-            f"INERT_PARTICIPANT: this plan declares an outcome several parties bear on, "
-            f"and then gives {sorted(inert)} nothing to do — they hold no affordance at "
-            "all, so they cannot advocate, resist, commit, withhold or act on what they "
-            "themselves control, and the answer rests on one party's own act. A world "
-            "shaped like a many-sided situation whose arithmetic is a single switch "
-            "reads as multi-party to every gate downstream while containing one "
-            "decision. Correction boundary: give each of these parties the act its own "
-            "role really affords — traceable to what the record says about that party by "
-            "name — and the intermediate state that act moves; or, where the record shows "
-            "a party takes no act bearing on this outcome, remove it from the world and "
-            "record it under excluded_candidates with why its removal cannot change the "
-            "answer; or, if this outcome genuinely IS one party's decision, say so by "
-            "lowering expected_participants and dropping the aggregate represents_count. "
-            "Do NOT invent an affordance to fill a slot: a capability the evidence does "
-            "not support is a fabricated actor, which is worse than a missing one"
+            f"INERT_PARTICIPANT: this plan says the outcome turns on several parties — "
+            f"{why} — and gives {inert} nothing to do. They hold no affordance at all, so "
+            "they cannot advocate, resist, commit, withhold or act on what they "
+            "themselves control, and the answer rests on somebody else's single act. "
+            "Counting a party towards the participants and leaving it unable to act "
+            "claims it twice and delivers it once: every gate downstream reads this world "
+            "as many-sided while it contains one decision. Correction boundary: give each "
+            "of these parties the act its own role really affords — traceable to what the "
+            "record says about that party by name — and the intermediate state that act "
+            "moves; or, where the record shows a party takes no act bearing on this "
+            "outcome, remove it from the world and record it under excluded_candidates "
+            "with why its removal cannot change the answer; or, if these parties really do "
+            "decide as one unit, keep the aggregate alone and drop them from the world "
+            "rather than listing them beside it. Do NOT invent an affordance to fill a "
+            "slot: a capability the evidence does not support is a fabricated actor, "
+            "which is worse than a missing one"
         )
 
     if len(deciders) >= 2:
@@ -2858,9 +2883,22 @@ def validate_semantic_plan(
                 )
             for who in p.participants:
                 if who in entity_names and who not in deciders:
+                    # A live OPEC+ recompile put all seven countries into the August 2
+                    # meeting and left decides=false on them, and this message — which
+                    # only stated the rule — was read as "take them out of the meeting".
+                    # Two revision rounds later the plan still refused. Being at a dated
+                    # occasion to act IS deciding, so the message says which way to
+                    # resolve it and what the other way costs.
                     errors.append(
-                        f"process {p.name!r}: participant {who!r} does not decide — an "
-                        "actor_moment's participants must be deciding entities"
+                        f"process {p.name!r}: participant {who!r} does not decide, but an "
+                        "actor_moment is a dated occasion at which its participants act — "
+                        "being there and deciding nothing is not a thing this moment can "
+                        "mean. Correction boundary: if this party acts at this occasion, "
+                        "set decides=true on it and give it the affordances the record "
+                        "attributes to it; only if the record shows it takes no act here "
+                        "should it be dropped from this moment's participants — and a "
+                        "party dropped from every moment is one the world should not be "
+                        "carrying at all"
                     )
         else:
             if not p.occurrences:

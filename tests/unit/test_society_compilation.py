@@ -34,9 +34,13 @@ import copy
 from datetime import datetime
 from typing import Any
 
+from _fakes import ProgrammableGateway, build_bundle, wait_decision
 from sworldmodel.effects import _audience
+from sworldmodel.engine import run
+from sworldmodel.models import ResolutionContract
 from sworldmodel.semantic_lowering import lower_plan
 from sworldmodel.semantic_plan import parse_semantic_plan, validate_semantic_plan
+from sworldmodel.world_compiler import compile_world
 
 AS_OF = datetime.fromisoformat("2026-04-01T00:00:00+00:00")
 HORIZON = datetime.fromisoformat("2026-07-31T23:59:59+00:00")
@@ -44,15 +48,39 @@ HORIZON = datetime.fromisoformat("2026-07-31T23:59:59+00:00")
 # The record this world is compiled from. Every affordance below is traceable to one of
 # these lines, because an affordance the evidence does not support is a fabricated actor
 # — the failure that matters more than a missing one.
-KNOWN = frozenset(
-    {
-        "c-g1",  # the committee announces the stocking limit
-        "c-g2",  # the three townships hold and state positions at the Michaelmas meeting
-        "c-g3",  # Corran has a standing position that the limit is too low
-        "c-g4",  # each township controls the stock it puts on its own apportionment
-        "c-g5",  # the estate factor's sole authority, in the single-decider variant
-    }
-)
+CLAIMS: dict[str, dict[str, Any]] = {
+    "c-g1": {
+        "proposition": "The Ard Fell Grazings Committee announces the common grazing's "
+        "stocking limit for each season",
+        "value": "the committee announces the limit",
+        "entities": ["Ard Fell Grazings Committee"],
+    },
+    "c-g2": {
+        "proposition": "Ardgour, Beinn Dubh and Corran state their positions on the "
+        "stocking limit at the Michaelmas grazings meeting",
+        "value": "positions stated at the meeting",
+        "entities": ["Ardgour", "Beinn Dubh", "Corran", "Ard Fell Grazings Committee"],
+    },
+    "c-g3": {
+        "proposition": "Corran has pressed for a higher stocking limit at successive "
+        "grazings meetings",
+        "value": "Corran presses for a higher limit",
+        "entities": ["Corran"],
+    },
+    "c-g4": {
+        "proposition": "Each township controls the stock it puts on its own apportionment "
+        "of the Ard Fell common grazing",
+        "value": "each township controls its own apportionment",
+        "entities": ["Ardgour", "Beinn Dubh", "Corran"],
+    },
+    "c-g5": {
+        "proposition": "The Ard Fell estate factor sets the stocking limit under the "
+        "estate's regulations and consults the townships as a courtesy",
+        "value": "the factor sets the limit",
+        "entities": ["Ard Fell estate factor"],
+    },
+}
+KNOWN = frozenset(CLAIMS)
 
 MEETING = "2026-06-24T10:00:00+00:00"
 
@@ -379,6 +407,60 @@ def test_a_world_that_declares_many_parties_and_lets_one_act_is_refused() -> Non
     assert "fabricated actor" in inert
 
 
+def test_two_aggregates_of_the_same_people_are_not_two_participants() -> None:
+    """`phase2/geopolitical3` is why "one actor" is not the whole rule.
+
+    That world declared twenty-three participants across eleven entities and had TWO
+    acting objects — OPEC+ standing for 23 and a seven-country group standing for 7 —
+    with the eight named countries listed in the world between them, holding nothing.
+    Two actors looks like a society and is not one when both of them are aggregates of
+    the very parties also standing there: the plan compresses the members to satisfy the
+    count and displays them to look populated, which claims them twice.
+    """
+
+    plan = grazing_plan(equipped=False)
+    # A second acting aggregate, so "at most one party acts" no longer holds.
+    plan["entities"].insert(
+        1,
+        {
+            "name": "the three townships in common",
+            "structural_type": "coalition",
+            "role": "the shareholders acting as one body when they agree",
+            "representation_scale": "organization",
+            "represents_count": 3,
+            "decides": True,
+            "authority": "settles a common position when the townships agree one",
+            "why_material": "a common position is what the committee acts on",
+            "terminal_state_it_can_change": "moves the position the committee reads",
+            "information_received": "what each township says at the meeting",
+            "if_removed": "the committee has no common position to act on",
+            "evidence_claim_ids": ["c-g2"],
+        },
+    )
+    plan["affordances"].append(
+        {
+            "name": "settle a common position",
+            "meaning": "the townships in common settle their position",
+            "actor": "the three townships in common",
+            "target": "",
+            "authority_required": "the townships' common agreement",
+            "preconditions": "",
+            "visibility": "public",
+            "duration_seconds": 0,
+            "changes": [{"op": "set", "target": "raised stocking limit announced", "value": True}],
+            "evidence_claim_ids": ["c-g2"],
+        }
+    )
+    plan["processes"][0]["participants"].append("the three townships in common")
+
+    errors = _validate(plan)
+    assert "INERT_PARTICIPANT" in _defects(errors), errors
+    inert = next(e for e in errors if e.startswith("INERT_PARTICIPANT"))
+    assert "stand in for their members" in inert, "the refusal names the contradiction"
+    for township in ("Ardgour", "Beinn Dubh", "Corran"):
+        assert township in inert
+
+
 def test_clearing_decides_does_not_silence_the_society_gate() -> None:
     """The escape the old error text handed out, closed.
 
@@ -625,3 +707,129 @@ def test_the_defect_and_its_fix_differ_only_in_what_the_parties_can_do() -> None
     assert len(actors_with_actions) == 4
     node = spec["process"]["nodes"][0]
     assert set(node["participants"]) == actors_with_actions
+
+
+# ---------------------------------------------------------------------------
+# The society, run through the real engine
+# ---------------------------------------------------------------------------
+
+
+def _cited(plan: Any, out: set[str] | None = None) -> set[str]:
+    out = set() if out is None else out
+    if isinstance(plan, dict):
+        for key, value in plan.items():
+            if key == "evidence_claim_ids" and isinstance(value, list):
+                out |= {str(v) for v in value}
+            else:
+                _cited(value, out)
+    elif isinstance(plan, list):
+        for item in plan:
+            _cited(item, out)
+    return out
+
+
+def _compiled(plan: dict[str, Any], gateway: Any) -> Any:
+    compilation, _mapping = lower_plan(parse_semantic_plan(plan))
+    bundle = build_bundle(
+        {
+            "world_spec": compilation["world_spec"],
+            "uncertainties": compilation["uncertainties"],
+            "world_facts": compilation["world_facts"],
+            "required_reality_facts": compilation["required_reality_facts"],
+            "reality": {
+                "subject_entity": compilation["subject_entity"],
+                "resolution_units": compilation["resolution_units"],
+                "target_outcome": compilation["target_outcome"],
+                "expected_participants": compilation["expected_participants"],
+                "as_of": AS_OF.isoformat(),
+                "horizon": HORIZON.isoformat(),
+            },
+            "claims": [
+                dict(CLAIMS[c], id=c, published_at="2026-03-01T00:00:00+00:00")
+                for c in sorted(_cited(plan) & KNOWN)
+            ],
+        }
+    )
+    return compile_world(
+        ResolutionContract(
+            question=str(plan["resolution"]["question"]),
+            as_of=AS_OF,
+            horizon=HORIZON,
+            subject_entity=bundle.subject_entity,
+            resolution_units=bundle.resolution_units,
+            terminal=bundle.spec.terminal,
+            target_outcome=bundle.target_outcome,
+            expected_participants=bundle.expected_participants,
+        ),
+        bundle.evidence_store.view(AS_OF),
+        bundle.spec,
+        bundle.uncertainties,
+        bundle.world_facts,
+        gateway=gateway,
+        seed=0,
+        max_branches=2,
+    )
+
+
+def test_a_position_stated_by_one_party_reaches_the_others_in_a_real_run() -> None:
+    """W5 end to end, through the engine rather than through the compiled artifact.
+
+    Corran presses for a higher limit — the act the record attributes to it — and nobody
+    else acts, so anything the others learn, they learned from Corran. The assertion is
+    on the runtime's own three transitions, which it records separately: the message
+    passed visibility, was DELIVERED, and was NOTICED. Across the whole artifact tree
+    that had never once happened between two actors — the six `deliver_information`
+    events in it are four environment drops with no author and two with empty text.
+    """
+
+    plan = grazing_plan(equipped=True)
+    probe = ProgrammableGateway(
+        {
+            "actor_decision": wait_decision("probe"),
+            "reflect": {"beliefs_update": [], "new_memories": []},
+        }
+    )
+    spec = _compiled(plan, probe).spec
+    by_name = {e.name: e.entity_id for e in spec.entities}
+    corran = by_name["Corran"]
+    corran_action = next(
+        a.action_id for a in spec.actions if corran in a.eligible_actors and "presses" in a.meaning
+    )
+
+    def decide(ctx: dict[str, Any]) -> dict[str, Any]:
+        if ctx.get("actor_id") == corran:
+            return {
+                "plan_disposition": "continue",
+                "action_mode": "compiled_action",
+                "compiled_action_id": corran_action,
+                "params": {},
+                "reasoning": "the hill can carry more",
+            }
+        return wait_decision("waiting to hear what the others say")
+
+    gw = ProgrammableGateway(
+        {"actor_decision": decide, "reflect": {"beliefs_update": [], "new_memories": []}}
+    )
+    result = run(_compiled(plan, gw), gw, seed=0)
+
+    # Corran really acted, through the compiled affordance and not by invention.
+    assert any(d.intent.get("action_id") == corran_action for d in result.actor_decisions), (
+        "Corran never took the act the record attributes to it"
+    )
+
+    # The message Corran's act carried, as the runtime built it.
+    messages = {
+        e.event_id
+        for e in result.event_ledger
+        if e.kind == "deliver_information" and e.actor_id == corran
+    }
+    assert messages, "stating a position produced no message at all"
+
+    noticed_by = {
+        d.actor_id for d in result.actor_decisions if messages & set(d.noticed_observation_ids)
+    }
+    assert noticed_by, "no party in the world could tell that Corran had said anything"
+    assert corran not in noticed_by, "nobody is told what they themselves just did"
+    assert noticed_by & {by_name["Ardgour"], by_name["Beinn Dubh"]}, (
+        "the other townships must be able to hear a position, not only the committee"
+    )

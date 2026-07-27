@@ -98,8 +98,13 @@ def test_a_premature_action_is_rejected_and_nothing_is_recorded() -> None:
     assert not world.get_records("positions")
     for d in result.actor_decisions:
         if d.stage == "preparation":
-            assert d.intent["action_id"] in ("record_position", "")
-            assert d.intent["mode"] in ("compiled_action", "wait")
+            # A record with NO intent at all is the strongest form of this property, not
+            # an exception to it: a `no_feasible_action` or `non_decision` wake is on the
+            # ledger precisely because no model was called and no intention was formed.
+            # Indexing asserted that every wake produced an intention — a different, and
+            # false, claim from "nothing was substituted".
+            assert d.intent.get("action_id", "") in ("record_position", "")
+            assert d.intent.get("mode", "wait") in ("compiled_action", "wait")
 
 
 def test_the_rejection_reason_comes_back_to_the_actor_who_was_refused() -> None:
