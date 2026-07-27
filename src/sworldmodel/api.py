@@ -41,6 +41,7 @@ from .models import ForecastResult, ResolutionContract
 from .outcomes import aggregate
 from .repair import RepairLog, RepairPlan, plan_repair
 from .research import ResearchBundle, assemble_bundle
+from .responsibility import classify_responsibility
 from .structures import (
     StructuralAlternative,
     StructuralAssessment,
@@ -1479,13 +1480,20 @@ def run_forecast(
         # kept live so that flipping the refusal policy to a published
         # causal_simulation_valid=false needs no change on either side of the seam.
         world_review_blocking=review.world_review_blocking,
-        # `responsibility=` is deliberately NOT wired yet: `classify_responsibility`
-        # correctly refuses any content-predicated terminal (count(c, where=...)) because
-        # replaycore.ReplayWorld.get_records() reconstructs collection cardinality only
-        # and hands back empty placeholder dicts, so the mandatory §14 replay tests cannot
-        # run. Wiring it today would withhold the answer on every actor world in the repo
-        # for a defect in the replay core rather than in the forecast. It goes in the
-        # moment `get_records` reconstructs record CONTENT.
+        # D6/FI-3, the responsibility gate. It was held out until FD-42 was fixed:
+        # `classify_responsibility` refuses any content-predicated terminal
+        # (count(c, where=...)), and while ReplayWorld.get_records() reconstructed
+        # collection cardinality only — handing back empty placeholder dicts — that
+        # refusal covered every actor world in the repo. Wiring it then would have
+        # withheld answers for a defect in the replay core rather than in the forecast.
+        # get_records() now reconstructs record CONTENT, so the mandatory §14 replay
+        # tests actually run and the gate decides on what the run did.
+        responsibility=classify_responsibility(
+            run_result.branch_outcomes,
+            events=run_result.event_ledger,
+            actor_decisions=run_result.actor_decisions,
+            world=compiled,
+        ),
     )
     ctx = TraceContext(
         contract=contract,

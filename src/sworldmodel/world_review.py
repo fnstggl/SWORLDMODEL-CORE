@@ -697,61 +697,81 @@ def _production_stages(
 # Cadence (FD-25, FD-31)
 # ---------------------------------------------------------------------------
 
-_PERIOD_UNIT_SECONDS = {"W": 604800.0, "D": 86400.0, "H": 3600.0, "M": 60.0, "S": 1.0}
 
+def _declared_recurrence(proc: Any) -> tuple[str, str, str, int] | None:
+    """A compiled process's recurrence declaration: (period, start, end, self-report).
 
-def _declared_period_seconds(proc: Any) -> float | None:
-    """The recurrence period a compiled process declares, in seconds, or None.
+    The semantic layer emits a first-class cadence — ``recurrence_period`` as an ISO-8601
+    duration, ``recurrence_start``/``recurrence_end`` as tz-aware ISO datetimes, and
+    ``recurrence_firings`` as the count its own generator produced. An empty period is the
+    distinction that matters: it separates "declared a cadence over a window" from "typed
+    N timestamps by hand", and only the first can be checked against anything.
 
-    The semantic layer is growing a first-class recurrence declaration (``every`` with
-    ``from``/``until``) and the ruling is that it must survive lowering onto the compiled
-    process rather than being expanded away into a flat occurrence list — an expansion is
-    what runs, the declaration is what can be audited. Until that attribute exists there
-    is nothing here to read, and the caller must SAY it could not verify the cadence
-    rather than passing quietly: a gate that cannot run must never read as a gate that
-    ran and approved.
-
-    Tolerant of the shapes the declaration might arrive in — a number of seconds, a
-    ``timedelta``, or an ISO-8601 duration of fixed-length units ("P1W", "PT12H").
-    Months and years are deliberately unsupported: they are not fixed lengths, so a
-    period expressed in them cannot be checked against timestamps without a calendar.
+    ``getattr`` because :class:`sworldmodel.worldspec.ExternalProcess` does not carry these
+    fields yet, so ``parse_world_spec`` drops them and this returns None for every world
+    today. That is the inert path, and it is why the caller SAYS it could not verify the
+    cadence instead of passing: a gate that cannot run must never read as a gate that ran
+    and approved. When the fields land the same call starts returning declarations and the
+    check begins doing real work with no other change.
     """
 
-    from datetime import timedelta
-
-    raw = next(
-        (
-            value
-            for attr in ("every", "period", "recurrence", "recurs_every")
-            if (value := getattr(proc, attr, None)) is not None
-        ),
-        None,
+    period = str(getattr(proc, "recurrence_period", "") or "").strip()
+    if not period:
+        return None
+    return (
+        period,
+        str(getattr(proc, "recurrence_start", "") or "").strip(),
+        str(getattr(proc, "recurrence_end", "") or "").strip(),
+        int(getattr(proc, "recurrence_firings", 0) or 0),
     )
-    if raw is None:
-        return None
-    if isinstance(raw, timedelta):
-        return raw.total_seconds()
-    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
-        return float(raw) or None
-    period = getattr(raw, "every", None) or getattr(raw, "period", None) or raw
-    text = str(period).strip().upper()
-    if not text.startswith("P"):
-        return None
-    total, number, in_time = 0.0, "", False
-    for char in text[1:]:
-        if char == "T":
-            in_time = True
-        elif char.isdigit() or char == ".":
-            number += char
-        elif char in _PERIOD_UNIT_SECONDS and number:
-            unit = "M" if (char == "M" and in_time) else char
-            if char == "M" and not in_time:
-                return None  # months are not a fixed length
-            total += float(number) * _PERIOD_UNIT_SECONDS[unit]
-            number = ""
-        else:
-            return None
-    return total or None
+
+
+def _recurrence_disagreement(declared: tuple[str, str, str, int], occurrences: list[Any]) -> str:
+    """Why the enumerated occurrences are not this declaration's consequence, or "".
+
+    The count is re-derived here by stepping the declared period across the declared
+    window, never read from ``recurrence_firings`` — a self-reported firing count is the
+    FD-25 shape again, a world grading its own homework. Stepping rather than dividing is
+    what makes a monthly cadence over a quarter three and not "3.02".
+    """
+
+    from .semantic_plan import firings_between, parse_period
+
+    text, start_text, end_text, reported = declared
+    period = parse_period(text)
+    if period is None or not period.is_positive():
+        return f"the declared period {text!r} is not a usable ISO-8601 duration"
+    try:
+        first = datetime.fromisoformat(start_text)
+        last = datetime.fromisoformat(end_text)
+    except ValueError:
+        return f"the declared window ({start_text!r} to {end_text!r}) is not two datetimes"
+    expected = firings_between(first, last, period)
+    if reported and reported != expected:
+        return (
+            f"it reports {reported} firings, and stepping {text} from {start_text} to "
+            f"{end_text} yields {expected}"
+        )
+    if len(occurrences) != expected:
+        return (
+            f"{len(occurrences)} occurrences are enumerated, and stepping {text} across "
+            f"the declared window yields {expected}"
+        )
+    stamps: list[datetime] = []
+    for occ in occurrences:
+        try:
+            stamps.append(datetime.fromisoformat(str(occ.at)))
+        except (TypeError, ValueError):
+            return "an occurrence carries no readable timestamp to check the cadence against"
+    when = first
+    for stamp in sorted(stamps):
+        if stamp != when:
+            return (
+                f"an occurrence sits at {stamp.isoformat()} where stepping {text} from "
+                f"{start_text} puts it at {when.isoformat()}"
+            )
+        when = period.step(when)
+    return ""
 
 
 def _repetition_groups(proc: Any, lineage: set[str]) -> list[tuple[str, list[Any]]]:
@@ -1180,11 +1200,11 @@ def _causal_period_findings(
     findings: list[AuditFinding] = []
     moments = sorted({at for _label, at, eff in effects if at and _effect_write(eff)[0] in lineage})
     crowded: list[str] = []
-    repeating: list[tuple[str, str, list[Any], float | None]] = []
+    repeating: list[tuple[str, str, list[Any], tuple[str, str, str, int] | None]] = []
     for proc in spec.external_processes:
         for what, occurrences in _repetition_groups(proc, lineage):
             stamps = {str(occ.at) for occ in occurrences if occ.at}
-            repeating.append((proc.process_id, what, occurrences, _declared_period_seconds(proc)))
+            repeating.append((proc.process_id, what, occurrences, _declared_recurrence(proc)))
             if len(stamps) < len(occurrences):
                 crowded.append(
                     f"{proc.process_id} repeats '{what}' {len(occurrences)} times at "
@@ -1232,7 +1252,7 @@ def _causal_period_findings(
 
 
 def _cadence_finding(
-    repeating: list[tuple[str, str, list[Any], float | None]],
+    repeating: list[tuple[str, str, list[Any], tuple[str, str, str, int] | None]],
 ) -> AuditFinding:
     """Whether a repeated process's cadence could be checked against a declaration.
 
@@ -1269,41 +1289,30 @@ def _cadence_finding(
             severity="MEDIUM",
         )
     wrong = sorted(
-        f"{pid} ('{what}')"
-        for pid, what, occurrences, period in repeating
-        if period is not None and not _spacing_matches(occurrences, period)
+        f"{pid} ('{what}'): {why}"
+        for pid, what, occurrences, declared in repeating
+        if declared is not None and (why := _recurrence_disagreement(declared, occurrences))
     )
     if wrong:
         return _mech(
             "recurrence_is_declared",
             "HIGH",
-            f"the occurrences contradict the declared recurrence: {wrong} — the world "
-            "runs to a different cadence than the one it claims, so the enumerated count "
-            "is not the declaration's consequence",
-            "computed from the compiled world: gaps between consecutive occurrences "
-            "against each process's declared period",
+            f"the occurrences contradict the declared recurrence: {wrong} — the world runs "
+            "to a different cadence than the one it claims, so the enumerated count is not "
+            "the declaration's consequence and the count is deciding the answer by itself",
+            "computed from the compiled world: each process's declared period stepped "
+            "across its declared window, re-derived rather than read from the count the "
+            "process reports for itself",
         )
     return _mech(
         "recurrence_is_declared",
         "PASS",
-        "every repeated process declares a recurrence period and its occurrences keep to it",
-        "computed from the compiled world: gaps between consecutive occurrences against "
-        "each process's declared period",
+        "every repeated process declares a recurrence period, and stepping that period "
+        "across the declared window reproduces exactly the occurrences the world contains",
+        "computed from the compiled world: each process's declared period stepped across "
+        "its declared window, re-derived rather than read from the count the process "
+        "reports for itself",
     )
-
-
-def _spacing_matches(occurrences: list[Any], period: float, *, tolerance: float = 0.25) -> bool:
-    """Do consecutive occurrences sit roughly one declared period apart?"""
-
-    stamps: list[datetime] = []
-    for occ in occurrences:
-        try:
-            stamps.append(datetime.fromisoformat(str(occ.at)))
-        except (TypeError, ValueError):
-            return False
-    stamps.sort()
-    gaps = [(b - a).total_seconds() for a, b in zip(stamps, stamps[1:], strict=False)]
-    return bool(gaps) and all(abs(gap - period) <= tolerance * period for gap in gaps)
 
 
 def _reads_fields(value: Any) -> set[str]:

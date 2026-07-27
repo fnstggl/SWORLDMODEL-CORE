@@ -64,11 +64,10 @@ from .replaycore import (
     group_events_by_branch,
     initial_fields_from_world,
     reevaluate_terminal,
-    replay_fields,
+    replay,
     terminal_ast_from_world,
     terminal_field_reads,
 )
-from .worldspec import Expr, parse_expr
 
 __all__ = [
     "classify_responsibility",
@@ -283,57 +282,6 @@ def _spec_of(world: Any) -> Any:
     return world if spec is None else spec
 
 
-# Collection/event aggregates that read a record's CONTENT rather than how many records
-# there are. ``sum`` and ``values`` always read ``record['value']``; ``count``,
-# ``exists`` and ``event_count`` do so only when they carry a where-predicate.
-_CONTENT_READING_ALWAYS = ("sum", "values")
-_CONTENT_READING_WITH_PREDICATE = ("count", "exists", "event_count")
-
-
-def _content_reading_terminal_ops(terminal: Mapping[str, Any] | None) -> tuple[str, ...]:
-    """Aggregates in the terminal that read record content, which the replay cannot supply.
-
-    :class:`~sworldmodel.replaycore.ReplayWorld` reconstructs collection CARDINALITY from
-    the ledger and presents each record as an empty placeholder, deliberately carrying no
-    fabricated content. A cardinality terminal (``count('positions') >= 5``) replays
-    exactly. A terminal that predicates on content (``count('positions',
-    equals(item('value'), 'hold')) >= 5``) evaluates over blank placeholders and returns
-    a confident zero — the branch's real YES replays as NO, and the gate would report a
-    reproduction failure that is an artifact of the replay, not of the run.
-
-    So it is detected and named instead. The recorded ``append_record`` payloads DO carry
-    ``key``/``value``/``extra``, so this is reconstructable in principle; until the shared
-    replay core reconstructs them, the honest statement is that the mandatory
-    counterfactuals could not be evaluated for this terminal, and the gate refuses rather
-    than guessing in either direction.
-    """
-
-    found: set[str] = set()
-
-    def walk(node: Any) -> None:
-        if isinstance(node, Mapping):
-            node = parse_expr(node)
-        if not isinstance(node, Expr):
-            return
-        arity = len(node.args)
-        if node.op in _CONTENT_READING_ALWAYS or (
-            node.op in _CONTENT_READING_WITH_PREDICATE and arity > 1
-        ):
-            found.add(node.op)
-        for arg in node.args:
-            walk(arg)
-
-    for key in ("yes_when", "unresolved_when"):
-        node = (terminal or {}).get(key)
-        if node is None:
-            continue
-        try:
-            walk(node)
-        except ValueError:  # an expression this build cannot parse is not a content read
-            continue
-    return tuple(sorted(found))
-
-
 def _classify(
     branch_outcomes: Sequence[BranchOutcome],
     *,
@@ -353,22 +301,6 @@ def _classify(
                 "counterfactuals could not be computed and nothing verified what "
                 "produced this number"
             ),
-        )
-
-    content_ops = _content_reading_terminal_ops(terminal)
-    if content_ops:
-        return _refuse(
-            branch_outcomes,
-            reason=(
-                "the recorded terminal reads record content through "
-                + ", ".join(f"{op}(...)" for op in content_ops)
-                + ", which the shared replay core does not reconstruct — it replays "
-                "collection cardinality and presents each record as an empty "
-                "placeholder. Re-evaluating this terminal over those placeholders would "
-                "answer confidently and wrongly, so the mandatory counterfactuals could "
-                "not be run and no answer is published"
-            ),
-            error="replay_cannot_reconstruct_record_content",
         )
 
     weights_grounded = all(b.weight_grounded for b in branch_outcomes)
@@ -538,8 +470,8 @@ def _perturbations(
     if not ratios:
         return []
 
-    replayed, counts = replay_fields(events, lambda _e: True)
-    state = {**dict(initial), **replayed}
+    replayed = replay(events, lambda _e: True)
+    state = {**dict(initial), **replayed.fields}
     out: list[tuple[str, str | None]] = []
     for field_name in terminal_fields:
         base = _numeric(state.get(field_name))
@@ -548,7 +480,14 @@ def _perturbations(
         for ratio in sorted(ratios):
             probe = {**state, field_name: base * ratio}
             try:
-                resolved, outcome, _how = reevaluate_terminal(terminal, rendered, probe, counts)
+                resolved, outcome, _how = reevaluate_terminal(
+                    terminal,
+                    rendered,
+                    probe,
+                    replayed.counts,
+                    records=replayed.records,
+                    events=replayed.events,
+                )
             except Unreconstructable:
                 out.append((f"{field_name} x{ratio:.6g}", _UNRECONSTRUCTABLE))
                 continue

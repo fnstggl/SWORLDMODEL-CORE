@@ -34,6 +34,7 @@ import copy
 from typing import Any
 
 import test_causal_world_fidelity as T
+
 from _fakes import ProgrammableGateway
 from sworldmodel.world_review import mechanical_world_checks, review_world
 
@@ -313,7 +314,11 @@ def test_an_intermediate_nothing_reads_is_not_a_production_state() -> None:
             "description": "the harbour logs its weather index",
             "at": "2026-02-10T06:00:00+00:00",
             "changes": [
-                {"op": "set", "target": "harbour weather index", "value": {"kind": "literal", "value": 3}}
+                {
+                    "op": "set",
+                    "target": "harbour weather index",
+                    "value": {"kind": "literal", "value": 3},
+                }
             ],
         }
     )
@@ -494,6 +499,66 @@ def test_a_world_whose_processes_do_not_repeat_has_no_cadence_to_declare() -> No
 
     assert findings["recurrence_is_declared"].severity == "PASS"
     assert findings["world_skips_the_causal_period"].severity == "PASS"
+
+
+class _Occurrence:
+    """A dated occurrence, enough of one for the cadence check to read."""
+
+    def __init__(self, at: str) -> None:
+        self.at = at
+
+
+class _DeclaredProcess:
+    """An external process carrying the recurrence declaration the semantics layer emits.
+
+    Built by hand because :class:`sworldmodel.worldspec.ExternalProcess` does not carry
+    the four ``recurrence_*`` fields yet, so ``parse_world_spec`` drops them and no
+    compiled world can exercise this path. These two tests are what stops the bridge from
+    being wishful: they prove the check does real work the moment the fields arrive,
+    rather than sitting inert and green forever.
+    """
+
+    def __init__(self, period: str, start: str, end: str, firings: int) -> None:
+        self.process_id = "weekly infiltration"
+        self.recurrence_period = period
+        self.recurrence_start = start
+        self.recurrence_end = end
+        self.recurrence_firings = firings
+
+
+def test_a_declared_cadence_its_occurrences_obey_is_a_pass() -> None:
+    """Four weekly firings declared over three weeks, and four weekly firings enumerated."""
+
+    from sworldmodel.world_review import _cadence_finding, _declared_recurrence
+
+    process = _DeclaredProcess("P1W", "2026-01-05T06:00:00+00:00", "2026-01-26T06:00:00+00:00", 4)
+    occurrences = [_Occurrence(f"2026-01-{5 + 7 * i:02d}T06:00:00+00:00") for i in range(4)]
+    finding = _cadence_finding(
+        [(process.process_id, "adjust_field volume", occurrences, _declared_recurrence(process))]
+    )
+
+    assert finding.severity == "PASS"
+
+
+def test_the_declared_count_is_re_derived_and_not_taken_from_the_process() -> None:
+    """A process that reports its own firing count is grading its own homework.
+
+    The window holds four weekly firings. The world enumerates ten and reports ten, so a
+    check that compared the enumeration against the reported count would agree with
+    itself and pass. Stepping the declared period across the declared window is the only
+    reading that is not the world's own claim about itself.
+    """
+
+    from sworldmodel.world_review import _cadence_finding, _declared_recurrence
+
+    process = _DeclaredProcess("P1W", "2026-01-05T06:00:00+00:00", "2026-01-26T06:00:00+00:00", 10)
+    occurrences = [_Occurrence(f"2026-01-{5 + i:02d}T06:00:00+00:00") for i in range(10)]
+    finding = _cadence_finding(
+        [(process.process_id, "adjust_field volume", occurrences, _declared_recurrence(process))]
+    )
+
+    assert finding.severity == "HIGH"
+    assert "yields 4" in finding.finding
 
 
 # ---------------------------------------------------------------------------

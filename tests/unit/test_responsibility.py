@@ -577,11 +577,23 @@ def test_a_cardinality_terminal_replays_exactly() -> None:
     assert report.branch_counterfactuals[0].all_actor_output_removed == "NO"
 
 
-def test_a_content_predicated_terminal_refuses_instead_of_replaying_blanks() -> None:
-    """ReplayWorld reconstructs collection cardinality and presents each record as an
-    empty placeholder. `count('positions', equals(item('value'), 'hold'))` over blanks
-    answers zero — confidently and wrongly. The gate must say it could not run, not
-    report a reproduction failure that is an artifact of the replay.
+def test_a_content_predicated_terminal_replays_its_content_and_the_gate_runs() -> None:
+    """FD-42, and this test is the history of a blind spot rather than a plain assertion.
+
+    ``ReplayWorld`` used to reconstruct collection CARDINALITY and present each record as
+    an empty placeholder, so `count('positions', equals(item('value'), 'hold'))` replayed
+    over blanks and answered zero — confidently and wrongly. Every actor world in this
+    repo uses that shape. The gate could not tell a genuine reproduction failure from an
+    artifact of the replay, so it failed closed and refused to publish any of them.
+
+    Failing closed was right while the blind spot existed, and it is wrong now that it
+    does not: refusing a world the replay CAN reconstruct withholds an answer the system
+    has honestly earned. The replay reconstructs record content, so the terminal replays
+    to the live answer and the mandatory counterfactuals actually run.
+
+    The old assertions are kept in shape below — same world, same events, same branch —
+    so that if the reconstruction ever regresses to blanks, this test fails rather than a
+    refusal quietly returning and reading like caution.
     """
 
     world = _world(
@@ -622,11 +634,14 @@ def test_a_content_predicated_terminal_refuses_instead_of_replaying_blanks() -> 
         actor_decisions=[{"actor_id": "m0"}, {"actor_id": "m1"}],
         world=world,
     )
-    assert report.classification == RESPONSIBILITY_INVALID
-    assert not report.may_publish_answer
-    assert report.error == "replay_cannot_reconstruct_record_content"
-    assert "count(...)" in report.reason
-    assert "empty placeholder" in report.reason
-    # The refusal is explicit that the mandatory tests did not run.
-    assert report.tests_missing == REQUIRED_RESPONSIBILITY_TESTS
-    assert not report.gate_complete
+    # Two records both reading "hold" satisfy `>= 2`, so the live answer is YES. Over
+    # blank placeholders the same terminal counted zero holds and answered NO.
+    assert report.trace_reproducible, "the replay must reach the answer the run reached"
+    assert report.classification == ACTOR_CAUSED
+    assert not report.error
+    # The gate now runs rather than refusing: every mandatory counterfactual completed.
+    assert report.tests_missing == ()
+    assert report.gate_complete
+    assert report.may_publish_answer
+    # Deleting both actors' output removes both records, so the count cannot be met.
+    assert report.branch_counterfactuals[0].all_actor_output_removed == "NO"
