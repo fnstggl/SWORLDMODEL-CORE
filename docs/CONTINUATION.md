@@ -192,3 +192,25 @@ earlier in this programme.
    recharge** — which is false against that store. The fixture's own comment says the two
    variants "can honestly differ in what the record contains"; the harness does not implement
    that. The actor-free variant needs its own store.
+
+## OPERATING RULE — the integrator commits explicit paths, never `git add -A`
+
+**Twice now a broad `git add` has swept another agent's in-flight work into a commit whose
+message says nothing about it.** Both times the swept work was green and correct, so nothing
+broke — which is exactly why it kept happening.
+
+- `3e52001` ("The ordering hypothesis was wrong") also contained the entire `novel.py` /
+  `worldspec.py` world-authority fix.
+- `629bcc4` ("Ten pastcasts blamed the compiler for a network failure") also contained
+  `coverage.py` (+30/−2) and the new `tests/unit/test_coverage_constraint.py` (278 lines),
+  neither reviewed at integration nor mentioned in the message.
+
+Why it matters even when the code is fine: a commit message is the record of *why* a change
+exists. Work that lands under someone else's rationale is unreviewed by the integrator and
+undiscoverable by `git log` afterwards — and this programme's whole thesis is that an
+artifact must state what actually happened.
+
+**The rule:** `git add <explicit paths>` for the files the commit is about. If in-flight work
+from another agent needs saving, it gets its **own** commit, labelled as a checkpoint (see
+`633bac5` for the shape). `git status` before every commit; anything unexpected is either
+described or left for its owner.
