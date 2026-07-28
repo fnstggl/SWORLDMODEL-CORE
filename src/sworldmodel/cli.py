@@ -318,6 +318,12 @@ def cmd_forecast(args: argparse.Namespace) -> int:
             as_of=as_of,
             horizon=horizon,
             bundle=refusal.bundle,
+            # Research that completed under a refusal firing before the bundle existed.
+            # Ten sealed pastcasts whose true cause was total archive failure all
+            # reported `compiler_omission` and "no discovery pass at all", beside a
+            # research_trace.json listing 232 discovered URLs.
+            partial_live_trace=refusal.partial_live_trace,
+            partial_evidence_store=refusal.partial_evidence_store,
             repair_log=refusal.repair_log,
             # A refusal earned by the pre-rollout review has to carry that review, or
             # the one artifact that says WHY the run stopped is the one it does not

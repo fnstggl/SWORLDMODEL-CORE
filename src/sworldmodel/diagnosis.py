@@ -106,6 +106,13 @@ class ForecastRefused(SWorldModelError):
         self.stage = stage
         self.bundle = bundle
         self.repair_log = repair_log
+        # A refusal that fired before the bundle existed still did research, and the
+        # record of it rides on the cause. There is no ``ResearchBundle`` to build here
+        # — that type requires a ``WorldSpec``, and this run never produced one — so the
+        # trace and the store are carried in their own right rather than wrapped in a
+        # synthetic bundle asserting a world that does not exist.
+        self.partial_live_trace = getattr(cause, "partial_live_trace", None)
+        self.partial_evidence_store = getattr(cause, "partial_evidence_store", None)
         super().__init__(f"refused at {stage}: {cause}")
 
 
@@ -117,6 +124,12 @@ class RunDiagnosis:
     as_of: datetime
     horizon: datetime
     bundle: ResearchBundle | None = None
+    # Research that completed under a refusal which fired before the bundle existed.
+    # Without these the run reports zero discovery and zero fetches, and `fetch_failure`
+    # can never fire — so a total retrieval failure is filed as `compiler_omission`
+    # while `research_trace.json` beside it shows the queries and the rejected URLs.
+    partial_live_trace: dict[str, Any] | None = None
+    partial_evidence_store: Any = None
     compiled: CompiledWorld | None = None
     run_result: RunResult | None = None
     repair_log: RepairLog | None = None
@@ -136,7 +149,11 @@ class RunDiagnosis:
     # -- sections ------------------------------------------------------------
 
     def _trace(self) -> dict[str, Any]:
-        return dict((self.bundle.live_trace if self.bundle else None) or {})
+        live = (self.bundle.live_trace if self.bundle else None) or self.partial_live_trace
+        return dict(live or {})
+
+    def _store(self) -> Any:
+        return self.bundle.evidence_store if self.bundle else self.partial_evidence_store
 
     def research_planning(self) -> dict[str, Any]:
         t = self._trace()
@@ -211,7 +228,8 @@ class RunDiagnosis:
         rejected = [
             r for r in (t.get("sources_rejected") or []) if "claim not verified" in _reason(r)
         ]
-        store_claims = len(self.bundle.evidence_store.claims) if self.bundle else 0
+        store = self._store()
+        store_claims = len(store.claims) if store is not None else 0
         return {
             "extraction_calls": len(calls),
             "calls_returning_nothing": sum(1 for c in calls if not c.get("claims_returned")),
@@ -233,10 +251,11 @@ class RunDiagnosis:
     def epistemic_classification(self) -> dict[str, Any]:
         """Every stored claim with the class it carries and what supports it."""
 
-        if self.bundle is None:
+        store = self._store()
+        if store is None:
             return {"claims": [], "note": "research did not complete"}
         claims = []
-        for claim in self.bundle.evidence_store.all():
+        for claim in store.all():
             claims.append(
                 {
                     "id": claim.id,

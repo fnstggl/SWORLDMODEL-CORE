@@ -1418,8 +1418,17 @@ def run_forecast(
             else None
         )
         if replanned is None:
+            # `bundle=` carries the partial research record into the diagnosis. Without
+            # it the `fetch_failure` rule can never fire, so a run whose true cause was
+            # total retrieval failure is filed as `compiler_omission` and states that no
+            # discovery pass ran — while `research_trace.json` beside it shows the
+            # queries and the rejected URLs. Ten sealed pastcasts were all misdiagnosed
+            # this way. `_checkpoint_partial` has already read and written the partials;
+            # only this hand-off was missing.
             raise ForecastRefused(
-                exc, stage="compilation" if reached_compile else "research", repair_log=log
+                exc,
+                stage="compilation" if reached_compile else "research",
+                repair_log=log,
             ) from exc
         bundle = replanned
     except (TypeError, ValueError, KeyError) as exc:
@@ -1427,7 +1436,9 @@ def run_forecast(
         # and it still owes a diagnosis rather than a traceback.
         reached_compile = _checkpoint_partial(config, exc)
         raise ForecastRefused(
-            exc, stage="compilation" if reached_compile else "research", repair_log=log
+            exc,
+            stage="compilation" if reached_compile else "research",
+            repair_log=log,
         ) from exc
     _checkpoint_research(config, bundle)
     attempted: list[ResearchBundle] = []

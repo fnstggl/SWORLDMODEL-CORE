@@ -248,3 +248,47 @@ def test_a_store_with_nothing_admissible_at_the_cutoff_names_the_archive_gap() -
     assert causes.index("archive_coverage_failure") == 0, (
         "the evidence-stage cause must be named before any compiler-stage cause"
     )
+
+
+def test_research_that_happened_under_an_early_refusal_reaches_the_diagnosis() -> None:
+    """A refusal firing before the bundle exists still did its research, and the record
+    of it must reach the diagnosis.
+
+    Ten sealed pastcasts refused because ``web.archive.org`` was unreachable — 232 URLs
+    discovered, 0 fetched, every source rejected for "no archived capture". All ten
+    reported root cause ``compiler_omission`` and stated "this run's research record
+    contains no discovery pass at all", beside a ``research_trace.json`` in the same
+    directory listing every query and every rejection. The compile-stage raise passed no
+    research to the diagnosis, so its counters read zero and it named the one component
+    that was working.
+
+    There is deliberately no synthetic ``ResearchBundle`` here: that type requires a
+    ``WorldSpec``, and a run refused at compile never produced one. Wrapping a trace in a
+    bundle would assert a world that does not exist, which is the shape of defect this
+    whole vocabulary exists to prevent.
+    """
+
+    trace = {
+        "queries": ["fomc september 2024 decision"],
+        "attempted_urls": [f"https://news.test/{i}" for i in range(232)],
+        "sources_rejected": [
+            {"url": f"https://news.test/{i}", "reason": "no archived capture"} for i in range(232)
+        ],
+        "sources_fetched": [],
+    }
+    d = RunDiagnosis(
+        question="q",
+        as_of=AS_OF,
+        horizon=HORIZON,
+        partial_live_trace=trace,
+        failure=_gate("no_causal_producer"),
+        failure_stage="compilation",
+    )
+
+    # The run's own record, not zeros standing in for it.
+    assert d.discovery()["urls_considered_count"] == 232
+    assert d.fetching()["rejected_count"] == 232
+    assert d.fetching()["fetched_count"] == 0
+    # And it can no longer state that no discovery pass ran, because one did.
+    rendered = canonical_json(d.root_cause())
+    assert "no discovery pass at all" not in rendered

@@ -760,6 +760,15 @@ _CLAIM_LEXICONS: tuple[tuple[CandidateKind, frozenset[str]], ...] = (
 )
 
 
+# The kinds whose ``canonical_identity`` is a verbatim claim proposition rather than a
+# name — derived from the builder below so the two can never drift apart. For these, an
+# object's name occurring inside the identity means the claim MENTIONS that object, not
+# that the world represents the claim; see `_match_objects`.
+_PROPOSITION_IDENTITY_KINDS: frozenset[CandidateKind] = frozenset(
+    kind for kind, _ in _CLAIM_LEXICONS
+)
+
+
 def _claim_kind_candidates(
     claims: list[EvidenceClaim], ctx: _MaterialityContext
 ) -> list[EvidenceCandidate]:
@@ -1324,18 +1333,35 @@ def _match_objects(cand: EvidenceCandidate, spec: WorldSpecView) -> list[WorldOb
 
     For documents/channels, representation means *accessibility*: an actor must be
     able to perceive the underlying claims, so a document whose claims are reachable
-    by some actor is considered wired even without a dedicated object."""
+    by some actor is considered wired even without a dedicated object.
+
+    Identity matching compares *designations*. A claim-derived candidate's identity is
+    its whole proposition (``_claim_kind_candidates``), so finding a compiled object's
+    name inside it establishes only that the claim mentions that object — and every
+    claim retrieved for a question mentions its subject. That one-sided match certified
+    as REPRESENTED any claim naming the subject entity, whatever the world contained: on
+    a recorded eight-party OPEC+ world it passed six of the eight verified claims the
+    world had dropped entirely, and refused the world over one of the two whose wording
+    happened not to say "OPEC". Which absent claim reached the exclusion reviewer was
+    decided by a substring of its prose. `_semantic_match` already refuses exactly this
+    match for the same reason; the rule now reaches this branch too."""
 
     cand_claims = set(cand.claim_ids)
     ident = _norm(cand.canonical_identity)
     desc = _norm(cand.description)
+    identity_is_a_name = cand.kind not in _PROPOSITION_IDENTITY_KINDS
     matched: list[WorldObject] = []
     for obj in spec.objects:
         if cand_claims and cand_claims & set(obj.claim_ids):
             matched.append(obj)
             continue
         oname = _norm(obj.name)
-        if oname and ident and (oname in ident or ident in oname):
+        # Identity match. `ident in oname` — the object's own name carries the whole
+        # candidate identity — always names the thing. The converse, `oname in ident`,
+        # is identity only between designations: inside a *proposition* it says nothing
+        # but that the claim mentions the object by name, which is the one-sided match
+        # `_semantic_match` already refuses.
+        if oname and ident and (ident in oname or (identity_is_a_name and oname in ident)):
             matched.append(obj)
             continue
         if _semantic_match(cand, desc, obj):
