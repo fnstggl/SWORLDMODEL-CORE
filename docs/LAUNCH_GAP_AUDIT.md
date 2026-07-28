@@ -469,3 +469,23 @@ effect is that four more items per affected world now reach the exclusion review
 passes) and correctly strict (one real exclusion). "The gate is blocking our good world" was
 the wrong frame; the gate was right about the thing it refused and wrong about six things it
 waved through.
+
+### REFUTED — coverage does not punish multi-party worlds. It rewards them.
+
+I sent the coverage investigation with a named hypothesis: *"A world with more parties has
+more surface to cover, so a coverage rule that scales badly with party count would
+systematically punish exactly the worlds we want."* I flagged it as a hypothesis rather than a
+finding, and the evidence went the other way.
+
+- The **8-entity world passed** the deterministic coverage gate.
+- The only deterministic coverage refusal in that arm was a **1-entity world**.
+- The 8-party world **covered** a claim — Iraq's demand for a reassessment — that **all three
+  1-entity worlds failed to cover**, because it had Iraq as an entity carrying that claim.
+
+So parties are not coverage *burden*; parties are what **carries** claims. A world that
+represents the seven countries separately has somewhere to attach the seven countries'
+positions, and a world that compresses them into one aggregate has nowhere to put them. The
+compression this phase has been fighting makes coverage *harder to satisfy*, not easier.
+
+That reverses the framing I gave: coverage is not an obstacle standing between the compiler
+and a multi-party world. It is, if anything, an argument for one.
