@@ -412,3 +412,60 @@ Two further problems with that eleven-run record, from the same review:
 **The standing correction:** `parties_holding_acts` has been 1 in every measured world, in
 every arm, under every prompt variation tried so far. Nothing has moved it. That was the
 finding all along, and the ordering result was noise dressed as a difference.
+
+---
+
+## ADJUDICATED — the eight-party world's coverage refusal was CORRECT
+
+The first world this repository ever measured above two acting parties (eight entities, each
+of the seven OPEC+ countries holding its own affordance with a `send`) was refused by the
+coverage gate. The obvious temptation was that the gate was in the way. It was not.
+
+**The world genuinely omitted the claim, and it stays refused.** Run 06 cites 11 of the
+store's 19 verified claims. `c-cb1acde4e1e8` — *"the plan includes reviving the remaining
+one-third of a 1.65 million bpd supply cutback (roughly 550,000 bpd) in three monthly
+stages"* — appears in no compiled object and is not in `accessible_claim_ids`, so **not one of
+the eight actors could perceive it.** Eight parties deciding whether to agree a further
+increase, none of whom knows about the staged increase already scheduled. And the terminal
+reads *"beyond already announced adjustments"* — so what counts as already-announced is the
+hinge of the question, not background colour.
+
+**It was also cheap to satisfy, which is what makes "the planner must include it" a fair
+demand rather than a wish.** Three of the five worlds in the same arm — same frozen store,
+same compiler sha, same bench seed — did include it; run 00 wired it as a `world_facts` entry
+with `actor_view`, as did the recorded live run in `artifacts/phase2/geopolitical2`. One entry
+closes it. Runs 06 and 07 were the only two that dropped it, and they cited the fewest claims
+overall (11 and 9 of 19).
+
+So: **gate right, world wrong, and the planner has demonstrably done it correctly before on
+this exact store.**
+
+### What WAS wrong is separate, and it made the gate inconsistent in the permissive direction
+
+The same gate certified **six other claims in that same world as covered while they were
+absent in precisely the same sense** — no object, no accessibility. Their propositions contain
+the string "OPEC" and the world had an entity named "OPEC+", and `_match_objects` matched an
+object's name inside a candidate's whole proposition:
+
+```
+"OPEC+ has begun gradually restoring reduced production levels, with full resumption
+ of voluntary cuts scheduled for the coming months"
+      -> CERTIFIED COVERED, "represented by 'OPEC+' via actor"
+
+"The plan includes reviving the remaining one-third of a 1.65 million bpd supply
+ cutback (roughly 550,000 bpd) in three monthly stages"
+      -> EXCLUDED, challenged, refused the world
+```
+
+**Same fact, same absence, opposite verdicts, decided by a substring.** `_semantic_match`
+already refuses exactly this one-sided match and says why in its own docstring; the rule had
+simply never reached the name-containment branch.
+
+The fix is a **tightening** — it converts false passes into exclusions. On the five recorded
+worlds it flips no deterministic verdict, so it refuses nothing previously admitted; its live
+effect is that four more items per affected world now reach the exclusion reviewer.
+
+**The lesson for this phase:** the gate was simultaneously too permissive (six substring
+passes) and correctly strict (one real exclusion). "The gate is blocking our good world" was
+the wrong frame; the gate was right about the thing it refused and wrong about six things it
+waved through.
