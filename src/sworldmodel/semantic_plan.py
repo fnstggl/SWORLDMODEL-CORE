@@ -1586,15 +1586,28 @@ def _exclusion_quality_errors(plan: SemanticPlan) -> list[str]:
     refuse a world that is right — every correct exclusion can be written out in full,
     and writing it out is all this asks.
 
-    WHAT IT DID NOT DO, MEASURED. This rule, ``_aggregate_errors`` and
-    ``_absorbed_party_errors`` were benched together against a fresh N=10 control at the
-    same commit, same store, same question, same bench seed. The planner complied with
-    every one of them — in the treated arm each exclusion names one party and states what
-    the record attributes to it, and each aggregate carries its justification — and built
-    the same world anyway: ``parties_holding_acts`` 0 in 5 of 5 worlds against 1 in 8 for
-    the control, Fisher exact p = 1.000. The asymmetry was real, measurable and is now
-    closed; closing it did not change what the planner builds. Do not re-run this
-    experiment expecting the metric to move, and do not read these rules as a fix for it.
+    WHAT IT DID AND DID NOT DO, MEASURED. This rule, ``_aggregate_errors`` and
+    ``_absorbed_party_errors`` were benched together (`scripts/society_bench.py`, N=10)
+    against a control frozen at the same commit — same store, same question, same cutoff,
+    same bench seed, the two files here the only difference between the two trees.
+
+        control    8 worlds / 10 runs   parties_holding_acts  0x5 1x2 2x1   >=2 in 1 of 8
+        treated    5 worlds / 10 runs   parties_holding_acts  1x3 2x1 8x1   >=2 in 2 of 5
+        Fisher exact, two-sided: p = 0.510 — NOT DISTINGUISHABLE.
+
+    **The pre-registered test is a negative and must be read as one:** the treated arm
+    needed >= 4 of 5 to separate from the control and showed 2. Everything else below is
+    descriptive and uncorrected for multiplicity, and none of it is a result.
+
+    What the treated arm did contain, for the record rather than as a claim: one world
+    with eight parties each holding its own act and seven ``send`` changes between them —
+    the first world in this repository's measured history above two — and no
+    factual-resolution worlds at all, against five of eight in the control. It was
+    refused by the coverage gate over one claim about a 550,000 bpd cutback revival, not
+    on anything to do with its parties. Whether any of that survives a larger N is
+    unmeasured. The planner did comply with every rule here: in the treated arm each
+    exclusion names one party and states what the record attributes to it, and each
+    aggregate carries its justification.
     """
 
     errors: list[str] = []
@@ -2023,14 +2036,16 @@ def _absorbed_party_errors(
     the check does nothing at all when the caller supplies no claim entity lists — the
     validator never guesses at evidence it was not handed.
 
-    ITS PRICE, MEASURED. In the N=10 treated arm this rule refused one plan outright
-    (the arm produced 5 worlds against the control's 8, and 2 of the 3 lost runs are
-    attributable to these rules — this one and the rewritten participant-count message).
-    Neither refusal hit a world that was right: both plans read a claim naming seven
-    countries as authority for one party while six of them appeared nowhere. But the
-    attrition is real, it is the denominator the headline is measured over, and at this
-    N it is itself inside the noise (8/10 vs 5/10, Fisher exact p = 0.35). Anyone
-    tightening this further should bench the denominator, not only the headline.
+    ITS PRICE, MEASURED. The treated arm produced 5 worlds where the control produced 8.
+    Of its five plan-stage refusals, four are pre-existing rules (an actor with no
+    actor_moment seat twice, DECORATIVE_ACTOR, INERT_PARTICIPANT naming all seven
+    countries — that last one is the multi-party regime being entered and then failed,
+    which the old prompt never reached) and one is the rewritten participant-count
+    message, which no longer offers "lower expected_participants" as a free way out.
+    None of the five hit a world that was right. But the attrition is real, it is the
+    denominator the headline is measured over, and at this N it is itself inside the
+    noise (8/10 vs 5/10, Fisher exact p = 0.35). Anyone tightening this further should
+    bench the denominator, not only the headline.
     """
 
     if not claim_entities:
