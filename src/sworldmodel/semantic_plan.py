@@ -21,6 +21,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from .grounding import ClaimSupport, Support
+
 # The single sentinel for a value the evidence does not establish. It survives to the
 # runtime as an absent initial, where reading it is an honest unresolved — never zero,
 # never False.
@@ -1428,9 +1430,27 @@ def _draw_combinations(
 ) -> list[dict[str, float]]:
     """Assignments of the other uncertainties, so one variable can be varied against them.
 
-    Bounded: beyond the cap only the first numeric alternative of each is used, which
-    keeps a wide plan from turning a static check into an exponential one. Under-, never
-    over-refusing: fewer background assignments can only mean fewer straddles found.
+    Bounded, because a wide plan must not turn a static check into an exponential one.
+    What the bound may not do is depend on plan WIDTH in a way an author can steer: FD-35
+    showed the same straddle accepted with five background uncertainties and refused with
+    three, because beyond the cap this fell back to *the first alternative of each*, and
+    a first alternative is whatever order the planner typed. A world escaped D3 by adding
+    uncertainties — by looking more thorough.
+
+    So the fallback is now the background's own extremes rather than its typing order.
+    Three narrowings, each entered only when the one before is still too wide:
+
+    1. every combination of every numeric alternative, when that fits under the cap;
+    2. every combination of each variable's MINIMUM and MAXIMUM draw — the corners of
+       the background box, which is where a straddle in the variable under test shows
+       up if it shows up anywhere;
+    3. the box's own corners: all-minimum, all-maximum, and the first-alternative
+       assignment kept so the previous behaviour is a subset of this one.
+
+    Still under-refusing, and now honestly so: a straddle that needs a *mixed interior*
+    background assignment is missed by (3). It is no longer steerable by adding
+    uncertainties, because the extremes of a background variable do not move when a
+    sibling is added beside it.
     """
 
     per_variable: list[list[tuple[str, float]]] = []
@@ -1442,15 +1462,42 @@ def _draw_combinations(
             per_variable.append(values)
     if not per_variable:
         return [{}]
-    total = 1
-    for values in per_variable:
-        total *= len(values)
-    if total > cap:
-        return [{name: value for values in per_variable for name, value in values[:1]}]
-    combos: list[dict[str, float]] = [{}]
-    for values in per_variable:
-        combos = [{**combo, name: value} for combo in combos for name, value in values]
-    return combos
+
+    def product(space: list[list[tuple[str, float]]]) -> list[dict[str, float]]:
+        combos: list[dict[str, float]] = [{}]
+        for values in space:
+            combos = [{**combo, name: value} for combo in combos for name, value in values]
+        return combos
+
+    def size(space: list[list[tuple[str, float]]]) -> int:
+        total = 1
+        for values in space:
+            total *= len(values)
+        return total
+
+    def lowest(values: list[tuple[str, float]]) -> tuple[str, float]:
+        return min(values, key=lambda v: v[1])
+
+    def highest(values: list[tuple[str, float]]) -> tuple[str, float]:
+        return max(values, key=lambda v: v[1])
+
+    if size(per_variable) <= cap:
+        return product(per_variable)
+
+    extremes = [list(dict.fromkeys([lowest(values), highest(values)])) for values in per_variable]
+    if size(extremes) <= cap:
+        return product(extremes)
+
+    corners: list[dict[str, float]] = [
+        dict(lowest(values) for values in per_variable),
+        dict(highest(values) for values in per_variable),
+        {name: value for values in per_variable for name, value in values[:1]},
+    ]
+    seen: list[dict[str, float]] = []
+    for combo in corners:
+        if combo not in seen:
+            seen.append(combo)
+    return seen
 
 
 def _all_citations(plan: SemanticPlan) -> list[tuple[str, tuple[str, ...]]]:
@@ -1636,7 +1683,80 @@ def _exclusion_quality_errors(plan: SemanticPlan) -> list[str]:
     return errors
 
 
-def _alternative_quality_errors(plan: SemanticPlan, cited: Any) -> list[str]:
+# ---------------------------------------------------------------------------
+# FD-30: a citation supports the claim it is attached to, or it grounds nothing
+#
+# `cited()` answered "is this id in the store", and four gates read that answer as
+# "is this value evidenced". Putting `c-f1` — "The Kestrel Bay ferry terminal recorded
+# 320000 crossings" — on both straddling alternatives of an AQUIFER world's runoff
+# fraction satisfied all four at once. The predicates below ask the question the gates
+# were always meant to ask, and they are deliberately the most generous reading of the
+# record that still means something: see :class:`sworldmodel.grounding.ClaimSupport`.
+#
+# All three are tri-state at heart. When the store's texts were not handed to the
+# validator no support question can be answered, and every one of them falls back to
+# `cited` — which is the old behaviour, so nothing gets stricter by accident — while
+# `_unchecked_note` puts the fact that nothing was checked into the refusal text.
+# ---------------------------------------------------------------------------
+
+
+def _unchecked_note(support: ClaimSupport) -> str:
+    """What to append when a gate could not consult the record it is judging."""
+
+    if support.can_read_claims:
+        return ""
+    return (
+        " (NOTE: the evidence store's texts were not supplied to this validator, so "
+        "whether the cited claims SUPPORT this was never checked — only that the ids "
+        "exist)"
+    )
+
+
+def _value_grounded(support: ClaimSupport, cited: Any, alt: SemanticAlternative) -> bool:
+    """Does the record a plan points at actually establish this alternative's value?
+
+    UNDECIDABLE falls back to `cited`, so a validator with no claim texts behaves exactly
+    as it did before rather than refusing worlds it cannot judge.
+    """
+
+    verdict = support.supports_value(alt.evidence_claim_ids, alt.value)
+    if verdict is Support.UNDECIDABLE:
+        return bool(cited(alt.evidence_claim_ids))
+    return verdict is Support.SUPPORTED
+
+
+def _world_names(plan: SemanticPlan) -> list[str]:
+    """Every name this world has actually considered.
+
+    Included entities, deliberately excluded candidates and the question's own subject.
+    The widest possible reading of "about this world", so the only citation it refuses is
+    one with no connection to the world at all — the FD-41 discipline, where matching a
+    claim against the subject ALONE was rejected because a world about the EU-Mercosur
+    agreement is legitimately settled by a claim about the European Commission.
+    """
+
+    names = [e.name for e in plan.entities]
+    names += [x.name for x in plan.excluded_candidates]
+    names.append(plan.subject_entity)
+    return [n for n in names if n and n.strip()]
+
+
+def _claim_grounded(
+    support: ClaimSupport, cited: Any, plan: SemanticPlan, ids: tuple[str, ...]
+) -> bool:
+    """Support for a prose claim — a zero-actor justification, an exemption.
+
+    There is no value to check, so the test is :func:`attest_profiles`' test moved from
+    an actor to a world: the cited record has to be about something this world names.
+    """
+
+    verdict = support.names_any_of(ids, _world_names(plan))
+    if verdict is Support.UNDECIDABLE:
+        return bool(cited(ids))
+    return verdict is Support.SUPPORTED
+
+
+def _alternative_quality_errors(plan: SemanticPlan, cited: Any, support: ClaimSupport) -> list[str]:
     """FD-10 / FD-11: an alternative carries meaning, or it carries nothing.
 
     FD-11's shape was a filler alternative — value ``"other"``, grounding "No specific
@@ -1645,6 +1765,11 @@ def _alternative_quality_errors(plan: SemanticPlan, cited: Any) -> list[str]:
     record leaves it open, what it changes about structure / actor state / process
     state, and how the terminal responds under it; and an alternative that nothing
     supports may not be the one the planner itself declares decisive.
+
+    FD-30: "nothing supports it" is now decided by reading the record, not by counting
+    ids. The filler that carried a live plan's entire YES mass was the *label* "other";
+    hanging any claim id on that label satisfied this gate, and hanging the store's
+    ferry-crossing claim on an aquifer world satisfied it too.
     """
 
     errors: list[str] = []
@@ -1673,22 +1798,32 @@ def _alternative_quality_errors(plan: SemanticPlan, cited: Any) -> list[str]:
                 )
             if (
                 alt.terminal_sensitivity == "decides_the_terminal"
-                and not cited(alt.evidence_claim_ids)
+                and not _value_grounded(support, cited, alt)
                 and alt.weight_is_ungrounded()
             ):
+                unsupported = bool(alt.evidence_claim_ids)
                 errors.append(
                     f"DEGENERATE_FILLER_ALTERNATIVE: {where} is declared to decide the "
-                    "terminal while citing no evidence and carrying a weight nothing "
-                    "supports — the answer would be this invented alternative and its "
+                    + (
+                        "terminal while the claims it cites "
+                        f"{list(alt.evidence_claim_ids)} say nothing about this value, "
+                        "and its weight is supported by nothing either"
+                        if unsupported
+                        else "terminal while citing no evidence and carrying a weight "
+                        "nothing supports"
+                    )
+                    + " — the answer would be this invented alternative and its "
                     "invented share of the mass. Correction boundary: cite the claims "
-                    "that establish this alternative as a real possibility, or give its "
-                    "weight a grounded provenance, or remove it and let the mass sit "
-                    "with the alternatives the record does support"
+                    "that establish this alternative as a real possibility — a claim "
+                    "that states this value, or a range or distribution containing it — "
+                    "or give its weight a grounded provenance, or remove it and let the "
+                    "mass sit with the alternatives the record does support"
+                    + _unchecked_note(support)
                 )
     return errors
 
 
-def _actor_admissibility_errors(plan: SemanticPlan, cited: Any) -> list[str]:
+def _actor_admissibility_errors(plan: SemanticPlan, cited: Any, support: ClaimSupport) -> list[str]:
     """CWF-5 / D5: no deciding entity is admissible only on stated, cited grounds; and
     an entity whose decisions cannot move anything terminal-relevant is decoration.
 
@@ -1697,6 +1832,15 @@ def _actor_admissibility_errors(plan: SemanticPlan, cited: Any) -> list[str]:
     change the answer AND the non-agent process is causally sufficient; and an actor may
     be present only when its decisions can reach the terminal — directly, or by reaching
     someone whose decisions can.
+
+    FD-38: the zero-actor half was self-certifying. It asked for two non-empty strings
+    and `cited()`, which per FD-30 means "some id exists", so a world could prove nobody
+    decides anything by pointing at the claim that records the quantity being decided.
+    The citation must now be about something the world has actually considered — an
+    entity it includes, a candidate it deliberately excluded, or the question's subject.
+    That is the widest test that still means anything, and it is deliberately not a test
+    of whether the justification is RIGHT: what the record says about decisions is
+    FD-38's remaining half and needs the whole store, not the cited slice of it.
     """
 
     errors: list[str] = []
@@ -1704,22 +1848,40 @@ def _actor_admissibility_errors(plan: SemanticPlan, cited: Any) -> list[str]:
     claim = plan.zero_actor_claim
 
     if not deciders:
+        unsupported_citation = (
+            claim is not None
+            and cited(claim.evidence_claim_ids)
+            and not _claim_grounded(support, cited, plan, claim.evidence_claim_ids)
+        )
         if (
             claim is None
             or not claim.no_material_decision.strip()
             or not claim.process_sufficiency.strip()
             or not cited(claim.evidence_claim_ids)
+            or unsupported_citation
         ):
             errors.append(
                 "ZERO_ACTOR_WORLD_UNJUSTIFIED: this world contains no deciding entity, "
                 "so nobody's choice can change the answer — that is admissible only "
-                "when the plan says so with evidence. Declare "
+                "when the plan says so with evidence"
+                + (
+                    f", and the claims this one cites {list(claim.evidence_claim_ids)} "
+                    "are about none of the parties this world has considered — not an "
+                    "entity it includes, not a candidate it excluded, not its subject. "
+                    "A claim about something else cannot show that nobody here decides "
+                    "anything"
+                    if unsupported_citation and claim is not None
+                    else ""
+                )
+                + ". Declare "
                 "zero_actor_justification {no_material_decision, process_sufficiency, "
                 "evidence_claim_ids}: which human or population decisions could bear on "
                 "this outcome and why the record shows none of them can move it, and "
                 "why the non-agent process alone is causally sufficient. Correction "
-                "boundary: that justification with cited claims, or the deciding "
-                "entities the world is missing"
+                "boundary: that justification with cited claims about the parties this "
+                "question actually turns on — naming each in entities or in "
+                "excluded_candidates — or the deciding "
+                "entities the world is missing" + _unchecked_note(support)
             )
         if plan.expected_participants:
             errors.append(
@@ -2171,7 +2333,9 @@ def _relabelled_from(plan: SemanticPlan, state: str, seen: frozenset[str]) -> se
     return leaves
 
 
-def _one_step_operational_errors(plan: SemanticPlan, cited: Any) -> list[str]:
+def _one_step_operational_errors(
+    plan: SemanticPlan, cited: Any, support: ClaimSupport
+) -> list[str]:
     """CWF-3 / D4: a terminal quantity produced in one non-agent step is not a simulation.
 
     A live run computed the whole answer as one cited quarter multiplied by one invented
@@ -2249,11 +2413,20 @@ def _one_step_operational_errors(plan: SemanticPlan, cited: Any) -> list[str]:
         if change.op != "set" and not (inputs & uncertain_states):
             continue
         exemption = plan.single_driver_exemption
+        # FD-30: the exemption is a prose claim about a documented model, so the record
+        # it points at has to be about this world at all. Citing the aquifer district's
+        # runoff series to license a ferry terminal's multiplier used to satisfy this.
+        exemption_unrelated = (
+            exemption is not None
+            and cited(exemption.evidence_claim_ids)
+            and not _claim_grounded(support, cited, plan, exemption.evidence_claim_ids)
+        )
         claimed = (
             exemption is not None
             and bool(exemption.empirical_model.strip())
             and bool(exemption.parameter_uncertainty.strip())
             and cited(exemption.evidence_claim_ids)
+            and not exemption_unrelated
         )
         if not claimed:
             errors.append(
@@ -2267,35 +2440,50 @@ def _one_step_operational_errors(plan: SemanticPlan, cited: Any) -> list[str]:
                 "the total is reached rather than announced. If one multiplier genuinely "
                 "stands for the system, declare single_multiplier_exemption "
                 "{empirical_model, parameter_uncertainty, evidence_claim_ids} citing the "
-                "documented model. Correction boundary: the production process for "
+                "documented model."
+                + (
+                    " This plan DOES declare that exemption, and it is not honoured "
+                    f"because the claims it cites {list(exemption.evidence_claim_ids)} "
+                    "are about none of the parties this world names — a documented model "
+                    "for something else does not document this one."
+                    if exemption_unrelated and exemption is not None
+                    else ""
+                )
+                + " Correction boundary: the production process for "
                 f"{state!r}, or that exemption"
             )
             continue
         lineage = _lineage_states(
             plan, {state} | (threshold.states_read() if threshold is not None else set())
         )
+        # FD-30: "no cited evidence" now means the cited claims do not establish the
+        # alternative's VALUE — a published band that does not contain it is not a
+        # published band for it, and an unrelated claim is not one at all.
         ungrounded = sorted(
             u.name
             for u in plan.uncertainties
             if u.affects_state in lineage
             and any(
-                not cited(a.evidence_claim_ids) and a.weight_is_ungrounded() for a in u.alternatives
+                not _value_grounded(support, cited, a) and a.weight_is_ungrounded()
+                for a in u.alternatives
             )
         )
         if ungrounded:
             errors.append(
                 "SINGLE_DRIVER_EXEMPTION_UNGROUNDED: the plan claims the single-"
                 f"multiplier exemption for {state!r}, but the parameter it rests on is "
-                f"not grounded — {ungrounded} carries alternatives with no cited "
-                "evidence and no supported weight, so the documented model is being used "
-                "to license invented numbers. Correction boundary: cite the evidence "
-                "that establishes those alternative values or their distribution, or "
-                "withdraw the exemption and model the process"
+                f"not grounded — {ungrounded} carries alternatives whose values no cited "
+                "claim states and whose weights nothing supports, so the documented "
+                "model is being used to license invented numbers. Correction boundary: "
+                "cite the evidence that establishes those alternative values or their "
+                "distribution — a claim stating the value, or a range or distribution "
+                "containing it — or withdraw the exemption and model the process"
+                + _unchecked_note(support)
             )
     return errors
 
 
-def _straddling_errors(plan: SemanticPlan, cited: Any) -> list[str]:
+def _straddling_errors(plan: SemanticPlan, cited: Any, support: ClaimSupport) -> list[str]:
     """CWF-4 / D3: ungrounded alternatives may not sit on both sides of the threshold.
 
     The failure this exists to end: a terminal comparing a quantity against a threshold,
@@ -2309,6 +2497,19 @@ def _straddling_errors(plan: SemanticPlan, cited: Any) -> list[str]:
     bisecting the plan's own production function between the two straddling draws, so the
     refusal can name the exact boundary the invented numbers were placed around without
     any number, domain or question family appearing in this file.
+
+    Two holes in that reading are closed here.
+
+    FD-29: this used to require BOTH straddling legs to be ungrounded, so citing one leg
+    silenced the gate entirely. The docstring's own rationale — that a cited value under
+    symmetric-ignorance weights is honestly priced as bounds — only holds when the RANGE
+    is cited, which is both legs. One cited leg beside one invented leg is the original
+    defect with a fig leaf: the invented number still decides which side of the threshold
+    its branch lands on, and it was admitted.
+
+    FD-30: "cited" used to mean "these ids exist". It now means the record states this
+    value, or a range or distribution containing it. Putting the store's ferry-crossing
+    claim on both legs of an aquifer straddle satisfied the old test completely.
     """
 
     errors: list[str] = []
@@ -2319,7 +2520,7 @@ def _straddling_errors(plan: SemanticPlan, cited: Any) -> list[str]:
         # Nothing supports the value, and nothing supports its probability. Either one
         # alone is legal: a cited value under honest symmetric-ignorance weights is the
         # shape of not knowing, and the runtime prices it as bounds.
-        return not cited(alt.evidence_claim_ids) and alt.weight_is_ungrounded()
+        return not _value_grounded(support, cited, alt) and alt.weight_is_ungrounded()
 
     for state, comparison, threshold in _quantity_comparisons(plan.terminal):
         seeds = {state} | (threshold.states_read() if threshold is not None else set())
@@ -2350,14 +2551,23 @@ def _straddling_errors(plan: SemanticPlan, cited: Any) -> list[str]:
                 if pair is None:
                     continue
                 low, high = pair
-                if ungrounded(low[0]) and ungrounded(high[0]):
+                loose = [side for side in (low, high) if ungrounded(side[0])]
+                if loose:
                     break_even = _break_even(
                         plan, state, comparison, threshold, u.affects_state, low, high, base
                     )
+                    which = (
+                        "neither value is established by the record and neither weight is supported"
+                        if len(loose) == 2
+                        else f"the {loose[0][1]:.6g} side is established by nothing — no "
+                        "cited claim states that value or a range containing it, and its "
+                        "weight is supported by nothing either, so it is a number the "
+                        "planner chose"
+                    )
                     errors.append(
                         "THRESHOLD_STRADDLING_UNGROUNDED_SCENARIOS: uncertainty "
-                        f"{u.name!r} offers {low[1]:.6g} and {high[1]:.6g} — neither "
-                        "value cited and neither weight supported — and the plan's own "
+                        f"{u.name!r} offers {low[1]:.6g} and {high[1]:.6g} — {which} — "
+                        "and the plan's own "
                         f"arithmetic puts them on opposite sides of the terminal on "
                         f"{state!r}"
                         + (
@@ -2375,20 +2585,37 @@ def _straddling_errors(plan: SemanticPlan, cited: Any) -> list[str]:
                         "threshold and do not restate the terminal"
                     )
                     break
-                misdeclared = sorted(
-                    {
-                        f"{a.value!r}"
-                        for a, _v, _s in evaluated
-                        if a.terminal_sensitivity == "immaterial_to_the_terminal"
-                    }
-                )
+                # FD-36. terminal_sensitivity is self-declared, and only one of its
+                # three values used to be checked: this fired on
+                # `immaterial_to_the_terminal`, and DEGENERATE_FILLER_ALTERNATIVE fires
+                # on `decides_the_terminal`, so declaring the middle value evaded both
+                # — which is what the adversary declared in every single attack.
+                #
+                # The arithmetic has just resolved these alternatives on opposite sides
+                # of the threshold. That IS `decides_the_terminal`, and it is a fact
+                # about the plan rather than an opinion about it, so any other
+                # declaration on a straddling alternative is now named. The middle value
+                # is not a smaller version of deciding: an alternative that MOVES the
+                # terminal shifts a quantity, and one that DECIDES it changes the
+                # answer, and the whole point of the field is to tell a reader which.
+                weaker = [
+                    a
+                    for a, _v, _s in evaluated
+                    if a.terminal_sensitivity and a.terminal_sensitivity != "decides_the_terminal"
+                ]
+                misdeclared = sorted({f"{a.value!r}" for a in weaker})
                 if misdeclared:
+                    declared = sorted({a.terminal_sensitivity for a in weaker})
                     errors.append(
                         f"TERMINAL_SENSITIVITY_MISDECLARED: uncertainty {u.name!r} "
-                        f"declares {misdeclared} immaterial to the terminal, but the "
-                        "plan's own arithmetic has its alternatives resolving "
-                        f"{state!r} on both sides of the threshold. Correction "
-                        "boundary: the terminal_sensitivity declaration on those "
+                        f"declares {misdeclared} {declared} — but the plan's own "
+                        "arithmetic has its alternatives resolving "
+                        f"{state!r} on both sides of the threshold, which is "
+                        "'decides_the_terminal' and nothing weaker. A declaration a "
+                        "planner writes is not evidence about its own plan, and this "
+                        "field is read by the gates that judge whether an invented "
+                        "value is carrying the answer. Correction boundary: the "
+                        "terminal_sensitivity declaration on those "
                         "alternatives"
                     )
                 break
@@ -3041,6 +3268,7 @@ def validate_semantic_plan(
     horizon: datetime | None = None,
     known_claim_ids: frozenset[str] | None = None,
     claim_entities: Mapping[str, tuple[str, ...]] | None = None,
+    claim_records: Mapping[str, Any] | None = None,
 ) -> list[str]:
     """Every reference resolves; every producer chain holds; nothing writes the answer.
 
@@ -3051,6 +3279,13 @@ def validate_semantic_plan(
     records them. It is optional and defaults to off: without it the validator has no
     evidence in front of it and does not guess at any, so the checks that read a cited
     claim's own names simply do not run.
+
+    ``claim_records`` maps a claim id to the claim itself — the store's own object, or a
+    mapping with the same field names. It is what turns ``cited`` from an existence
+    check into a support check (FD-30): with it, a gate can ask whether the record a
+    plan points at actually states the value hung on it. Like ``claim_entities`` it is
+    optional and off by default, and its absence is reported rather than assumed away:
+    every refusal that could not consult the record says so in its own message.
     """
 
     errors: list[str] = []
@@ -3343,9 +3578,26 @@ def validate_semantic_plan(
     known = known_claim_ids if known_claim_ids is not None else None
 
     def cited(ids: tuple[str, ...]) -> bool:
+        """These ids are all in the store. Existence — never, on its own, support.
+
+        FD-30: this predicate used to decide four separate gates (D3's straddle, D4's
+        single-multiplier exemption, D5's zero-actor justification, FD-11's filler
+        alternative), and every one of them fell to citing an arbitrary claim, because
+        an id that exists grounds anything. It is kept, under its real meaning, because
+        a citation to a claim that is NOT there is a different and worse finding; what
+        the four gates now ask is `support`, below.
+        """
+
         if not ids:
             return False
         return True if known is None else all(i in known for i in ids)
+
+    # The evidence store as a support test reads it. Built from whatever the caller
+    # handed over: with claim texts it can decide whether a cited record states the
+    # value it is attached to, and without them every support question answers
+    # UNDECIDABLE and the gates fall back to `cited` — visibly, in the message they
+    # print, because a check that could not run must not read as one that passed.
+    support = ClaimSupport.from_claims(claim_records, known=known)
 
     # Every citation in the plan, not just the ones a producer rule happens to read.
     # A live Tesla plan cited 'c-83b62bb5759f' — the real id with two digits transposed
@@ -3495,11 +3747,11 @@ def validate_semantic_plan(
     errors += _transfer_errors(plan)
     errors += _cadence_errors(plan)
     errors += _representation_record_errors(plan)
-    errors += _alternative_quality_errors(plan, cited)
-    errors += _actor_admissibility_errors(plan, cited)
+    errors += _alternative_quality_errors(plan, cited, support)
+    errors += _actor_admissibility_errors(plan, cited, support)
     errors += _society_errors(plan)
     errors += _aggregate_errors(plan, cited)
     errors += _absorbed_party_errors(plan, claim_entities)
-    errors += _one_step_operational_errors(plan, cited)
-    errors += _straddling_errors(plan, cited)
+    errors += _one_step_operational_errors(plan, cited, support)
+    errors += _straddling_errors(plan, cited, support)
     return errors

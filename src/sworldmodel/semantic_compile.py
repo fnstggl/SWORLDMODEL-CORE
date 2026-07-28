@@ -779,6 +779,12 @@ def semantic_compile_live(
     # seven nowhere in the plan. It reads names only; nothing here judges evidence
     # text, and the validator does nothing at all if this map is empty.
     claim_entities = {c.id: tuple(c.entities) for c in view.available()}
+    # FD-30. The validator's `cited()` was an existence check, so any id in the store
+    # grounded any value hung on it. Handing over the claims themselves is what lets the
+    # straddling gate, the single-multiplier exemption, the zero-actor justification and
+    # the filler gate ask whether the record actually SUPPORTS what cites it. Same
+    # cutoff-filtered view as the ids: a post-cutoff claim supports nothing.
+    claim_records = {c.id: c for c in view.available()}
     responses: list[Any] = []
 
     def build(
@@ -855,6 +861,7 @@ def semantic_compile_live(
         horizon=horizon,
         known_claim_ids=known,
         claim_entities=claim_entities,
+        claim_records=claim_records,
     )
     validator_rounds = 0
     while errors and validator_rounds < 2:
@@ -870,6 +877,7 @@ def semantic_compile_live(
             horizon=horizon,
             known_claim_ids=known,
             claim_entities=claim_entities,
+            claim_records=claim_records,
         )
     if errors:
         raise WorldIntegrityError(
@@ -911,6 +919,7 @@ def semantic_compile_live(
             horizon=horizon,
             known_claim_ids=known,
             claim_entities=claim_entities,
+            claim_records=claim_records,
         )
         if errors:
             plan, raw = build(raw, [f"validator: {e}" for e in errors[:16]], 3)
@@ -920,6 +929,7 @@ def semantic_compile_live(
                 horizon=horizon,
                 known_claim_ids=known,
                 claim_entities=claim_entities,
+                claim_records=claim_records,
             )
         if errors:
             raise WorldIntegrityError(
@@ -975,6 +985,7 @@ def semantic_compile_live(
             horizon=horizon,
             known_claim_ids=known,
             claim_entities=claim_entities,
+            claim_records=claim_records,
         )
         if errors:
             raise WorldIntegrityError(

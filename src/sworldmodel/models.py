@@ -236,12 +236,21 @@ class UncertaintyOutcome:
 
     ``field_effects`` maps a world-field name to the numeric/typed level it takes when
     this outcome is realized — delivered into the world as an observable data release.
-    (No notion of "signal" or "vote"; it is any typed field the compiler declared.)"""
+    (No notion of "signal" or "vote"; it is any typed field the compiler declared.)
+
+    ``evidence_claim_ids`` is what the record puts behind THIS outcome. It exists because
+    :attr:`UncertaintySpec.constraining_evidence_ids` is a per-variable union, and a union
+    cannot tell a straddle whose legs are both cited from one whose second leg was
+    invented beside a cited first (FD-51). It is a record, not a gate: support is decided
+    by whether a cited claim states the value (see
+    :class:`sworldmodel.grounding.ClaimSupport`), and attaching an id to one leg of a
+    range that covers both is bookkeeping rather than a defect."""
 
     value: str
     weight: BranchWeight
     field_effects: tuple[tuple[str, Any], ...] = ()
     description: str = ""
+    evidence_claim_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

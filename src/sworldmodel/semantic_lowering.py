@@ -1262,6 +1262,10 @@ def lower_plan(
                     "provenance": provenance,
                     "field_effects": [[field_id, alt.value]],
                     "description": alt.grounding,
+                    # FD-51. The union below loses which leg of a straddle a citation was
+                    # attached to, and the review had no way to say "this alternative,
+                    # specifically, rests on nothing".
+                    "evidence_claim_ids": sorted(alt.evidence_claim_ids),
                 }
             )
         uncertainties.append(

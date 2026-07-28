@@ -1856,6 +1856,12 @@ def parse_uncertainties(
                 if prov in _VALID_PROVENANCE
                 else WeightProvenance.SYMMETRIC_IGNORANCE
             )
+            # FD-51: which claims stand behind THIS alternative, filtered by the same
+            # store the variable's union is filtered by — a fabricated id must not
+            # survive here any more than it survives there.
+            outcome_ids = tuple(str(i) for i in (o.get("evidence_claim_ids") or []))
+            if available_ids is not None:
+                outcome_ids = tuple(i for i in outcome_ids if i in available_ids)
             parsed_outcomes.append(
                 UncertaintyOutcome(
                     value=str(o.get("value", "")),
@@ -1866,6 +1872,7 @@ def parse_uncertainties(
                     ),
                     field_effects=_field_effects(o.get("field_effects")),
                     description=str(o.get("description", "")),
+                    evidence_claim_ids=outcome_ids,
                 )
             )
         constraining = tuple(u.get("constraining_evidence_ids", []) or [])
